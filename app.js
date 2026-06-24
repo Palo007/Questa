@@ -1,7 +1,20 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.24-1955";
+const APP_VERSION = "v2026.06.24-2022";
 
+// Long-press delay (ms) before a stationary touch on a card is treated as a drag
+// pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 200.
+// KEEP IT SMALL. Research + this project's own history show Chrome Android commits the
+// touch stream to a SCROLL during a long stationary hold, BEFORE the timer fires; once
+// committed, touchmove is non-cancelable and the card freezes lifted while the page
+// scrolls. A short window (~200) beats that commit; raising it (e.g. 1000) makes the
+// freeze MORE likely, not less. The setting exists so it can be tuned on a real device.
+const DRAG_DELAY_DEFAULT = 200;
+function longPressMs(){
+  const v = (S.prefs && S.prefs.dragDelay);
+  const n = (v==null ? DRAG_DELAY_DEFAULT : +v);
+  return (isFinite(n) && n>=0) ? n : DRAG_DELAY_DEFAULT;
+}
 const STORE_KEY = "questa.save.v1";
 function freshState(){
   return {
@@ -1044,8 +1057,9 @@ function enableTouchDrag(card){
   // (press window AND active drag). It calls preventDefault() from the very
   // first move, so the browser's scroll-vs-drag arbitration can NEVER commit to
   // a scroll: our cancel is in force before the browser ever sees a cancelable
-  // move it could turn into a scroll. This closes the gap that let the page
-  // scroll while the card stayed lifted (the "hold longer then freeze" bug).
+  // move it could turn into a scroll. (NOTE: on Chrome Android this still loses
+  // if the stationary hold lasts long enough that the browser commits a scroll
+  // before LONGPRESS_MS elapses — see the LONGPRESS_MS comment. Keep it small.)
   card.addEventListener('touchstart',e=>{
     if(e.touches.length!==1) return;
     if(e.target.closest('.check')) return;        // don't hijack +/-/check taps
@@ -1054,7 +1068,7 @@ function enableTouchDrag(card){
     _tStartX=t.clientX; _tStartY=t.clientY; _tPointerY=t.clientY;
     let _lastY=t.clientY, _decided=false, _isScroll=false;
     clearTimeout(_tTimer);
-    _tTimer=setTimeout(()=>{ if(!_isScroll){ _decided=true; beginTouchDrag(card,t); } },200);  // long-press
+    _tTimer=setTimeout(()=>{ if(!_isScroll){ _decided=true; beginTouchDrag(card,t); } },longPressMs());  // long-press (Settings: drag delay)
 
     const onMove=ev=>{
       // Cancel EVERY move from the first one. Card is touch-action:none, but we
@@ -1105,9 +1119,9 @@ function beginTouchDrag(card,t){
   card.classList.add('dragging');
   card.style.touchAction='none';                 // browser must not scroll from this card now
   try{ if(navigator.vibrate) navigator.vibrate(15); }catch(_){ }
-  // NOTE: no document-level touch listeners. The card's own non-passive
-  // touchmove listener (bound at touchstart) drives the active drag, so our
-  // preventDefault has been in force since the first move of the gesture.
+  // NOTE: no document-level touch listeners. The card's own non-passive touchmove
+  // listener (bound at touchstart) drives the active drag, so preventDefault has
+  // been in force since the first move of the gesture.
   startAutoScroll();
 }
 function moveTouchDrag(x,y){
@@ -1429,15 +1443,19 @@ function openSettings(){
   h+='<label>Hover tooltip delay</label><div class="seg" id="setTipDelay">'+
     [['Instant',0],['0.5s',0.5],['1s',1],['2s',2]].map(o=>'<button class="'+(td===o[1]?'on':'')+'" onclick="setTipDelay('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
   h+='<div class="small" style="margin-top:6px">Delay before the date/value tooltip shows on the analytics heatmap and charts (default Instant).</div>';
+  const dd=(S.prefs.dragDelay==null?DRAG_DELAY_DEFAULT:S.prefs.dragDelay);
+  h+='<label>Card drag long-press delay (ms)</label>';
+  h+='<input type="number" id="setDragDelay" min="0" max="2000" step="50" value="'+dd+'">';
+  h+='<div class="small" style="margin-top:6px">How long to hold a card still before it lifts for reordering on touch (default '+DRAG_DELAY_DEFAULT+'). Lower = quicker pickup; higher values can make the card freeze while the page scrolls on some phones. Saved with Save above.</div>';
   h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue.</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
-  h+='<div class="settingsRow"><button class="btn danger" onclick="if(confirm(\'Erase ALL progress on this device?\')){localStorage.removeItem(STORE_KEY);S=freshState();save();applyWidth();closeSheet();render();}">Reset everything</button></div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="closeSheet()">Close</button></div>';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
+  h+='<div class="resetRow"><button class="btn resetMini" onclick="if(confirm(\'Erase ALL progress on this device? This cannot be undone.\')){localStorage.removeItem(STORE_KEY);S=freshState();save();applyWidth();closeSheet();render();}">Reset everything</button></div>';
   sheet.innerHTML=h;
   document.getElementById('scrim').classList.add('show');
 }
@@ -1447,6 +1465,8 @@ function setTipDelay(s){ S.prefs.tipDelay=s; save(); openSettings(); }
 function saveSettings(){
   S.char.name=document.getElementById('setName').value.trim()||'Adventurer';
   S.char.face=document.getElementById('setFace').value||'🧙';
+  const ddEl=document.getElementById('setDragDelay');
+  if(ddEl){ let n=parseInt(ddEl.value,10); if(!isFinite(n)||n<0) n=DRAG_DELAY_DEFAULT; n=Math.min(2000,n); S.prefs.dragDelay=n; }
   save(); render(); toast('Saved');
 }
 function exportData(){

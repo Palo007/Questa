@@ -81,9 +81,9 @@
   .ckmark{font-size:22px;font-weight:900;color:#fff;line-height:1}
   .task.shopitem .check{background:rgba(247,78,82,.12)}
   /* touch-action:none so the browser NEVER auto-scrolls from a touch that starts
-     on a card (which would commit a scroll before our long-press can claim it and
-     trigger "cancelable=false" interventions). We drive list scrolling manually
-     in JS during the pre-press phase instead — see enableTouchDrag. */
+     on a card (which would commit a scroll before our long-press can claim it).
+     We drive list scrolling manually in JS during the pre-press phase instead —
+     see enableTouchDrag / LONGPRESS_MS in app.js. */
   .task[draggable="true"]{cursor:grab;touch-action:none;transition:transform .18s ease,opacity .15s ease;
     -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
   /* the original card becomes a dim placeholder gap while its ghost is dragged */
@@ -155,8 +155,13 @@
     border-top:1px solid var(--line);max-height:92vh;overflow:auto;padding:16px 16px 26px}
   .sheet h3{margin:2px 0 12px}
   label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
-  input[type=text],textarea,select{width:100%;background:var(--panel);color:var(--ink);
+  input[type=text],input[type=number],textarea,select{width:100%;background:var(--panel);color:var(--ink);
     border:1px solid var(--line);border-radius:8px;padding:9px 10px;font-size:14px;font-family:inherit}
+  /* small, left-aligned destructive action, kept away from the common buttons */
+  .resetRow{display:flex;justify-content:flex-start;margin:18px 0 4px}
+  .btn.resetMini{flex:0 0 auto;width:auto;background:transparent;color:var(--red);
+    border:1px solid var(--red);border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600;opacity:.7}
+  .btn.resetMini:active{opacity:1}
   textarea{min-height:60px;resize:vertical}
   .seg{display:flex;gap:6px;flex-wrap:wrap}
   .seg button{flex:1;min-width:64px;background:var(--panel);border:1px solid var(--line);

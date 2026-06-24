@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.24-2127";
+const APP_VERSION = "v2026.06.24-2156";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 200.
@@ -1557,7 +1557,73 @@ function uploadFace(ev){
 }
 function removeFace(){ delete S.char.faceImg; save(); renderStats(); openSettings(); toast('Image removed'); }
 function esc(s){ return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ saveScroll(); TAB=b.dataset.tab; if(S.prefs){S.prefs.lastTab=TAB; save();} render(); });
+// Ordered list of screens; used by both the nav bar and swipe navigation.
+const TABS=['habits','dailies','todos','analytics','rewards'];
+// Switch to a tab by name. dir (-1 left / +1 right) drives an optional slide anim.
+function switchTab(tab,dir){
+  if(!tab||tab===TAB) return;
+  saveScroll();
+  TAB=tab;
+  if(S.prefs){ S.prefs.lastTab=TAB; save(); }
+  if(dir){
+    const v=document.getElementById('view');
+    if(v){
+      v.classList.remove('slideInL','slideInR');
+      // force reflow so re-adding the class restarts the animation
+      void v.offsetWidth;
+      v.classList.add(dir>0?'slideInR':'slideInL');
+    }
+  }
+  render();
+}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.dataset.tab,0); });
+
+// ---- Swipe navigation between screens ----------------------------------
+// A horizontal swipe anywhere on #view moves to the previous / next tab.
+// Implemented as PASSIVE touch listeners: we only read coordinates and never
+// call preventDefault(), so card drag-and-drop (which owns its own non-passive
+// listeners) and vertical scrolling are completely unaffected. We commit a tab
+// change only on touchend, and only when the gesture is clearly horizontal and
+// no card drag is in progress.
+(function(){
+  const SWIPE_MIN=60;       // min horizontal travel (px) to count as a swipe
+  const SWIPE_RATIO=1.7;    // |dx| must exceed |dy| by this factor
+  let sx=0, sy=0, tracking=false, multi=false;
+  const view=document.getElementById('view');
+  if(!view) return;
+  // Elements that own their own horizontal touch gestures — never swipe-nav from them.
+  function inHGesture(t){ return !!(t && t.closest && t.closest('#anSlider, input[type=range], .anSlider, .seg')); }
+
+  view.addEventListener('touchstart',e=>{
+    if(e.touches.length!==1){ multi=true; tracking=false; return; }
+    multi=false;
+    if(inHGesture(e.target)){ tracking=false; return; }
+    sx=e.touches[0].clientX; sy=e.touches[0].clientY; tracking=true;
+  },{passive:true});
+
+  view.addEventListener('touchmove',e=>{
+    if(e.touches.length!==1) multi=true;
+  },{passive:true});
+
+  view.addEventListener('touchend',e=>{
+    if(!tracking || multi){ tracking=false; return; }
+    tracking=false;
+    // A card drag was active for this gesture — that's not a swipe.
+    if(typeof _tActive!=='undefined' && _tActive) return;
+    const t=(e.changedTouches&&e.changedTouches[0]); if(!t) return;
+    const dx=t.clientX-sx, dy=t.clientY-sy;
+    if(Math.abs(dx)<SWIPE_MIN) return;
+    if(Math.abs(dx)<Math.abs(dy)*SWIPE_RATIO) return;
+    const i=TABS.indexOf(TAB); if(i<0) return;
+    // swipe left (dx<0) => next tab; swipe right (dx>0) => previous tab
+    const ni=dx<0 ? i+1 : i-1;
+    if(ni<0||ni>=TABS.length) return;
+    switchTab(TABS[ni], dx<0 ? 1 : -1);
+  },{passive:true});
+
+  view.addEventListener('touchcancel',()=>{ tracking=false; },{passive:true});
+})();
+
 document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };
 applyWidth();
 runCron();

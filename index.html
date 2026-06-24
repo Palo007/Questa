@@ -80,14 +80,17 @@
   .ckbox{width:22px;height:22px;border:2px solid var(--muted);border-radius:6px;display:block}
   .ckmark{font-size:22px;font-weight:900;color:#fff;line-height:1}
   .task.shopitem .check{background:rgba(247,78,82,.12)}
-  .task[draggable="true"]{cursor:grab;touch-action:pan-y}
-  .task.dragging{opacity:.35;outline:2px dashed var(--accent)}
+  .task[draggable="true"]{cursor:grab;touch-action:pan-y;transition:transform .18s ease,opacity .15s ease}
+  /* the original card becomes a dim placeholder gap while its ghost is dragged */
+  .task.dragging{opacity:.25;outline:2px dashed var(--accent);transform:scale(.98)}
   /* floating clone that follows the finger while reordering on touch */
-  .dragGhost{position:fixed;z-index:90;pointer-events:none;opacity:.95;
-    box-shadow:0 8px 24px rgba(0,0,0,.55);transform:scale(1.03);
-    outline:2px solid var(--accent);border-radius:10px}
-  /* lock background scroll while a touch-drag is in progress */
-  body.dragging-active{overflow:hidden;touch-action:none}
+  .dragGhost{position:fixed;z-index:90;pointer-events:none;opacity:.96;
+    box-shadow:0 10px 28px rgba(0,0,0,.6);transform:scale(1);
+    outline:2px solid var(--accent);border-radius:10px;
+    transition:transform .14s ease, box-shadow .14s ease}
+  .dragGhost.lifted{transform:scale(1.04);box-shadow:0 16px 36px rgba(0,0,0,.7)}
+  /* lock background scroll while a touch-drag is in progress (html+body) */
+  html.dragging-active,html.dragging-active body{overflow:hidden;touch-action:none;overscroll-behavior:none}
   .task .check.coin{display:flex;align-items:center;justify-content:center}
   .task .check.coin svg{display:block}
   .task.habit .check.hbtn{font-size:22px;font-weight:700}
@@ -1220,7 +1223,7 @@ function refreshAnalytics(){
   h+='<div class="anCard"><div class="k">Per-day avg</div><div class="v">'+Math.round(reps.total/days).toLocaleString()+'</div>'+
      '<div class="sub">in this window</div></div>';
   // cumulative tips: running total per day
-  let _run=0; const cumTips=series.map(s=>{ _run+=s.v; return fmtDate(s.d)+': '+_run.toLocaleString()+' total'; });
+  let _run=0; const cumTips=series.map(s=>{ _run+=s.v; return '📅 '+fmtDate(s.d)+'\n∑ '+_run.toLocaleString()+' total'; });
   h+='<div class="anCard full"><div class="k">Cumulative over window</div>'+svgSpark(series,true,'var(--accent)',70,cumTips)+'</div>';
   h+='</div>';
   if(reps.matched){
@@ -1244,7 +1247,7 @@ function refreshAnalytics(){
   }
   // --- reps per day (non-cumulative): repetitions done on each day ---
   const daily=anRepsSeries(M,from,to);            // {d, v=reps that day}
-  const dailyTips=daily.map(s=>fmtDate(s.d)+': '+s.v.toLocaleString()+' reps');
+  const dailyTips=daily.map(s=>'📅 '+fmtDate(s.d)+'\n🔁 '+s.v.toLocaleString()+' reps');
   h+='<div class="anSection">'+esc(mname)+' &mdash; reps per day</div>';
   h+='<div class="anCard full"><div class="k">Repetitions done each day</div>'+svgSpark(daily,false,'var(--mp)',60,dailyTips)+'</div>';
   // --- weekly / monthly breakdown ---
@@ -1348,78 +1351,119 @@ function enableDragReorder(){
     enableTouchDrag(card);
   });
 }
-// Touch reordering via Pointer Events. Long-press to pick up (so normal taps
-// and vertical scrolls still work), then a floating ghost follows the finger.
-let _tDrag=null, _tTimer=null, _tStartY=0, _tStartX=0, _tGhost=null, _tGrabDY=0, _tAutoScroll=null, _tPointerY=0;
+// Touch reordering via Touch Events. Long-press picks the card up; once lifted
+// we attach non-passive move/end listeners on the document and preventDefault on
+// every move so the browser can NEVER turn the gesture into a page scroll (the
+// cause of the earlier freeze). A floating ghost follows the finger and the
+// other cards slide out of the way (FLIP animation).
+let _tDrag=null, _tTimer=null, _tStartY=0, _tStartX=0, _tGhost=null, _tGrabDY=0,
+    _tAutoScroll=null, _tPointerY=0, _tActive=false;
 function enableTouchDrag(card){
-  // Only handle touch/pen here; mouse is served by native DnD above.
-  card.addEventListener('pointerdown',e=>{
-    if(e.pointerType==='mouse') return;
+  card.addEventListener('touchstart',e=>{
+    if(e.touches.length!==1) return;
     if(e.target.closest('.check')) return;        // don't hijack +/-/check taps
-    _tStartX=e.clientX; _tStartY=e.clientY; _tPointerY=e.clientY;
+    const t=e.touches[0];
+    _tStartX=t.clientX; _tStartY=t.clientY; _tPointerY=t.clientY;
     clearTimeout(_tTimer);
-    _tTimer=setTimeout(()=>{ beginTouchDrag(card,e); },200);  // long-press
-  });
-  card.addEventListener('pointermove',e=>{
-    if(!_tDrag){
-      // moved before long-press fired => treat as scroll, cancel pickup
-      if(_tTimer && (Math.abs(e.clientY-_tStartY)>10 || Math.abs(e.clientX-_tStartX)>10)){
+    _tTimer=setTimeout(()=>{ beginTouchDrag(card,t); },200);  // long-press
+    // while waiting for the long-press, watch for movement = user is scrolling
+    const cancelIfScroll=ev=>{
+      const tt=ev.touches[0]; if(!tt) return;
+      if(!_tActive && _tTimer && (Math.abs(tt.clientY-_tStartY)>10 || Math.abs(tt.clientX-_tStartX)>10)){
         clearTimeout(_tTimer); _tTimer=null;
+        card.removeEventListener('touchmove',cancelIfScroll);
       }
-      return;
-    }
-    e.preventDefault();
-    _tPointerY=e.clientY;
-    moveTouchDrag(e.clientX,e.clientY);
-  },{passive:false});
-  card.addEventListener('pointerup',endTouchDrag);
-  card.addEventListener('pointercancel',endTouchDrag);
-  card.addEventListener('lostpointercapture',()=>{ if(_tDrag) endTouchDrag(); });
+    };
+    card.addEventListener('touchmove',cancelIfScroll,{passive:true});
+    const clear=()=>{ clearTimeout(_tTimer); _tTimer=null;
+      card.removeEventListener('touchmove',cancelIfScroll);
+      card.removeEventListener('touchend',clear); card.removeEventListener('touchcancel',clear); };
+    card.addEventListener('touchend',clear); card.addEventListener('touchcancel',clear);
+  },{passive:true});
 }
-function beginTouchDrag(card,e){
-  _tDrag=card; _dragList=card.dataset.list;
+// document-level handlers installed only while actively dragging
+function _docTouchMove(e){
+  if(!_tActive) return;
+  e.preventDefault();                              // <- stops page scroll
+  const t=e.touches[0]; if(!t) return;
+  _tPointerY=t.clientY;
+  moveTouchDrag(t.clientX,t.clientY);
+}
+function _docTouchEnd(){ endTouchDrag(); }
+function beginTouchDrag(card,t){
+  _tActive=true; _tDrag=card; _dragList=card.dataset.list;
   const r=card.getBoundingClientRect();
-  _tGrabDY=e.clientY-r.top;
-  card.classList.add('dragging');
-  try{ card.setPointerCapture(e.pointerId); }catch(_){}
+  _tGrabDY=t.clientY-r.top;
+  document.documentElement.classList.add('dragging-active');   // lock scroll (html+body)
   // floating clone that tracks the finger
   _tGhost=card.cloneNode(true);
   _tGhost.classList.add('dragGhost'); _tGhost.classList.remove('dragging');
   _tGhost.style.width=r.width+'px';
   _tGhost.style.left=r.left+'px';
-  _tGhost.style.top=(e.clientY-_tGrabDY)+'px';
+  _tGhost.style.top=(t.clientY-_tGrabDY)+'px';
   document.body.appendChild(_tGhost);
-  document.body.classList.add('dragging-active');   // lock page scroll
+  // animate the lift, then leave a dim placeholder gap where the card was
+  requestAnimationFrame(()=>{ if(_tGhost) _tGhost.classList.add('lifted'); });
+  card.classList.add('dragging');
   if(navigator.vibrate) navigator.vibrate(15);
+  document.addEventListener('touchmove',_docTouchMove,{passive:false});
+  document.addEventListener('touchend',_docTouchEnd);
+  document.addEventListener('touchcancel',_docTouchEnd);
   startAutoScroll();
 }
 function moveTouchDrag(x,y){
   if(_tGhost) _tGhost.style.top=(y-_tGrabDY)+'px';
-  // find the card under the finger (ignore the ghost via pointer-events:none)
-  const el=document.elementFromPoint(x,y);
+  const el=document.elementFromPoint(x,y);       // ghost is pointer-events:none
   const over=el && el.closest('.task[draggable="true"]');
   if(over && over!==_tDrag && over.dataset.list===_dragList){
     const rr=over.getBoundingClientRect();
     const after=(y-rr.top)/rr.height > 0.5;
-    over.parentNode.insertBefore(_tDrag, after?over.nextSibling:over);
+    flipReorder(()=>{ over.parentNode.insertBefore(_tDrag, after?over.nextSibling:over); });
   }
+}
+// FLIP: record sibling positions, reorder, then animate them from old->new
+function flipReorder(mutate){
+  const parent=_tDrag.parentNode;
+  const sibs=[...parent.querySelectorAll('.task[draggable="true"]')].filter(s=>s!==_tDrag);
+  const first=new Map(); sibs.forEach(s=>first.set(s,s.getBoundingClientRect().top));
+  mutate();
+  sibs.forEach(s=>{
+    const last=s.getBoundingClientRect().top, dy=first.get(s)-last;
+    if(!dy) return;
+    s.style.transition='none'; s.style.transform='translateY('+dy+'px)';
+    requestAnimationFrame(()=>{ s.style.transition='transform .18s ease'; s.style.transform=''; });
+  });
 }
 // auto-scroll the page when the ghost is dragged near the top/bottom edge
 function startAutoScroll(){
   stopAutoScroll();
   _tAutoScroll=setInterval(()=>{
     if(!_tDrag) return;
-    const m=70, vh=window.innerHeight;
-    if(_tPointerY<m){ window.scrollBy(0,-Math.ceil((m-_tPointerY)/6)); moveTouchDrag((_tGhost?_tGhost.getBoundingClientRect().left:0)+5,_tPointerY); }
-    else if(_tPointerY>vh-m){ window.scrollBy(0,Math.ceil((_tPointerY-(vh-m))/6)); moveTouchDrag((_tGhost?_tGhost.getBoundingClientRect().left:0)+5,_tPointerY); }
+    const m=80, vh=window.innerHeight;
+    const gx=(_tGhost?_tGhost.getBoundingClientRect().left:0)+5;
+    if(_tPointerY<m){ window.scrollBy(0,-Math.ceil((m-_tPointerY)/5)); moveTouchDrag(gx,_tPointerY); }
+    else if(_tPointerY>vh-m){ window.scrollBy(0,Math.ceil((_tPointerY-(vh-m))/5)); moveTouchDrag(gx,_tPointerY); }
   },16);
 }
 function stopAutoScroll(){ if(_tAutoScroll){ clearInterval(_tAutoScroll); _tAutoScroll=null; } }
 function endTouchDrag(){
   clearTimeout(_tTimer); _tTimer=null;
   stopAutoScroll();
-  if(_tGhost){ _tGhost.remove(); _tGhost=null; }
-  document.body.classList.remove('dragging-active');
+  document.removeEventListener('touchmove',_docTouchMove,{passive:false});
+  document.removeEventListener('touchend',_docTouchEnd);
+  document.removeEventListener('touchcancel',_docTouchEnd);
+  const dropTarget=_tDrag;
+  // animate the ghost snapping into the card's final position, then remove it
+  if(_tGhost && dropTarget){
+    const r=dropTarget.getBoundingClientRect();
+    _tGhost.classList.remove('lifted');
+    _tGhost.style.transition='left .16s ease, top .16s ease, transform .16s ease';
+    _tGhost.style.left=r.left+'px'; _tGhost.style.top=r.top+'px'; _tGhost.style.transform='scale(1)';
+    const g=_tGhost; _tGhost=null;
+    setTimeout(()=>{ g.remove(); },170);
+  } else if(_tGhost){ _tGhost.remove(); _tGhost=null; }
+  document.documentElement.classList.remove('dragging-active');
+  _tActive=false;
   if(_tDrag){ _tDrag.classList.remove('dragging'); _tDrag=null; commitOrder(); }
 }
 // read the DOM order back into S.tasks / S.rewards

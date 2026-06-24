@@ -81,7 +81,13 @@
   .ckmark{font-size:22px;font-weight:900;color:#fff;line-height:1}
   .task.shopitem .check{background:rgba(247,78,82,.12)}
   .task[draggable="true"]{cursor:grab;touch-action:pan-y}
-  .task.dragging{opacity:.5;outline:2px dashed var(--accent);touch-action:none}
+  .task.dragging{opacity:.35;outline:2px dashed var(--accent)}
+  /* floating clone that follows the finger while reordering on touch */
+  .dragGhost{position:fixed;z-index:90;pointer-events:none;opacity:.95;
+    box-shadow:0 8px 24px rgba(0,0,0,.55);transform:scale(1.03);
+    outline:2px solid var(--accent);border-radius:10px}
+  /* lock background scroll while a touch-drag is in progress */
+  body.dragging-active{overflow:hidden;touch-action:none}
   .task .check.coin{display:flex;align-items:center;justify-content:center}
   .task .check.coin svg{display:block}
   .task.habit .check.hbtn{font-size:22px;font-weight:700}
@@ -210,13 +216,27 @@
   .anCard .sub{font-size:11px;color:var(--muted);margin-top:2px}
   .anCard.full{grid-column:1 / -1}
   .anCard svg{display:block;width:100%;overflow:visible}
-  .anCard svg .spkHit,.anCard svg .barHit{touch-action:none}
+  .anCard svg .spkHit,.anCard svg .barHit{touch-action:none;cursor:pointer}
+  /* visible marker drawn on the selected line-chart point */
+  .spkMarker{pointer-events:none}
+  /* selected bar: dim the others so the chosen one stands out */
+  .anCard svg .bar{transition:opacity .12s}
+  svg.hasSel .bar{opacity:.35}
+  svg.hasSel .bar.sel{opacity:1;stroke:#fff;stroke-width:1.5;vector-effect:non-scaling-stroke}
+  /* pretty tooltip */
+  .hoverTip{position:fixed;z-index:90;pointer-events:none;display:none;max-width:220px;
+    background:linear-gradient(180deg,#241541,#1a0f30);color:var(--ink);
+    border:1px solid var(--accent);border-radius:10px;padding:8px 11px;
+    box-shadow:0 8px 24px rgba(0,0,0,.55);font-size:12px;line-height:1.4}
+  .hoverTip .ttTitle{font-weight:800;font-size:13px;color:#fff;margin-bottom:2px;white-space:nowrap}
+  .hoverTip .ttBody{color:var(--ink);opacity:.92}
   .anCard input{width:100%;background:#2a1947;border:1px solid var(--line);color:var(--ink);
     border-radius:8px;padding:8px 10px;font-size:14px}
   .anSection{margin:16px 2px 6px;font-size:13px;font-weight:700;color:var(--accent)}
   .anHeat{display:flex;gap:3px;overflow-x:auto;padding:4px 2px 8px}
   .anHeatCol{display:flex;flex-direction:column;gap:3px}
-  .anHeatCell{width:11px;height:11px;border-radius:2px;background:var(--panel2)}
+  .anHeatCell{width:11px;height:11px;border-radius:2px;background:var(--panel2);cursor:pointer;touch-action:none}
+  .anHeatCell.sel{outline:2px solid #fff;outline-offset:0;box-shadow:0 0 0 1px var(--accent);border-radius:2px;transform:scale(1.25);position:relative;z-index:2}
   .anLegend{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);margin:2px 4px}
   .anLegend i{width:11px;height:11px;border-radius:2px;display:inline-block}
   .anStreak{display:flex;align-items:center;justify-content:space-between;background:var(--panel);
@@ -927,7 +947,7 @@ function svgCompare(cmp){
     let run=0,d='';
     cmp.days.forEach((day,i)=>{ run+=(cmp.per[m.id][day]||0); const x=X(i).toFixed(1), y=Y(run).toFixed(1);
       d+=(i?'L':'M')+x+' '+y+' ';
-      hits+='<circle class="spkHit" cx="'+x+'" cy="'+y+'" r="14" fill="transparent" data-tip="'+esc(m.name+' · '+fmtDate(day)+': '+run.toLocaleString()+' total')+'"/>'; });
+      hits+='<circle class="spkHit" cx="'+x+'" cy="'+y+'" r="14" fill="transparent" data-tip="'+esc('📈 '+m.name+'\n📅 '+fmtDate(day)+'\n∑ '+run.toLocaleString()+' total')+'"/>'; });
     paths+='<path d="'+d+'" fill="none" stroke="'+METRIC_COLORS[mi%METRIC_COLORS.length]+'" stroke-width="2" stroke-linejoin="round"/>';
   });
   return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+paths+hits+'</svg>';
@@ -937,14 +957,27 @@ function svgBars(data,color){
   const w=300,h=90;
   if(!data.length) return '<svg viewBox="0 0 '+w+' '+h+'"><text x="'+(w/2)+'" y="'+(h/2)+'" fill="var(--muted)" font-size="11" text-anchor="middle">No data</text></svg>';
   const max=Math.max(1,...data.map(d=>d.v));
-  const n=data.length, bw=Math.max(2,(w/n)*0.7), gap=(w/n)*0.3;
+  const n=data.length, slot=w/n, bw=Math.max(2,slot*0.66), gap=slot-bw;
+  const base=h-1, top=4, plot=base-top, minBar=2, rad=Math.min(2,bw/2);
   let bars='', hits='';
-  data.forEach((d,i)=>{ const bh=(d.v/max)*(h-14); const x=i*(w/n)+gap/2; const y=h-bh-2;
-    const tip=esc(d.label+': '+d.v.toLocaleString()+' reps');
-    bars+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+bh.toFixed(1)+'" rx="1.5" fill="'+color+'"/>';
-    // full-height invisible hit-area so the whole column is hoverable (uses shared instant tooltip)
-    hits+='<rect class="barHit" x="'+(i*(w/n)).toFixed(1)+'" y="0" width="'+(w/n).toFixed(1)+'" height="'+h+'" fill="transparent" data-tip="'+tip+'"/>'; });
-  return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+bars+hits+'</svg>';
+  data.forEach((d,i)=>{
+    let bh=(d.v/max)*plot; if(d.v>0) bh=Math.max(minBar,bh);   // keep tiny non-zero bars visible
+    const x=i*slot+gap/2; const y=base-bh;
+    const tip=esc('📊 '+d.label+'\n🔁 '+d.v.toLocaleString()+' reps');
+    // round only the top corners; bar sits on a common baseline
+    const r=Math.min(rad,bh);
+    const path='M'+x.toFixed(1)+' '+base.toFixed(1)
+      +' V'+(y+r).toFixed(1)
+      +' Q'+x.toFixed(1)+' '+y.toFixed(1)+' '+(x+r).toFixed(1)+' '+y.toFixed(1)
+      +' H'+(x+bw-r).toFixed(1)
+      +' Q'+(x+bw).toFixed(1)+' '+y.toFixed(1)+' '+(x+bw).toFixed(1)+' '+(y+r).toFixed(1)
+      +' V'+base.toFixed(1)+' Z';
+    bars+='<path class="bar" data-i="'+i+'" d="'+path+'" fill="'+color+'"/>';
+    // full-height invisible hit-area so the whole column is selectable
+    hits+='<rect class="barHit" data-i="'+i+'" x="'+(i*slot).toFixed(1)+'" y="0" width="'+slot.toFixed(1)+'" height="'+h+'" fill="transparent" data-tip="'+tip+'"/>'; });
+  // baseline rule
+  const axis='<line x1="0" y1="'+base+'" x2="'+w+'" y2="'+base+'" stroke="var(--line)" stroke-width="0.5"/>';
+  return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="xMidYMax meet">'+axis+bars+hits+'</svg>';
 }
 function viewAnalytics(){
   const p=anPrefs();
@@ -1243,7 +1276,7 @@ function refreshAnalytics(){
      '<div class="anCard"><div class="k">Days logged</div><div class="v">'+adh.length+'</div><div class="sub">with due dailies</div></div>'+
      '<div class="anCard full"><div class="k">Completion % over window</div>'+
        svgSpark(adh.map(a=>({d:a.d,v:a.pct*100})),false,'var(--green)',70,
-         adh.map(a=>fmtDate(a.d)+': '+Math.round(a.pct*100)+'% ('+a.done+'/'+a.tot+')'))+'</div></div>';
+         adh.map(a=>'📅 '+fmtDate(a.d)+'\n✅ '+Math.round(a.pct*100)+'% complete\n☑️ '+a.done+' of '+a.tot+' dailies'))+'</div></div>';
   const inten=anIntensity(from,to);
   const maxI=Math.max(1,...Object.values(inten));
   h+='<div class="anSection">Activity heatmap</div>';
@@ -1265,8 +1298,8 @@ function anHeatmapHTML(from,to,inten,maxI){
   let cols='', col='', dow=0;
   for(let t=start.getTime(); t<=end.getTime(); t+=DAY){
     const v=inten[Math.floor(t/DAY)*DAY]||0;
-    const title=fmtDate(t)+': '+(v? v+' activity':'no activity');
-    col+='<div class="anHeatCell" style="background:'+heatColor(v,maxI)+'" data-tip="'+title+'"></div>';
+    const title='📅 '+fmtDate(t)+'\n'+(v? '🔥 '+v+' activity':'💤 no activity');
+    col+='<div class="anHeatCell" style="background:'+heatColor(v,maxI)+'" data-tip="'+esc(title)+'"></div>';
     dow++;
     if(dow===7){ cols+='<div class="anHeatCol">'+col+'</div>'; col=''; dow=0; }
   }
@@ -1297,6 +1330,7 @@ let _dragEl=null, _dragList=null;
 function enableDragReorder(){
   const cards=document.querySelectorAll('#view .task[draggable="true"]');
   cards.forEach(card=>{
+    // --- desktop: native HTML5 drag (mouse only) ---
     card.addEventListener('dragstart',e=>{
       _dragEl=card; _dragList=card.dataset.list; card.classList.add('dragging');
       e.dataTransfer.effectAllowed='move';
@@ -1310,49 +1344,83 @@ function enableDragReorder(){
       const after=(e.clientY-r.top)/r.height > 0.5;
       card.parentNode.insertBefore(_dragEl, after?card.nextSibling:card);
     });
-    // --- touch / pointer drag (HTML5 DnD does not work on touch) ---
+    // --- touch: pure pointer-based drag with a floating ghost ---
     enableTouchDrag(card);
   });
 }
-// Touch reordering via Pointer Events. Long-press to pick up so normal
-// taps and vertical scrolls still work; then move to reorder.
-let _tDrag=null, _tTimer=null, _tStartY=0, _tStartX=0;
+// Touch reordering via Pointer Events. Long-press to pick up (so normal taps
+// and vertical scrolls still work), then a floating ghost follows the finger.
+let _tDrag=null, _tTimer=null, _tStartY=0, _tStartX=0, _tGhost=null, _tGrabDY=0, _tAutoScroll=null, _tPointerY=0;
 function enableTouchDrag(card){
+  // Only handle touch/pen here; mouse is served by native DnD above.
   card.addEventListener('pointerdown',e=>{
-    if(e.pointerType==='mouse') return;        // mouse uses native DnD
-    // ignore presses that begin on interactive controls (check / +/- buttons)
-    if(e.target.closest('.check')) return;
-    _tStartX=e.clientX; _tStartY=e.clientY;
-    _tTimer=setTimeout(()=>{                     // long-press => begin drag
-      _tDrag=card; _dragList=card.dataset.list;
-      card.classList.add('dragging');
-      card.setPointerCapture(e.pointerId);
-      if(navigator.vibrate) navigator.vibrate(15);
-    },220);
+    if(e.pointerType==='mouse') return;
+    if(e.target.closest('.check')) return;        // don't hijack +/-/check taps
+    _tStartX=e.clientX; _tStartY=e.clientY; _tPointerY=e.clientY;
+    clearTimeout(_tTimer);
+    _tTimer=setTimeout(()=>{ beginTouchDrag(card,e); },200);  // long-press
   });
   card.addEventListener('pointermove',e=>{
-    if(!_tDrag){                                 // not yet dragging
-      // moved too far before long-press fired => it's a scroll, cancel pickup
-      if(_tTimer && (Math.abs(e.clientY-_tStartY)>8 || Math.abs(e.clientX-_tStartX)>8)){
+    if(!_tDrag){
+      // moved before long-press fired => treat as scroll, cancel pickup
+      if(_tTimer && (Math.abs(e.clientY-_tStartY)>10 || Math.abs(e.clientX-_tStartX)>10)){
         clearTimeout(_tTimer); _tTimer=null;
       }
       return;
     }
-    e.preventDefault();                          // stop page scroll while dragging
-    const el=document.elementFromPoint(e.clientX,e.clientY);
-    const over=el && el.closest('.task[draggable="true"]');
-    if(over && over!==_tDrag && over.dataset.list===_dragList){
-      const r=over.getBoundingClientRect();
-      const after=(e.clientY-r.top)/r.height > 0.5;
-      over.parentNode.insertBefore(_tDrag, after?over.nextSibling:over);
-    }
-  });
-  const end=()=>{
-    clearTimeout(_tTimer); _tTimer=null;
-    if(_tDrag){ _tDrag.classList.remove('dragging'); _tDrag=null; commitOrder(); }
-  };
-  card.addEventListener('pointerup',end);
-  card.addEventListener('pointercancel',end);
+    e.preventDefault();
+    _tPointerY=e.clientY;
+    moveTouchDrag(e.clientX,e.clientY);
+  },{passive:false});
+  card.addEventListener('pointerup',endTouchDrag);
+  card.addEventListener('pointercancel',endTouchDrag);
+  card.addEventListener('lostpointercapture',()=>{ if(_tDrag) endTouchDrag(); });
+}
+function beginTouchDrag(card,e){
+  _tDrag=card; _dragList=card.dataset.list;
+  const r=card.getBoundingClientRect();
+  _tGrabDY=e.clientY-r.top;
+  card.classList.add('dragging');
+  try{ card.setPointerCapture(e.pointerId); }catch(_){}
+  // floating clone that tracks the finger
+  _tGhost=card.cloneNode(true);
+  _tGhost.classList.add('dragGhost'); _tGhost.classList.remove('dragging');
+  _tGhost.style.width=r.width+'px';
+  _tGhost.style.left=r.left+'px';
+  _tGhost.style.top=(e.clientY-_tGrabDY)+'px';
+  document.body.appendChild(_tGhost);
+  document.body.classList.add('dragging-active');   // lock page scroll
+  if(navigator.vibrate) navigator.vibrate(15);
+  startAutoScroll();
+}
+function moveTouchDrag(x,y){
+  if(_tGhost) _tGhost.style.top=(y-_tGrabDY)+'px';
+  // find the card under the finger (ignore the ghost via pointer-events:none)
+  const el=document.elementFromPoint(x,y);
+  const over=el && el.closest('.task[draggable="true"]');
+  if(over && over!==_tDrag && over.dataset.list===_dragList){
+    const rr=over.getBoundingClientRect();
+    const after=(y-rr.top)/rr.height > 0.5;
+    over.parentNode.insertBefore(_tDrag, after?over.nextSibling:over);
+  }
+}
+// auto-scroll the page when the ghost is dragged near the top/bottom edge
+function startAutoScroll(){
+  stopAutoScroll();
+  _tAutoScroll=setInterval(()=>{
+    if(!_tDrag) return;
+    const m=70, vh=window.innerHeight;
+    if(_tPointerY<m){ window.scrollBy(0,-Math.ceil((m-_tPointerY)/6)); moveTouchDrag((_tGhost?_tGhost.getBoundingClientRect().left:0)+5,_tPointerY); }
+    else if(_tPointerY>vh-m){ window.scrollBy(0,Math.ceil((_tPointerY-(vh-m))/6)); moveTouchDrag((_tGhost?_tGhost.getBoundingClientRect().left:0)+5,_tPointerY); }
+  },16);
+}
+function stopAutoScroll(){ if(_tAutoScroll){ clearInterval(_tAutoScroll); _tAutoScroll=null; } }
+function endTouchDrag(){
+  clearTimeout(_tTimer); _tTimer=null;
+  stopAutoScroll();
+  if(_tGhost){ _tGhost.remove(); _tGhost=null; }
+  document.body.classList.remove('dragging-active');
+  if(_tDrag){ _tDrag.classList.remove('dragging'); _tDrag=null; commitOrder(); }
 }
 // read the DOM order back into S.tasks / S.rewards
 function commitOrder(){
@@ -1374,44 +1442,110 @@ function commitOrder(){
   }
   save();
 }
-// ---- shared hover tooltip (heatmap + charts), delay from S.prefs.tipDelay ----
-let _tipTimer=null, _tipEl=null;
+// ---- shared tooltip + data-point selection (heatmap + charts) ----
+// data-tip uses "\n"-separated lines; first line is the bold title.
+let _tipTimer=null, _tipEl=null, _selEl=null;
 function tipEl(){
   if(!_tipEl){ _tipEl=document.createElement('div'); _tipEl.id='hoverTip';
-    _tipEl.style.cssText='position:fixed;z-index:80;pointer-events:none;background:#1d1233;color:var(--ink);'+
-      'border:1px solid var(--accent);border-radius:8px;padding:5px 9px;font-size:12px;display:none;box-shadow:0 4px 12px rgba(0,0,0,.5)';
+    _tipEl.className='hoverTip';
     document.body.appendChild(_tipEl); }
   return _tipEl;
 }
 function tipDelayMs(){ const d=(S.prefs&&S.prefs.tipDelay); return Math.max(0,(d==null?0:+d))*1000; }
-function showTip(text,x,y){ const t=tipEl(); t.textContent=text; t.style.display='block';
-  t.style.left=(x+12)+'px'; t.style.top=(y+12)+'px'; }
+// build pretty multi-line HTML from a "\n"-separated data-tip string
+function tipHTML(text){
+  const lines=String(text||'').split('\n').filter(l=>l.length);
+  if(!lines.length) return '';
+  let h='<div class="ttTitle">'+lines[0]+'</div>';
+  if(lines.length>1) h+='<div class="ttBody">'+lines.slice(1).join('<br>')+'</div>';
+  return h;
+}
+// show tip near (x,y). above=true puts it above the point (used on touch so a
+// finger doesn't cover it); we clamp to viewport so it never clips off-screen.
+function showTip(text,x,y,above){
+  const t=tipEl(); t.innerHTML=tipHTML(text); t.style.display='block';
+  // measure then position
+  const tw=t.offsetWidth, th=t.offsetHeight, vw=window.innerWidth, vh=window.innerHeight;
+  let left=above? x-tw/2 : x+14;            // centered above finger, else to the right
+  let top =above? y-th-18 : y+14;           // 18px clearance above the touch point
+  if(above && top<6){ top=y+22; }           // not enough room above -> drop below finger
+  left=Math.max(6,Math.min(left,vw-tw-6));
+  top =Math.max(6,Math.min(top, vh-th-6));
+  t.style.left=left+'px'; t.style.top=top+'px';
+}
 function hideTip(){ clearTimeout(_tipTimer); if(_tipEl)_tipEl.style.display='none'; }
-// bind tooltips to any elements matching selector that carry data-tip
+// selection: pin the tooltip to a chosen element and highlight it
+function clearSelVisuals(){
+  // remove any SVG marker + per-svg selection state
+  document.querySelectorAll('.spkMarker').forEach(m=>m.remove());
+  document.querySelectorAll('svg.hasSel').forEach(s=>s.classList.remove('hasSel'));
+  document.querySelectorAll('rect.bar.sel').forEach(b=>b.classList.remove('sel'));
+}
+function clearSel(){ if(_selEl){ _selEl.classList.remove('sel'); _selEl=null; } clearSelVisuals(); hideTip(); }
+function selectEl(el,touch){
+  if(_selEl===el){ clearSel(); return; }      // tapping the same one toggles off
+  if(_selEl) _selEl.classList.remove('sel');
+  clearSelVisuals();
+  _selEl=el; el.classList.add('sel');
+  const svg=el.ownerSVGElement;
+  if(svg){
+    svg.classList.add('hasSel');
+    if(el.classList.contains('spkHit')){
+      // draw a crisp visible ring at the point
+      const cx=el.getAttribute('cx'), cy=el.getAttribute('cy');
+      const ns='http://www.w3.org/2000/svg';
+      const ring=document.createElementNS(ns,'circle');
+      ring.setAttribute('class','spkMarker');
+      ring.setAttribute('cx',cx); ring.setAttribute('cy',cy); ring.setAttribute('r','4');
+      ring.setAttribute('fill','#fff'); ring.setAttribute('stroke','var(--accent)'); ring.setAttribute('stroke-width','2');
+      ring.setAttribute('vector-effect','non-scaling-stroke');
+      svg.appendChild(ring);
+    } else if(el.classList.contains('barHit')){
+      // highlight the matching visible bar (same index)
+      const bar=svg.querySelector('.bar[data-i="'+el.dataset.i+'"]');
+      if(bar) bar.classList.add('sel');
+    }
+  }
+  const r=el.getBoundingClientRect();
+  // anchor tooltip above the datum (touch) / beside it (mouse)
+  showTip(el.dataset.tip, r.left+r.width/2, touch? r.top : r.top+r.height/2, true);
+}
+// dismiss selection when tapping/clicking outside any tracked datum
+function bindGlobalDismiss(){
+  if(window.__tipDismissBound) return; window.__tipDismissBound=true;
+  const off=e=>{ if(_selEl && !e.target.closest('[data-tip]')) clearSel(); };
+  document.addEventListener('click',off);
+  document.addEventListener('touchstart',off,{passive:true});
+}
+// bind tooltips + selection to any elements matching selector that carry data-tip
 function bindTips(selector){
+  bindGlobalDismiss();
   document.querySelectorAll(selector+'[data-tip]').forEach(el=>{
-    const handler=e=>{
-      clearTimeout(_tipTimer);
-      const x=e.clientX, y=e.clientY, txt=el.dataset.tip, delay=tipDelayMs();
-      if(delay<=0) showTip(txt,x,y);
-      else _tipTimer=setTimeout(()=>showTip(txt,x,y),delay);
+    // mouse hover = transient preview (only when nothing is pinned)
+    const hover=e=>{ if(_selEl) return; clearTimeout(_tipTimer);
+      const x=e.clientX, y=e.clientY, delay=tipDelayMs();
+      if(delay<=0) showTip(el.dataset.tip,x,y,false);
+      else _tipTimer=setTimeout(()=>{ if(!_selEl) showTip(el.dataset.tip,x,y,false); },delay);
     };
-    el.addEventListener('mouseenter',handler);
-    el.addEventListener('mousemove',handler); // keep tip following + responsive
-    el.addEventListener('mouseleave',hideTip);
-    // --- touch support: show tip on finger, follow it, hide on release ---
-    const tHandler=e=>{
+    el.addEventListener('mouseenter',hover);
+    el.addEventListener('mousemove',hover);
+    el.addEventListener('mouseleave',()=>{ if(!_selEl) hideTip(); });
+    // mouse click = pin/select
+    el.addEventListener('click',e=>{ e.stopPropagation(); selectEl(el,false); });
+    // touch: tap selects & pins (above finger); also support sliding to preview
+    el.addEventListener('touchstart',e=>{
       const t=e.touches&&e.touches[0]; if(!t)return;
-      e.preventDefault();                       // stop scroll/zoom while reading tip
-      // re-resolve target under finger so dragging across bars/points updates tip
+      e.preventDefault();
       const u=document.elementFromPoint(t.clientX,t.clientY);
-      const tip=(u&&u.dataset&&u.dataset.tip)||el.dataset.tip;
-      clearTimeout(_tipTimer); showTip(tip,t.clientX,t.clientY);
-    };
-    el.addEventListener('touchstart',tHandler,{passive:false});
-    el.addEventListener('touchmove',tHandler,{passive:false});
-    el.addEventListener('touchend',hideTip);
-    el.addEventListener('touchcancel',hideTip);
+      const target=(u&&u.closest)? u.closest(selector+'[data-tip]') : el;
+      selectEl(target||el,true);
+    },{passive:false});
+    el.addEventListener('touchmove',e=>{
+      const t=e.touches&&e.touches[0]; if(!t)return; e.preventDefault();
+      const u=document.elementFromPoint(t.clientX,t.clientY);
+      const target=(u&&u.closest)? u.closest(selector+'[data-tip]') : null;
+      if(target && target!==_selEl) selectEl(target,true);
+    },{passive:false});
   });
 }
 function bindHeatTooltips(){ bindTips('.anHeatCell'); }

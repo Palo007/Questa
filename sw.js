@@ -1,7 +1,7 @@
 /* Questa service worker - network-first for the app shell so updates appear
    on the next launch; cache fallback keeps it working fully offline. */
-const CACHE = "questa-v11";
-const ASSETS = ["./", "./index.html", "./manifest.json", "./icon.svg",
+const CACHE = "questa-v12";
+const ASSETS = ["./", "./index.html", "./app.js", "./manifest.json", "./icon.svg",
                 "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
@@ -19,6 +19,7 @@ self.addEventListener("fetch", e => {
   const isShell = e.request.mode === "navigate"
     || url.pathname.endsWith("/")
     || url.pathname.endsWith("index.html")
+    || url.pathname.endsWith("app.js")
     || url.pathname.endsWith("manifest.json");
   if (isShell) {
     /* network-first: always try GitHub, fall back to cache when offline */

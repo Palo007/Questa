@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.24-1932";
+const APP_VERSION = "v2026.06.24-1945";
 
 const STORE_KEY = "questa.save.v1";
 function freshState(){
@@ -1054,15 +1054,19 @@ function enableTouchDrag(card){
     clearTimeout(_tTimer);
     _tTimer=setTimeout(()=>{ if(!_isScroll){ _decided=true; beginTouchDrag(card,t); } },200);  // long-press
     const pressMove=ev=>{
-      if(_tActive){ if(ev.cancelable) ev.preventDefault(); return; }   // dragging: block scroll (handled at doc level too)
+      // ALWAYS preventDefault here. The card is touch-action:none, but on a long
+      // stationary hold some browsers still try to start a scroll/callout on the
+      // first move; if we don't cancel it immediately it becomes non-cancelable
+      // and the page scrolls while the card stays lifted -> the "hold longer then
+      // freeze" bug. Cancelling every move from the start keeps the touch ours.
+      if(ev.cancelable) ev.preventDefault();
+      if(_tActive){ return; }                         // active drag handled at document level
       const tt=ev.touches[0]; if(!tt) return;
       const dy=tt.clientY-_lastY;
       const totDy=Math.abs(tt.clientY-_tStartY), totDx=Math.abs(tt.clientX-_tStartX);
-      // First clear movement before the press fires = a scroll. From then on we
-      // scroll the page MANUALLY (browser won't, since touch-action:none) so the
-      // list still scrolls smoothly from a touch that began on a card.
+      // First clear movement before the press fires = a scroll: drive it manually.
       if(!_decided && (totDy>10 || totDx>10)){ _decided=true; _isScroll=true; clearTimeout(_tTimer); _tTimer=null; }
-      if(_isScroll){ if(ev.cancelable) ev.preventDefault(); window.scrollBy(0,-dy); }
+      if(_isScroll){ window.scrollBy(0,-dy); }
       _lastY=tt.clientY;
     };
     const cleanup=()=>{ clearTimeout(_tTimer); _tTimer=null;

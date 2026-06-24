@@ -84,7 +84,8 @@
      on a card (which would commit a scroll before our long-press can claim it and
      trigger "cancelable=false" interventions). We drive list scrolling manually
      in JS during the pre-press phase instead — see enableTouchDrag. */
-  .task[draggable="true"]{cursor:grab;touch-action:none;transition:transform .18s ease,opacity .15s ease}
+  .task[draggable="true"]{cursor:grab;touch-action:none;transition:transform .18s ease,opacity .15s ease;
+    -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
   /* the original card becomes a dim placeholder gap while its ghost is dragged */
   .task.dragging{opacity:.25;outline:2px dashed var(--accent);transform:scale(.98)}
   /* floating clone that follows the finger while reordering on touch */

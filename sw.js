@@ -1,5 +1,6 @@
-/* Questa service worker - cache-first so the app runs fully offline. */
-const CACHE = "questa-v2";
+/* Questa service worker - network-first for the app shell so updates appear
+   on the next launch; cache fallback keeps it working fully offline. */
+const CACHE = "questa-v11";
 const ASSETS = ["./", "./index.html", "./manifest.json", "./icon.svg",
                 "./icon-192.png", "./icon-512.png"];
 
@@ -14,11 +15,28 @@ self.addEventListener("activate", e => {
 });
 self.addEventListener("fetch", e => {
   if (e.request.method !== "GET") return;
-  e.respondWith(
-    caches.match(e.request).then(hit => hit || fetch(e.request).then(res => {
-      const copy = res.clone();
-      caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
-      return res;
-    }).catch(() => caches.match("./index.html")))
-  );
+  const url = new URL(e.request.url);
+  const isShell = e.request.mode === "navigate"
+    || url.pathname.endsWith("/")
+    || url.pathname.endsWith("index.html")
+    || url.pathname.endsWith("manifest.json");
+  if (isShell) {
+    /* network-first: always try GitHub, fall back to cache when offline */
+    e.respondWith(
+      fetch(e.request).then(res => {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+        return res;
+      }).catch(() => caches.match(e.request).then(hit => hit || caches.match("./index.html")))
+    );
+  } else {
+    /* cache-first for static assets (icons) */
+    e.respondWith(
+      caches.match(e.request).then(hit => hit || fetch(e.request).then(res => {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+        return res;
+      }).catch(() => caches.match("./index.html")))
+    );
+  }
 });

@@ -80,8 +80,8 @@
   .ckbox{width:22px;height:22px;border:2px solid var(--muted);border-radius:6px;display:block}
   .ckmark{font-size:22px;font-weight:900;color:#fff;line-height:1}
   .task.shopitem .check{background:rgba(247,78,82,.12)}
-  .task[draggable="true"]{cursor:grab}
-  .task.dragging{opacity:.5;outline:2px dashed var(--accent)}
+  .task[draggable="true"]{cursor:grab;touch-action:pan-y}
+  .task.dragging{opacity:.5;outline:2px dashed var(--accent);touch-action:none}
   .task .check.coin{display:flex;align-items:center;justify-content:center}
   .task .check.coin svg{display:block}
   .task.habit .check.hbtn{font-size:22px;font-weight:700}
@@ -110,6 +110,8 @@
   .subFrac.full{background:var(--green);border-color:var(--green)}
   .subFrac.full b{color:#0c2a18}
   .subFrac.full i{background:#0c2a18}
+  /* invisible placeholder: reserves the subtask-button slot so streak stays left-aligned */
+  .subFrac.placeholder{visibility:hidden;border-color:transparent;background:none;cursor:default;pointer-events:none}
   .sublist{margin-top:7px;border-top:1px solid var(--line);padding-top:6px;display:flex;flex-direction:column;gap:2px}
   .subitem{display:flex;align-items:center;gap:8px;padding:3px 2px;cursor:pointer;border-radius:6px}
   .subitem:active{background:#2a1947}
@@ -208,6 +210,7 @@
   .anCard .sub{font-size:11px;color:var(--muted);margin-top:2px}
   .anCard.full{grid-column:1 / -1}
   .anCard svg{display:block;width:100%;overflow:visible}
+  .anCard svg .spkHit,.anCard svg .barHit{touch-action:none}
   .anCard input{width:100%;background:#2a1947;border:1px solid var(--line);color:var(--ink);
     border-radius:8px;padding:8px 10px;font-size:14px}
   .anSection{margin:16px 2px 6px;font-size:13px;font-weight:700;color:var(--accent)}
@@ -317,7 +320,7 @@ function load(){
 }
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
-  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits'}, s.prefs||{});
+  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0}, s.prefs||{});
   return out; }
 function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
 function applyWidth(){ document.documentElement.style.setProperty('--appw',(S.prefs.width||480)+'px'); }
@@ -563,6 +566,9 @@ function rail(t){
     const doneCl=cl.filter(c=>c.done).length;
     sub='<span class="subFrac'+(doneCl===cl.length?' full':'')+'" onclick="event.stopPropagation();toggleExpand(\''+t.id+'\')">'+
         '<b>'+doneCl+'</b><i></i><b>'+cl.length+'</b></span>';
+  } else if(t.type==='daily'){
+    // dailies: reserve the subtask-button slot so the streak stays left-aligned
+    sub='<span class="subFrac placeholder" aria-hidden="true"></span>';
   }
   if(!counter && !sub) return '';
   return '<div class="rail">'+counter+sub+'</div>';
@@ -873,7 +879,8 @@ function anCompareSeries(from,to){
   return { days, metrics, per };
 }
 function fmtDate(ms){ const d=new Date(ms); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
-function svgSpark(series,cumulative,color,h){
+// tips: optional array of strings aligned to series (after cumulative transform) for hover
+function svgSpark(series,cumulative,color,h,tips){
   h=h||60; const w=300;
   if(!series.length) return '<svg viewBox="0 0 '+w+' '+h+'"><text x="'+(w/2)+'" y="'+(h/2)+'" fill="var(--muted)" font-size="11" text-anchor="middle">No data in this window</text></svg>';
   let pts=series.map(s=>s.v), run=0;
@@ -886,10 +893,16 @@ function svgSpark(series,cumulative,color,h){
   pts.forEach((v,i)=>{ const x=X(i).toFixed(1),y=Y(v).toFixed(1);
     dLine+=(i?'L':'M')+x+' '+y+' '; dArea+='L'+x+' '+y+' '; });
   dArea+='L'+w+' '+h+' Z';
+  // invisible hover hit-areas only (keep the line clean — no visible points)
+  let dots='';
+  if(tips && tips.length){
+    pts.forEach((v,i)=>{ const x=X(i).toFixed(1), y=Y(v).toFixed(1);
+      dots+='<circle class="spkHit" cx="'+x+'" cy="'+y+'" r="14" fill="transparent" data-tip="'+esc(tips[i]||'')+'"/>'; });
+  }
   return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+
     '<path d="'+dArea+'" fill="'+color+'" opacity="0.18"/>'+
     '<path d="'+dLine+'" fill="none" stroke="'+color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'+
-    '</svg>';
+    dots+'</svg>';
 }
 function heatColor(v,max){
   if(!v) return 'var(--panel2)';
@@ -909,13 +922,15 @@ function svgCompare(cmp){
   const n=cmp.days.length;
   const X=i=> n===1? w/2 : (i/(n-1))*w;
   const Y=v=> h-4-(v/max)*(h-12);
-  let paths='';
+  let paths='', hits='';
   cmp.metrics.forEach((m,mi)=>{
     let run=0,d='';
-    cmp.days.forEach((day,i)=>{ run+=(cmp.per[m.id][day]||0); d+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(run).toFixed(1)+' '; });
+    cmp.days.forEach((day,i)=>{ run+=(cmp.per[m.id][day]||0); const x=X(i).toFixed(1), y=Y(run).toFixed(1);
+      d+=(i?'L':'M')+x+' '+y+' ';
+      hits+='<circle class="spkHit" cx="'+x+'" cy="'+y+'" r="14" fill="transparent" data-tip="'+esc(m.name+' · '+fmtDate(day)+': '+run.toLocaleString()+' total')+'"/>'; });
     paths+='<path d="'+d+'" fill="none" stroke="'+METRIC_COLORS[mi%METRIC_COLORS.length]+'" stroke-width="2" stroke-linejoin="round"/>';
   });
-  return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+paths+'</svg>';
+  return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+paths+hits+'</svg>';
 }
 // simple vertical bar chart from [{label,v}]
 function svgBars(data,color){
@@ -923,10 +938,13 @@ function svgBars(data,color){
   if(!data.length) return '<svg viewBox="0 0 '+w+' '+h+'"><text x="'+(w/2)+'" y="'+(h/2)+'" fill="var(--muted)" font-size="11" text-anchor="middle">No data</text></svg>';
   const max=Math.max(1,...data.map(d=>d.v));
   const n=data.length, bw=Math.max(2,(w/n)*0.7), gap=(w/n)*0.3;
-  let bars='';
+  let bars='', hits='';
   data.forEach((d,i)=>{ const bh=(d.v/max)*(h-14); const x=i*(w/n)+gap/2; const y=h-bh-2;
-    bars+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+bh.toFixed(1)+'" rx="1.5" fill="'+color+'"><title>'+d.label+': '+d.v+'</title></rect>'; });
-  return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+bars+'</svg>';
+    const tip=esc(d.label+': '+d.v.toLocaleString()+' reps');
+    bars+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+bh.toFixed(1)+'" rx="1.5" fill="'+color+'"/>';
+    // full-height invisible hit-area so the whole column is hoverable (uses shared instant tooltip)
+    hits+='<rect class="barHit" x="'+(i*(w/n)).toFixed(1)+'" y="0" width="'+(w/n).toFixed(1)+'" height="'+h+'" fill="transparent" data-tip="'+tip+'"/>'; });
+  return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+bars+hits+'</svg>';
 }
 function viewAnalytics(){
   const p=anPrefs();
@@ -1168,7 +1186,9 @@ function refreshAnalytics(){
      '<div class="sub">'+reps.taps+' taps · '+days+'d</div></div>';
   h+='<div class="anCard"><div class="k">Per-day avg</div><div class="v">'+Math.round(reps.total/days).toLocaleString()+'</div>'+
      '<div class="sub">in this window</div></div>';
-  h+='<div class="anCard full"><div class="k">Cumulative over window</div>'+svgSpark(series,true,'var(--accent)',70)+'</div>';
+  // cumulative tips: running total per day
+  let _run=0; const cumTips=series.map(s=>{ _run+=s.v; return fmtDate(s.d)+': '+_run.toLocaleString()+' total'; });
+  h+='<div class="anCard full"><div class="k">Cumulative over window</div>'+svgSpark(series,true,'var(--accent)',70,cumTips)+'</div>';
   h+='</div>';
   if(reps.matched){
     h+='<div class="anNote">Matched habits: '+Object.keys(reps.byTask).map(t=>esc(t)+' ('+reps.byTask[t]+')').join(', ')+'.</div>';
@@ -1189,10 +1209,11 @@ function refreshAnalytics(){
   if(mile.activityDays>mile.repDays){
     h+='<div class="anNote">'+(mile.activityDays-mile.repDays)+' active day(s) have no exact tap count in the Habitica export (exact-only policy: they count as activity but contribute 0 reps, so totals are a verified floor, never estimated).</div>';
   }
-  // --- value / score trend (real, continuous since 2025) ---
-  const vs=anValueSeries(M,from,to);
-  h+='<div class="anSection">'+esc(mname)+' &mdash; value/score trend</div>';
-  h+='<div class="anCard full"><div class="k">Habitica habit value over window</div>'+svgSpark(vs,false,'var(--mp)',60)+'</div>';
+  // --- reps per day (non-cumulative): repetitions done on each day ---
+  const daily=anRepsSeries(M,from,to);            // {d, v=reps that day}
+  const dailyTips=daily.map(s=>fmtDate(s.d)+': '+s.v.toLocaleString()+' reps');
+  h+='<div class="anSection">'+esc(mname)+' &mdash; reps per day</div>';
+  h+='<div class="anCard full"><div class="k">Repetitions done each day</div>'+svgSpark(daily,false,'var(--mp)',60,dailyTips)+'</div>';
   // --- weekly / monthly breakdown ---
   const bdMode = days>120 ? 'month' : 'week';
   const bd=anBreakdown(M,from,to,bdMode);
@@ -1221,7 +1242,8 @@ function refreshAnalytics(){
      '<div class="sub">'+adh.length+' tracked days</div></div>'+
      '<div class="anCard"><div class="k">Days logged</div><div class="v">'+adh.length+'</div><div class="sub">with due dailies</div></div>'+
      '<div class="anCard full"><div class="k">Completion % over window</div>'+
-       svgSpark(adh.map(a=>({d:a.d,v:a.pct*100})),false,'var(--green)',70)+'</div></div>';
+       svgSpark(adh.map(a=>({d:a.d,v:a.pct*100})),false,'var(--green)',70,
+         adh.map(a=>fmtDate(a.d)+': '+Math.round(a.pct*100)+'% ('+a.done+'/'+a.tot+')'))+'</div></div>';
   const inten=anIntensity(from,to);
   const maxI=Math.max(1,...Object.values(inten));
   h+='<div class="anSection">Activity heatmap</div>';
@@ -1234,6 +1256,7 @@ function refreshAnalytics(){
   h+='<div class="anNote">History reflects dated value/tap snapshots from Habitica (engagement events), not a per-calendar-day completion grid. Counts shown are from logged + taps and completion flags.</div>';
   body.innerHTML=h;
   bindHeatTooltips();
+  bindTips('.spkPt'); bindTips('.spkHit'); bindTips('.barHit');
 }
 function anHeatmapHTML(from,to,inten,maxI){
   const start=new Date(Math.floor(from/DAY)*DAY); start.setHours(0,0,0,0);
@@ -1287,7 +1310,49 @@ function enableDragReorder(){
       const after=(e.clientY-r.top)/r.height > 0.5;
       card.parentNode.insertBefore(_dragEl, after?card.nextSibling:card);
     });
+    // --- touch / pointer drag (HTML5 DnD does not work on touch) ---
+    enableTouchDrag(card);
   });
+}
+// Touch reordering via Pointer Events. Long-press to pick up so normal
+// taps and vertical scrolls still work; then move to reorder.
+let _tDrag=null, _tTimer=null, _tStartY=0, _tStartX=0;
+function enableTouchDrag(card){
+  card.addEventListener('pointerdown',e=>{
+    if(e.pointerType==='mouse') return;        // mouse uses native DnD
+    // ignore presses that begin on interactive controls (check / +/- buttons)
+    if(e.target.closest('.check')) return;
+    _tStartX=e.clientX; _tStartY=e.clientY;
+    _tTimer=setTimeout(()=>{                     // long-press => begin drag
+      _tDrag=card; _dragList=card.dataset.list;
+      card.classList.add('dragging');
+      card.setPointerCapture(e.pointerId);
+      if(navigator.vibrate) navigator.vibrate(15);
+    },220);
+  });
+  card.addEventListener('pointermove',e=>{
+    if(!_tDrag){                                 // not yet dragging
+      // moved too far before long-press fired => it's a scroll, cancel pickup
+      if(_tTimer && (Math.abs(e.clientY-_tStartY)>8 || Math.abs(e.clientX-_tStartX)>8)){
+        clearTimeout(_tTimer); _tTimer=null;
+      }
+      return;
+    }
+    e.preventDefault();                          // stop page scroll while dragging
+    const el=document.elementFromPoint(e.clientX,e.clientY);
+    const over=el && el.closest('.task[draggable="true"]');
+    if(over && over!==_tDrag && over.dataset.list===_dragList){
+      const r=over.getBoundingClientRect();
+      const after=(e.clientY-r.top)/r.height > 0.5;
+      over.parentNode.insertBefore(_tDrag, after?over.nextSibling:over);
+    }
+  });
+  const end=()=>{
+    clearTimeout(_tTimer); _tTimer=null;
+    if(_tDrag){ _tDrag.classList.remove('dragging'); _tDrag=null; commitOrder(); }
+  };
+  card.addEventListener('pointerup',end);
+  card.addEventListener('pointercancel',end);
 }
 // read the DOM order back into S.tasks / S.rewards
 function commitOrder(){
@@ -1309,28 +1374,47 @@ function commitOrder(){
   }
   save();
 }
-// ---- heatmap tooltip with 2s hover delay ----
-let _heatTimer=null, _heatTip=null;
-function heatTipEl(){
-  if(!_heatTip){ _heatTip=document.createElement('div'); _heatTip.id='heatTip';
-    _heatTip.style.cssText='position:fixed;z-index:80;pointer-events:none;background:#1d1233;color:var(--ink);'+
+// ---- shared hover tooltip (heatmap + charts), delay from S.prefs.tipDelay ----
+let _tipTimer=null, _tipEl=null;
+function tipEl(){
+  if(!_tipEl){ _tipEl=document.createElement('div'); _tipEl.id='hoverTip';
+    _tipEl.style.cssText='position:fixed;z-index:80;pointer-events:none;background:#1d1233;color:var(--ink);'+
       'border:1px solid var(--accent);border-radius:8px;padding:5px 9px;font-size:12px;display:none;box-shadow:0 4px 12px rgba(0,0,0,.5)';
-    document.body.appendChild(_heatTip); }
-  return _heatTip;
+    document.body.appendChild(_tipEl); }
+  return _tipEl;
 }
-function bindHeatTooltips(){
-  document.querySelectorAll('.anHeatCell[data-tip]').forEach(cell=>{
-    cell.addEventListener('mouseenter',e=>{
-      clearTimeout(_heatTimer);
-      const x=e.clientX, y=e.clientY;
-      _heatTimer=setTimeout(()=>{
-        const tip=heatTipEl(); tip.textContent=cell.dataset.tip;
-        tip.style.display='block'; tip.style.left=(x+12)+'px'; tip.style.top=(y+12)+'px';
-      },2000); // 2-second delay
-    });
-    cell.addEventListener('mouseleave',()=>{ clearTimeout(_heatTimer); if(_heatTip)_heatTip.style.display='none'; });
+function tipDelayMs(){ const d=(S.prefs&&S.prefs.tipDelay); return Math.max(0,(d==null?0:+d))*1000; }
+function showTip(text,x,y){ const t=tipEl(); t.textContent=text; t.style.display='block';
+  t.style.left=(x+12)+'px'; t.style.top=(y+12)+'px'; }
+function hideTip(){ clearTimeout(_tipTimer); if(_tipEl)_tipEl.style.display='none'; }
+// bind tooltips to any elements matching selector that carry data-tip
+function bindTips(selector){
+  document.querySelectorAll(selector+'[data-tip]').forEach(el=>{
+    const handler=e=>{
+      clearTimeout(_tipTimer);
+      const x=e.clientX, y=e.clientY, txt=el.dataset.tip, delay=tipDelayMs();
+      if(delay<=0) showTip(txt,x,y);
+      else _tipTimer=setTimeout(()=>showTip(txt,x,y),delay);
+    };
+    el.addEventListener('mouseenter',handler);
+    el.addEventListener('mousemove',handler); // keep tip following + responsive
+    el.addEventListener('mouseleave',hideTip);
+    // --- touch support: show tip on finger, follow it, hide on release ---
+    const tHandler=e=>{
+      const t=e.touches&&e.touches[0]; if(!t)return;
+      e.preventDefault();                       // stop scroll/zoom while reading tip
+      // re-resolve target under finger so dragging across bars/points updates tip
+      const u=document.elementFromPoint(t.clientX,t.clientY);
+      const tip=(u&&u.dataset&&u.dataset.tip)||el.dataset.tip;
+      clearTimeout(_tipTimer); showTip(tip,t.clientX,t.clientY);
+    };
+    el.addEventListener('touchstart',tHandler,{passive:false});
+    el.addEventListener('touchmove',tHandler,{passive:false});
+    el.addEventListener('touchend',hideTip);
+    el.addEventListener('touchcancel',hideTip);
   });
 }
+function bindHeatTooltips(){ bindTips('.anHeatCell'); }
 function toggle(id){
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
   if(t.type==='daily'){ t.done? uncompleteDaily(t) : completeTask(t); }
@@ -1457,6 +1541,10 @@ function openSettings(){
   h+='<label>Note lines shown on cards</label><div class="seg" id="setNotes">'+
     [['Off',0],['1',1],['2',2],['3',3],['5',5]].map(o=>'<button class="'+(nl===o[1]?'on':'')+'" onclick="setNotesLines('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
   h+='<div class="small" style="margin-top:6px">How many lines of a task\'s notes preview on the list (default 3, like Habitica).</div>';
+  const td=(S.prefs.tipDelay==null?0:S.prefs.tipDelay);
+  h+='<label>Hover tooltip delay</label><div class="seg" id="setTipDelay">'+
+    [['Instant',0],['0.5s',0.5],['1s',1],['2s',2]].map(o=>'<button class="'+(td===o[1]?'on':'')+'" onclick="setTipDelay('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
+  h+='<div class="small" style="margin-top:6px">Delay before the date/value tooltip shows on the analytics heatmap and charts (default Instant).</div>';
   h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue.</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
@@ -1470,6 +1558,7 @@ function openSettings(){
 }
 function setWidth(px){ S.prefs.width=px; applyWidth(); save(); openSettings(); }
 function setNotesLines(n){ S.prefs.notesLines=n; save(); openSettings(); }
+function setTipDelay(s){ S.prefs.tipDelay=s; save(); openSettings(); }
 function saveSettings(){
   S.char.name=document.getElementById('setName').value.trim()||'Adventurer';
   S.char.face=document.getElementById('setFace').value||'🧙';
@@ -1492,7 +1581,7 @@ function importData(ev){
   rd.readAsText(f); ev.target.value='';
 }
 function esc(s){ return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ TAB=b.dataset.tab; if(S.prefs){S.prefs.lastTab=TAB; save();} render(); });
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ saveScroll(); TAB=b.dataset.tab; if(S.prefs){S.prefs.lastTab=TAB; save();} render(); });
 document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };
 applyWidth();
 runCron();

@@ -60,8 +60,12 @@
   body.lowhp header{animation:hpwarn 1.4s ease-in-out infinite}
   @keyframes hpwarn{0%,100%{box-shadow:none}50%{box-shadow:inset 0 0 0 2px var(--hp)}}
   main{padding:10px 10px 0}
-  .colTitle{display:flex;align-items:center;justify-content:space-between;margin:14px 4px 8px}
-  .colTitle h2{margin:0;font-size:15px;letter-spacing:.3px}
+  .colTitle{display:flex;align-items:center;gap:8px;margin:14px 4px 8px}
+  .colTitle h2{margin:0;font-size:15px;letter-spacing:.3px;flex:1}
+  .filterIcon{background:var(--panel);border:1px solid var(--line);color:var(--muted);
+    border-radius:8px;width:32px;height:32px;font-size:13px;line-height:1;cursor:pointer;flex:none}
+  .filterIcon.open{background:var(--panel2);border-color:var(--accent);color:var(--ink)}
+  .filterIcon.active{color:var(--accent);border-color:var(--accent)}
   .addBtn{background:var(--panel2);border:1px solid var(--line);color:var(--ink);
     border-radius:8px;font-size:20px;width:32px;height:32px;line-height:1;cursor:pointer}
   .task{background:var(--panel);border:1px solid var(--line);border-radius:10px;
@@ -73,7 +77,13 @@
     cursor:pointer;font-size:20px;border-right:1px solid var(--line);user-select:none}
   .task.daily .check{background:rgba(255,255,255,.03)}
   .task.done .check{background:var(--green);color:#fff}
+  .ckbox{width:22px;height:22px;border:2px solid var(--muted);border-radius:6px;display:block}
+  .ckmark{font-size:22px;font-weight:900;color:#fff;line-height:1}
   .task.shopitem .check{background:rgba(247,78,82,.12)}
+  .task[draggable="true"]{cursor:grab}
+  .task.dragging{opacity:.5;outline:2px dashed var(--accent)}
+  .task .check.coin{display:flex;align-items:center;justify-content:center}
+  .task .check.coin svg{display:block}
   .task.habit .check.hbtn{font-size:22px;font-weight:700}
   .task.habit .check.up{color:var(--green);border-right:1px solid var(--line)}
   .task.habit .check.down{color:var(--red);border-left:1px solid var(--line);border-right:none}
@@ -81,7 +91,43 @@
   .task .body{flex:1;min-width:0;padding:9px 10px;cursor:pointer}
   .task .ttl{font-weight:600;font-size:14px;word-break:break-word}
   .task.done .ttl{text-decoration:line-through;color:var(--muted)}
-  .task .meta{margin-top:3px;font-size:11px;color:var(--muted);display:flex;gap:8px;flex-wrap:wrap}
+  .task .meta{margin-top:3px;font-size:11px;color:var(--muted);display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .pill.streak{color:var(--gold);border-color:var(--gold)}
+  .pill.cnt{color:var(--accent);border-color:var(--accent);font-variant-numeric:tabular-nums}
+  .task .notes{margin-top:5px;font-size:12px;color:var(--muted);line-height:1.35;
+    white-space:pre-wrap;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical}
+  /* right-side rail: stays pinned to top, items sit at bottom of the title row height */
+  .rail{flex:none;align-self:flex-start;display:flex;align-items:flex-end;gap:6px;
+    padding:9px 10px 9px 4px;min-height:42px}
+  .railItem{font-size:12px;font-weight:700;padding:2px 7px;border-radius:7px;
+    border:1px solid var(--line);background:#2a1947;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .railItem.streak{color:var(--gold);border-color:var(--gold)}
+  .railItem.cnt{color:var(--accent);border-color:var(--accent)}
+  .subFrac{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;
+    min-width:30px;padding:3px 6px;border:1px solid var(--line);border-radius:7px;background:#2a1947;cursor:pointer}
+  .subFrac b{font-size:13px;font-weight:700;line-height:1.1;color:var(--ink);font-variant-numeric:tabular-nums}
+  .subFrac i{width:16px;height:1px;background:var(--muted);margin:1px 0}
+  .subFrac.full{background:var(--green);border-color:var(--green)}
+  .subFrac.full b{color:#0c2a18}
+  .subFrac.full i{background:#0c2a18}
+  .sublist{margin-top:7px;border-top:1px solid var(--line);padding-top:6px;display:flex;flex-direction:column;gap:2px}
+  .subitem{display:flex;align-items:center;gap:8px;padding:3px 2px;cursor:pointer;border-radius:6px}
+  .subitem:active{background:#2a1947}
+  .subbox{width:20px;height:20px;flex:none;border:1px solid var(--line);border-radius:5px;
+    background:#2a1947;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff}
+  .subbox.on{background:var(--green);border-color:var(--green)}
+  .subtxt{font-size:13px;color:var(--ink)}
+  .subtxt.sdone{text-decoration:line-through;color:var(--muted)}
+  .filterBar{display:flex;gap:6px;margin:0 4px 10px}
+  .filterBar button{flex:1;background:var(--panel);border:1px solid var(--line);color:var(--muted);
+    border-radius:8px;padding:6px 4px;font-size:12px;cursor:pointer}
+  .filterBar button.on{background:var(--panel2);border-color:var(--accent);color:var(--ink);font-weight:700}
+  .adjRow{display:flex;gap:8px}
+  .adj{flex:1;display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;padding:6px 8px}
+  .adj span{flex:1;font-size:14px;font-weight:700;font-variant-numeric:tabular-nums}
+  .adj button{width:30px;height:30px;border:1px solid var(--line);background:var(--panel2);color:var(--ink);
+    border-radius:6px;font-size:16px;cursor:pointer;flex:none}
   .valdot{width:10px;flex:none;align-self:stretch}
   .pill{font-size:10px;padding:1px 6px;border-radius:6px;background:#2a1947;border:1px solid var(--line)}
   .scrim{position:fixed;inset:0;background:rgba(10,5,20,.66);display:none;z-index:50;
@@ -138,6 +184,76 @@
   .deathOverlay.show{display:flex}
   .deathOverlay .card{max-width:340px}
   .deathOverlay h2{color:var(--red)}
+
+  /* ---------- Analytics ---------- */
+  .anWrap{padding:4px 2px 30px}
+  .anHead{display:flex;align-items:center;justify-content:space-between;margin:2px 4px 10px}
+  .anHead h2{margin:0;font-size:18px}
+  .anRangeLbl{font-size:12px;color:var(--muted)}
+  .anChips{display:flex;gap:6px;flex-wrap:wrap;margin:0 2px 10px}
+  .anChip{background:var(--panel2);border:1px solid var(--line);color:var(--muted);
+    border-radius:999px;padding:5px 12px;font-size:12px;cursor:pointer;user-select:none}
+  .anChip.on{background:var(--accent);border-color:var(--accent);color:#241043;font-weight:700}
+  .anSlider{position:relative;height:42px;margin:2px 12px 4px;touch-action:none}
+  .anTrack{position:absolute;top:18px;left:0;right:0;height:6px;border-radius:3px;background:var(--panel2);border:1px solid var(--line)}
+  .anFill{position:absolute;top:18px;height:6px;border-radius:3px;background:var(--accent)}
+  .anHandle{position:absolute;top:9px;width:24px;height:24px;margin-left:-12px;border-radius:50%;
+    background:var(--ink);border:2px solid var(--accent);cursor:grab;box-shadow:0 2px 6px rgba(0,0,0,.4);touch-action:none}
+  .anHandle:active{cursor:grabbing;transform:scale(1.12)}
+  .anTicks{position:absolute;bottom:0;left:0;right:0;display:flex;justify-content:space-between;font-size:10px;color:var(--muted)}
+  .anCards{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 2px}
+  .anCard{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px 12px}
+  .anCard .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .anCard .v{font-size:24px;font-weight:800;margin-top:2px;line-height:1.1}
+  .anCard .sub{font-size:11px;color:var(--muted);margin-top:2px}
+  .anCard.full{grid-column:1 / -1}
+  .anCard svg{display:block;width:100%;overflow:visible}
+  .anCard input{width:100%;background:#2a1947;border:1px solid var(--line);color:var(--ink);
+    border-radius:8px;padding:8px 10px;font-size:14px}
+  .anSection{margin:16px 2px 6px;font-size:13px;font-weight:700;color:var(--accent)}
+  .anHeat{display:flex;gap:3px;overflow-x:auto;padding:4px 2px 8px}
+  .anHeatCol{display:flex;flex-direction:column;gap:3px}
+  .anHeatCell{width:11px;height:11px;border-radius:2px;background:var(--panel2)}
+  .anLegend{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);margin:2px 4px}
+  .anLegend i{width:11px;height:11px;border-radius:2px;display:inline-block}
+  .anStreak{display:flex;align-items:center;justify-content:space-between;background:var(--panel);
+    border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:6px 2px}
+  .anStreak .t{font-size:14px}
+  .anStreak .s{font-size:14px;color:var(--gold);font-weight:700;white-space:nowrap}
+  .anNote{font-size:11px;color:var(--muted);margin:6px 4px;line-height:1.4}
+  /* metric editor */
+  .mEditor{padding:14px}
+  .mEditTitle{font-size:15px;font-weight:700;margin-bottom:10px}
+  .mField{display:block;margin-top:10px}
+  .mLabel{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:5px}
+  .mEditor input[type="text"]{width:100%;background:#2a1947;border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:9px 11px;font-size:14px}
+  .mEditor input[type="text"]:focus{outline:none;border-color:var(--accent)}
+  .mHint{font-size:11px;color:var(--muted);line-height:1.4;margin-top:8px}
+  .mModeToggle{display:flex;gap:0;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#2a1947}
+  .mModeBtn{flex:1;background:none;border:none;color:var(--muted);padding:9px 8px;font-size:13px;cursor:pointer;font-weight:600}
+  .mModeBtn+.mModeBtn{border-left:1px solid var(--line)}
+  .mModeBtn.on{background:var(--accent);color:#241043;font-weight:700}
+  .mSubhead{display:flex;align-items:center;gap:8px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:14px 0 6px}
+  .mCount{background:var(--panel2);border:1px solid var(--line);border-radius:999px;min-width:20px;text-align:center;padding:1px 7px;font-size:11px;color:var(--ink)}
+  .mSelList{display:flex;flex-direction:column;gap:6px}
+  .mSelRow{display:flex;align-items:center;gap:10px;background:#2a1947;border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+  .mSelRemove{flex:none;width:22px;height:22px;border-radius:50%;border:1px solid var(--line);background:var(--panel);color:var(--muted);font-size:15px;line-height:1;cursor:pointer;padding:0}
+  .mSelRemove:active{background:var(--red);color:#fff;border-color:var(--red)}
+  .mSelName{flex:1;min-width:0;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mSelReps{flex:none;display:flex;align-items:center;gap:5px}
+  .mSelReps input.mReps{width:62px;background:var(--panel);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:6px 8px;font-size:13px;text-align:right}
+  .mSelReps input.mReps:focus{outline:none;border-color:var(--accent)}
+  .mSelUnit{font-size:11px;color:var(--muted)}
+  .mSearchWrap{margin-bottom:6px}
+  .mPickList{max-height:200px;overflow-y:auto;border:1px solid var(--line);border-radius:10px;background:#2a1947}
+  .mPickItem{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;padding:9px 11px;cursor:pointer;border:none;border-bottom:1px solid var(--line);background:none;color:var(--ink);font-size:13px;text-align:left}
+  .mPickItem:last-child{border-bottom:none}
+  .mPickItem:active{background:var(--panel2)}
+  .mPickName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mPickAdd{flex:none;color:var(--accent);font-weight:700;font-size:12px}
+  .mEmpty{padding:10px 11px;font-size:12px;color:var(--muted);text-align:center}
+  .mActions{display:flex;align-items:center;gap:8px;margin-top:14px}
+
 </style>
 </head>
 <body>
@@ -167,6 +283,7 @@
   <button data-tab="habits" class="on"><span class="ic">&#128257;</span>Habits</button>
   <button data-tab="dailies"><span class="ic">&#128197;</span>Dailies</button>
   <button data-tab="todos"><span class="ic">&#9989;</span>To-Dos</button>
+  <button data-tab="analytics"><span class="ic">&#128202;</span>Analytics</button>
   <button data-tab="rewards"><span class="ic">&#127978;</span>Rewards</button>
 </nav>
 </div>
@@ -189,7 +306,7 @@ function freshState(){
            lvl:1, xp:0, hp:50, maxHp:50, mp:0, gold:0 },
     tasks:[], rewards:[],
     lastCron: dayStamp(new Date()),
-    history:[], prefs:{ width:480 }
+    history:[], prefs:{ width:480, notesLines:3, lastTab:'habits' }
   };
 }
 let S = load();
@@ -200,7 +317,7 @@ function load(){
 }
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
-  out.prefs=Object.assign({width:480}, s.prefs||{});
+  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits'}, s.prefs||{});
   return out; }
 function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
 function applyWidth(){ document.documentElement.style.setProperty('--appw',(S.prefs.width||480)+'px'); }
@@ -247,18 +364,70 @@ function death(){
   S.char.hp = S.char.maxHp; S.char.xp = 0;
   document.getElementById('deathOverlay').classList.add('show');
 }
+// --- live history logging ---------------------------------------------
+// Append/merge a dated point onto a task's history in Habitica's shape.
+// Same-day events merge (scoredUp accumulates, completed/ value updated) so
+// the series stays one-point-per-day, continuous with the imported data.
+function logHistory(t, patch){
+  t.history = t.history || [];
+  const now = Date.now();
+  const dayOf = ms => Math.floor(ms/86400000);
+  const last = t.history[t.history.length-1];
+  if(last && dayOf(last.date)===dayOf(now)){
+    last.date = now;
+    if('value' in patch) last.value = patch.value;
+    if('scoredUp' in patch) last.scoredUp = (last.scoredUp||0) + patch.scoredUp;
+    if('scoredDown' in patch) last.scoredDown = (last.scoredDown||0) + patch.scoredDown;
+    if('completed' in patch) last.completed = patch.completed;
+  } else {
+    t.history.push(Object.assign({date:now}, patch));
+  }
+}
 function completeTask(t){
   if(t.done) return;
   const r = completionReward(t);
+  const delta = valueDelta(t.value);
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
-  t.value = clamp(t.value + valueDelta(t.value), -47.27, 99);
+  t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
+  t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };  // remember exactly what was granted
+  if(t.type==='daily'){ t.streak = (t.streak||0) + 1; logHistory(t,{value:t.value,completed:true,isDue:true}); }
+  if(t.type==='todo'){ logHistory(t,{value:t.value,completed:true}); }
   toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar();
   save(); render();
 }
+function reverseGrant(t){
+  const g = t._gr || { xp:0, gold:0, mp:0, delta:valueDelta(t.value) };
+  S.char.xp = Math.max(0, S.char.xp - g.xp);
+  S.char.gold = +Math.max(0, S.char.gold - g.gold).toFixed(2);
+  S.char.mp = Math.max(0, S.char.mp - g.mp);
+  t.value = clamp(t.value - g.delta, -47.27, 99);
+  t._gr = null;
+}
+// undo a same-day logged completion point (used when un-checking)
+function unlogToday(t){
+  if(!t.history || !t.history.length) return;
+  const dayOf = ms => Math.floor(ms/86400000);
+  const last = t.history[t.history.length-1];
+  if(dayOf(last.date)===dayOf(Date.now())){
+    if(last.completed){ last.completed=false; }
+    // if the point carried no other signal, drop it
+    if(!last.scoredUp && !last.scoredDown && !last.completed) t.history.pop();
+    else last.value = t.value;
+  }
+}
 function uncompleteDaily(t){
+  reverseGrant(t);
+  unlogToday(t);
   t.done = false;
-  t.value = clamp(t.value - valueDelta(t.value), -47.27, 99);
+  if(t.type==='daily' && t.streak){ t.streak = Math.max(0, t.streak - 1); }
+  save(); render();
+}
+function uncompleteTodo(t){
+  reverseGrant(t);
+  unlogToday(t);
+  t.done = false;
+  toast('Reverted');
   save(); render();
 }
 function scoreHabit(id, dir){
@@ -267,13 +436,31 @@ function scoreHabit(id, dir){
     const r=completionReward(t);
     gainXp(r.xp); S.char.gold=+(S.char.gold+r.gold).toFixed(2); S.char.mp+=r.mp;
     t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
+    t.cUp=(t.cUp||0)+1;
+    logHistory(t,{value:t.value,scoredUp:1});
     toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar();
   } else {
     const dmg=missDamage(t);
     t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
+    t.cDown=(t.cDown||0)+1;
+    logHistory(t,{value:t.value,scoredDown:1});
     takeDamage(dmg); toast('-'+dmg.toFixed(1)+' HP');
   }
   save(); render();
+}
+function periodBoundaryCrossed(freq, lastStamp, now){
+  // lastStamp is YYYYMMDD of the previous cron; now is a Date (today)
+  const ly=Math.floor(lastStamp/10000), lm=Math.floor(lastStamp/100)%100, ld=lastStamp%100;
+  const last=new Date(ly, lm-1, ld);
+  if(freq==='weekly'){
+    // reset if we've crossed into a new ISO-ish week (week starts Monday)
+    const monday=d=>{ const x=new Date(d); const day=(x.getDay()+6)%7; x.setDate(x.getDate()-day); x.setHours(0,0,0,0); return x.getTime(); };
+    return monday(now) > monday(last);
+  }
+  if(freq==='monthly'){
+    return now.getFullYear()*12+now.getMonth() > last.getFullYear()*12+last.getMonth();
+  }
+  return true; // daily (or unknown) -> reset every cron
 }
 function runCron(){
   const today = dayStamp(new Date());
@@ -281,11 +468,14 @@ function runCron(){
   const dow = new Date().getDay();
   let totalDmg = 0;
   S.tasks.forEach(t=>{
+    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; } return; }
     if(t.type!=='daily') return;
     const scheduledYesterday = !t.repeat || t.repeat[(dow+6)%7];
     if(scheduledYesterday && !t.done){
       totalDmg += missDamage(t);
       t.value = clamp(t.value - valueDelta(t.value), -47.27, 99);
+      t.streak = 0;
+      logHistory(t,{value:t.value,completed:false,isDue:true});
     }
     t.done = false;
     (t.checklist||[]).forEach(c=>c.done=false);
@@ -305,7 +495,38 @@ function toast(msg){
   e.className='toastMsg'; e.textContent=msg; w.appendChild(e);
   setTimeout(()=>e.remove(),2400);
 }
-let TAB='habits', EDIT=null;
+let TAB=(S.prefs && S.prefs.lastTab) || 'habits', EDIT=null;
+// FILTER, FILTEROPEN, and per-tab scroll positions persist in S.prefs
+function ensureUiPrefs(){
+  S.prefs = S.prefs || {};
+  if(!S.prefs.filter) S.prefs.filter = {habits:'all', dailies:'all', todos:'active'};
+  if(S.prefs.filterOpen===undefined) S.prefs.filterOpen=false;
+  if(!S.prefs.scroll) S.prefs.scroll = {};
+  return S.prefs;
+}
+ensureUiPrefs();
+let FILTER=S.prefs.filter;
+let FILTEROPEN=S.prefs.filterOpen;
+function toggleFilter(){ FILTEROPEN=!FILTEROPEN; S.prefs.filterOpen=FILTEROPEN; save(); render(); }
+const EXPANDED={}; // taskId -> bool (checklist expanded on card)
+function toggleExpand(id){ EXPANDED[id]=!EXPANDED[id]; render(); }
+function toggleSub(taskId, idx){
+  const t=S.tasks.find(x=>x.id===taskId); if(!t||!t.checklist||!t.checklist[idx])return;
+  t.checklist[idx].done=!t.checklist[idx].done;
+  save(); render();
+}
+function checklistBlock(t){
+  const cl=(t.checklist||[]); if(!cl.length) return '';
+  if(!EXPANDED[t.id]) return '';
+  let h='<div class="sublist">';
+  cl.forEach((c,i)=>{
+    h+='<div class="subitem" onclick="event.stopPropagation();toggleSub(\''+t.id+'\','+i+')">'+
+       '<span class="subbox '+(c.done?'on':'')+'">'+(c.done?'✔':'')+'</span>'+
+       '<span class="subtxt '+(c.done?'sdone':'')+'">'+esc(c.text)+'</span></div>';
+  });
+  h+='</div>';
+  return h;
+}
 function renderStats(){
   const c=S.char;
   document.getElementById('avatarFace').textContent=c.face;
@@ -322,44 +543,92 @@ function renderStats(){
   document.body.classList.toggle('lowhp', c.hp/c.maxHp <= 0.3);
 }
 function metaRow(t){
-  const cname=valColor(t.value)[0];
-  const cl=(t.checklist||[]); const doneCl=cl.filter(c=>c.done).length;
-  return '<div class="meta"><span class="pill">'+t.difficulty+'</span>'+
-    (cl.length?'<span>✓ '+doneCl+'/'+cl.length+'</span>':'')+
-    (t.notes?'<span>📝</span>':'')+'<span>'+cname+'</span></div>';
+  const notesPreview = (t.notes && S.prefs.notesLines>0)
+    ? '<div class="notes" style="-webkit-line-clamp:'+S.prefs.notesLines+';line-clamp:'+S.prefs.notesLines+'">'+esc(t.notes)+'</div>' : '';
+  return '<div class="meta"><span class="pill">'+t.difficulty+'</span></div>'+notesPreview+checklistBlock(t);
 }
+// the right-side rail: counter/streak + subtask toggle, pinned to top of card
+function rail(t){
+  let counter='';
+  if(t.type==='daily'){ counter='<span class="railItem streak" title="Day streak">🔥 '+(t.streak||0)+'</span>'; }
+  else if(t.type==='habit'){
+    const up=t.up!==false, down=t.down!==false;
+    if(up&&down) counter='<span class="railItem cnt" title="Today + / −">+'+(t.cUp||0)+'|−'+(t.cDown||0)+'</span>';
+    else if(up)  counter='<span class="railItem cnt" title="Today +">+'+(t.cUp||0)+'</span>';
+    else if(down)counter='<span class="railItem cnt" title="Today −">−'+(t.cDown||0)+'</span>';
+  }
+  const cl=(t.checklist||[]);
+  let sub='';
+  if(cl.length){
+    const doneCl=cl.filter(c=>c.done).length;
+    sub='<span class="subFrac'+(doneCl===cl.length?' full':'')+'" onclick="event.stopPropagation();toggleExpand(\''+t.id+'\')">'+
+        '<b>'+doneCl+'</b><i></i><b>'+cl.length+'</b></span>';
+  }
+  if(!counter && !sub) return '';
+  return '<div class="rail">'+counter+sub+'</div>';
+}
+// Inline SVG coin — renders identically on every platform (no emoji-font dependency)
+const COIN_SVG='<svg viewBox="0 0 24 24" width="22" height="22" aria-label="coin" role="img">'+
+  '<circle cx="12" cy="12" r="10" fill="#ffbe5c" stroke="#c8862f" stroke-width="1.5"/>'+
+  '<circle cx="12" cy="12" r="6.5" fill="none" stroke="#c8862f" stroke-width="1.2" opacity="0.7"/>'+
+  '<text x="12" y="16" text-anchor="middle" font-size="9" font-weight="700" fill="#7a4d12" font-family="serif">$</text></svg>';
 function taskCard(t){
   const ccol=valColor(t.value)[1];
-  const checkIcon = t.done ? '✔' : (t.type==='daily'?'○':'▫');
-  return '<div class="task '+t.type+' '+(t.done?'done':'')+'">'+
+  const inner = t.done ? '<span class="ckmark">✓</span>' : '<span class="ckbox"></span>';
+  return '<div class="task '+t.type+' '+(t.done?'done':'')+'" draggable="true" data-id="'+t.id+'" data-list="tasks">'+
     '<div class="valdot" style="background:'+ccol+'"></div>'+
-    '<div class="check" onclick="toggle(\''+t.id+'\')">'+checkIcon+'</div>'+
-    '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div></div>';
+    '<div class="check" onclick="toggle(\''+t.id+'\')">'+inner+'</div>'+
+    '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+rail(t)+'</div>';
 }
 function habitCard(t){
   const ccol=valColor(t.value)[1];
   const up = t.up!==false, down = t.down!==false;
-  return '<div class="task habit"><div class="valdot" style="background:'+ccol+'"></div>'+
+  return '<div class="task habit" draggable="true" data-id="'+t.id+'" data-list="tasks"><div class="valdot" style="background:'+ccol+'"></div>'+
     (up?'<div class="check hbtn up" onclick="scoreHabit(\''+t.id+'\',1)">+</div>':'<div class="check hbtn off">+</div>')+
-    '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+
+    '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+rail(t)+
     (down?'<div class="check hbtn down" onclick="scoreHabit(\''+t.id+'\',-1)">−</div>':'<div class="check hbtn off">−</div>')+'</div>';
 }
+function colTitle(title, addType){
+  const tabKey = addType==='habit'?'habits':addType==='daily'?'dailies':'todos';
+  const defaultVal = tabKey==='todos'?'active':'all';
+  const active = FILTER[tabKey]!==defaultVal;
+  return '<div class="colTitle"><h2>'+title+'</h2>'+
+    '<button class="filterIcon'+(FILTEROPEN?' open':'')+(active?' active':'')+'" title="Filter" onclick="toggleFilter()">🔽</button>'+
+    '<button class="addBtn" onclick="openEdit(null,\''+addType+'\')">+</button></div>';
+}
+function filterBar(tab, opts){
+  if(!FILTEROPEN) return '';
+  return '<div class="filterBar">'+opts.map(o=>'<button class="'+(FILTER[tab]===o[1]?'on':'')+'" onclick="setFilter(\''+tab+'\',\''+o[1]+'\')">'+o[0]+'</button>').join('')+'</div>';
+}
+function setFilter(tab,val){ FILTER[tab]=val; S.prefs.filter=FILTER; save(); render(); }
 function viewHabits(){
-  const habits=S.tasks.filter(t=>t.type==='habit');
-  return '<div class="colTitle"><h2>Habits</h2><button class="addBtn" onclick="openEdit(null,\'habit\')">+</button></div>'+
-    (habits.length?habits.map(habitCard).join(''):'<div class="empty">No habits yet — add good or bad behaviors to reinforce with + / −.</div>');
+  let habits=S.tasks.filter(t=>t.type==='habit');
+  const fl=FILTER.habits;
+  if(fl==='weak') habits=habits.filter(t=>t.value<1);
+  else if(fl==='strong') habits=habits.filter(t=>t.value>=1);
+  const bar=filterBar('habits',[['All','all'],['Weak','weak'],['Strong','strong']]);
+  return colTitle('Habits','habit')+bar+
+    (habits.length?habits.map(habitCard).join(''):'<div class="empty">Nothing matches this filter.</div>');
 }
 function viewDailies(){
-  const dailies=S.tasks.filter(t=>t.type==='daily');
-  return '<div class="colTitle"><h2>Dailies</h2><button class="addBtn" onclick="openEdit(null,\'daily\')">+</button></div>'+
-    (dailies.length?dailies.map(taskCard).join(''):'<div class="empty">No dailies yet — add scheduled tasks here.</div>');
+  let dailies=S.tasks.filter(t=>t.type==='daily');
+  const fl=FILTER.dailies; const dow=new Date().getDay();
+  const isScheduledToday=t=> !t.repeat || t.repeat[new Date().getDay()];
+  if(fl==='due') dailies=dailies.filter(t=> isScheduledToday(t) && !t.done);
+  else if(fl==='notdue') dailies=dailies.filter(t=> t.done || !isScheduledToday(t));
+  const bar=filterBar('dailies',[['All','all'],['Due','due'],['Not Due','notdue']]);
+  return colTitle('Dailies','daily')+bar+
+    (dailies.length?dailies.map(taskCard).join(''):'<div class="empty">Nothing matches this filter.</div>');
 }
 function viewTodos(){
-  const todos=S.tasks.filter(t=>t.type==='todo' && !t.done);
-  const done=S.tasks.filter(t=>t.type==='todo' && t.done);
-  return '<div class="colTitle"><h2>To-Dos</h2><button class="addBtn" onclick="openEdit(null,\'todo\')">+</button></div>'+
-    (todos.length?todos.map(taskCard).join(''):'<div class="empty">Nothing to do. Add a one-off task.</div>')+
-    (done.length?'<div class="colTitle"><h2 style="color:var(--muted);font-size:13px">Completed</h2></div>'+done.map(taskCard).join(''):'');
+  const fl=FILTER.todos;
+  const bar=filterBar('todos',[['Active','active'],['Complete','complete'],['All','all']]);
+  let list;
+  if(fl==='complete') list=S.tasks.filter(t=>t.type==='todo' && t.done);
+  else if(fl==='all') list=S.tasks.filter(t=>t.type==='todo');
+  else list=S.tasks.filter(t=>t.type==='todo' && !t.done);
+  return colTitle('To-Dos','todo')+bar+
+    (list.length?list.map(taskCard).join(''):'<div class="empty">Nothing matches this filter.</div>');
 }
 function viewRewards(){
   let h='<div class="colTitle"><h2>Shop</h2></div>'+
@@ -370,28 +639,708 @@ function viewRewards(){
     '<div class="meta"><span class="pill">'+i.cost+' gold</span><span>'+i.desc+'</span></div></div></div>').join('');
   h+='<div class="colTitle"><h2>Your Rewards</h2><button class="addBtn" onclick="openReward(null)">+</button></div>'+
     '<div class="small" style="margin:0 4px 10px">Spend gold on real-life rewards you define yourself.</div>';
-  h+= S.rewards.length ? S.rewards.map(r=>'<div class="task"><div class="valdot" style="background:var(--gold)"></div>'+
-    '<div class="check" onclick="buyReward(\''+r.id+'\')" title="Buy">🪙</div>'+
+  h+= S.rewards.length ? S.rewards.map(r=>'<div class="task" draggable="true" data-id="'+r.id+'" data-list="rewards"><div class="valdot" style="background:var(--gold)"></div>'+
+    '<div class="check coin" onclick="buyReward(\''+r.id+'\')" title="Buy">'+COIN_SVG+'</div>'+
     '<div class="body" onclick="openReward(\''+r.id+'\')"><div class="ttl">'+esc(r.title)+'</div>'+
     '<div class="meta"><span class="pill">'+r.cost+' gold</span>'+(r.notes?'<span>📝</span>':'')+'</div></div></div>').join('')
     : '<div class="empty">No rewards yet. Create one to spend your gold on.</div>';
   return h;
 }
+
+/* ============================================================
+   ANALYTICS
+   History points (from Habitica import):
+     habit: {date:<ms>, value, scoredUp, scoredDown}
+     daily: {date:<ms>, value, completed, isDue}
+   scoredUp = "+ taps that day"; completed = real daily-completion flag.
+   `value` is Habitica's internal score and is NOT used as a count.
+   ============================================================ */
+const DAY = 86400000;
+function anPrefs(){
+  S.prefs = S.prefs || {};
+  if(!S.prefs.an) S.prefs.an = { fromOff:90, toOff:0, snap:'90d', metricKw:'klik' };
+  const a=S.prefs.an;
+  // saved named metrics (kliky, zdvihy, ...). Seed sensibly on first run.
+  if(!a.metrics){
+    a.metrics = [
+      {id:uid(), name:'Kliky', keyword:'klik'},
+      {id:uid(), name:'Zdvihy', keyword:'zdvih'}
+    ];
+  }
+  if(a.activeMetric===undefined) a.activeMetric = a.metrics[0] ? a.metrics[0].id : null;
+  return a;
+}
+function anActiveMetric(){
+  const a=anPrefs();
+  return a.metrics.find(m=>m.id===a.activeMetric) || a.metrics[0] || null;
+}
+// Normalize a metric argument: callers may pass a keyword string (legacy) or a
+// metric object {name,keyword,exact,habits:[{id,reps}]}. Returns a matcher.
+function anMatcher(arg){
+  // string -> keyword matcher with title-number reps
+  if(typeof arg==='string'){
+    const kw=arg.trim().toLowerCase();
+    return {
+      match: e => e.type==='habit' && e.title.toLowerCase().includes(kw),
+      reps:  e => e.reps,                 // already title-number based in events
+      keyword: kw
+    };
+  }
+  const m=arg||{};
+  if(m.exact && Array.isArray(m.habits) && m.habits.length){
+    // explicit habit membership + optional per-habit reps-per-tap override
+    const map={}; m.habits.forEach(h=>{ map[h.id]= (h.reps==null||h.reps==='')? null : Number(h.reps); });
+    return {
+      match: e => e.type==='habit' && (e.taskId in map),
+      reps:  e => { const ov=map[e.taskId]; return ov==null ? e.reps : ov*(e.scoredUp||0); },
+      keyword: (m.keyword||'').toLowerCase()
+    };
+  }
+  // default: keyword match, title-number reps
+  const kw=(m.keyword||'').trim().toLowerCase();
+  return {
+    match: e => e.type==='habit' && e.title.toLowerCase().includes(kw),
+    reps:  e => e.reps,
+    keyword: kw
+  };
+}
+function anAllEvents(){
+  const ev=[];
+  (S.tasks||[]).forEach(t=>{
+    const rpt = t.repsPerTap || repsPerTap(t.title);
+    (t.history||[]).forEach(p=>{
+      if(!p || typeof p.date!=='number') return;
+      const su=p.scoredUp||0;
+      // prefer the enriched, exact `reps` field; fall back to title×taps for old saves
+      const reps = ('reps' in p) ? (p.reps||0) : rpt*su;
+      const repCounted = ('repCounted' in p) ? !!p.repCounted : (su>0);
+      const scored = ('scored' in p && p.scored!==null) ? !!p.scored : (su>0 || p.completed===true);
+      ev.push({ taskId:t.id, title:t.title, type:t.type, repsPerTap:rpt,
+        date:p.date, value:p.value,
+        scoredUp:su, scoredDown:p.scoredDown||0,
+        reps:reps, repCounted:repCounted, scored:scored,
+        completed:('completed' in p)? !!p.completed : null });
+    });
+  });
+  return ev;
+}
+function anSpan(){
+  const ev=anAllEvents();
+  if(!ev.length){ const now=Date.now(); return [now-90*DAY, now]; }
+  let mn=Infinity,mx=-Infinity;
+  ev.forEach(e=>{ if(e.date<mn)mn=e.date; if(e.date>mx)mx=e.date; });
+  return [mn, Math.max(mx, Date.now())];
+}
+function anWindow(){
+  const p=anPrefs(); const now=Date.now();
+  const [mn]=anSpan();
+  let to=now - (p.toOff||0)*DAY;
+  let from=now - (p.fromOff||90)*DAY;
+  if(p.snap==='all'){ from=mn; to=now; }
+  if(from<mn) from=mn;
+  if(to>now) to=now;
+  if(from>to) from=to;
+  return [from,to];
+}
+function repsPerTap(title){ const m=(title||'').match(/\d+/); return m?parseInt(m[0],10):1; }
+function repsPerTapTitle(t){ return t; }
+function anCumulativeReps(metric,from,to){
+  const M=anMatcher(metric);
+  const ev=anAllEvents().filter(e=>M.match(e) && e.date>=from && e.date<=to);
+  let total=0, taps=0, missingTapPts=0, activityDays=0;
+  const byTask={};
+  ev.forEach(e=>{
+    const r=M.reps(e);
+    total += r; taps += e.scoredUp;
+    if(e.scored) activityDays++;          // a recorded day = activity, exact-reps or not
+    if(!e.repCounted && e.scored) missingTapPts++;  // active but no exact rep count
+    byTask[e.title]=(byTask[e.title]||0)+r;
+  });
+  return {total,taps,byTask,missingTapPts,activityDays,matched:Object.keys(byTask).length};
+}
+function anRepsSeries(metric,from,to){
+  const M=anMatcher(metric);
+  const buckets={};
+  anAllEvents().forEach(e=>{
+    if(!M.match(e))return;
+    if(e.date<from||e.date>to)return;
+    const day=Math.floor(e.date/DAY)*DAY;
+    buckets[day]=(buckets[day]||0)+M.reps(e);
+  });
+  return Object.keys(buckets).sort((a,b)=>a-b).map(d=>({d:+d,v:buckets[d]}));
+}
+// value/score trend per metric: avg habit value per day (real, continuous since 2025)
+function anValueSeries(metric,from,to){
+  const M=anMatcher(metric);
+  const day={};
+  anAllEvents().forEach(e=>{
+    if(!M.match(e))return;
+    if(e.date<from||e.date>to||e.value==null)return;
+    const d=Math.floor(e.date/DAY)*DAY;
+    day[d]=day[d]||{sum:0,n:0};
+    day[d].sum+=e.value; day[d].n++;
+  });
+  return Object.keys(day).sort((a,b)=>a-b).map(d=>({d:+d,v:day[d].sum/day[d].n}));
+}
+// activity-day series (1 if any matching habit was scored that day) for the metric
+function anActivitySeries(metric,from,to){
+  const M=anMatcher(metric);
+  const day={};
+  anAllEvents().forEach(e=>{
+    if(!M.match(e))return;
+    if(e.date<from||e.date>to||!e.scored)return;
+    day[Math.floor(e.date/DAY)*DAY]=1;
+  });
+  return Object.keys(day).map(Number).sort((a,b)=>a-b);
+}
+// per-year and per-month rollups of reps for a metric
+function anRollup(kw,mode){
+  const [mn]=anSpan();
+  const series=anRepsSeries(kw,mn,Date.now());
+  const b={};
+  series.forEach(s=>{ const dt=new Date(s.d);
+    const key = mode==='year' ? ''+dt.getFullYear()
+              : dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0');
+    b[key]=(b[key]||0)+s.v; });
+  return Object.keys(b).sort().map(k=>({label:k,v:b[k]}));
+}
+function anAdherenceSeries(from,to){
+  const day={};
+  anAllEvents().forEach(e=>{
+    if(e.type!=='daily'||e.completed===null)return;
+    if(e.date<from||e.date>to)return;
+    const d=Math.floor(e.date/DAY)*DAY;
+    day[d]=day[d]||{done:0,tot:0};
+    day[d].tot++; if(e.completed) day[d].done++;
+  });
+  return Object.keys(day).sort((a,b)=>a-b).map(d=>({d:+d,pct:day[d].tot?day[d].done/day[d].tot:0,done:day[d].done,tot:day[d].tot}));
+}
+function anIntensity(from,to){
+  const day={};
+  anAllEvents().forEach(e=>{
+    if(e.date<from||e.date>to)return;
+    const d=Math.floor(e.date/DAY)*DAY;
+    let w=e.scoredUp||0; if(e.completed) w+=1;
+    if(w>0) day[d]=(day[d]||0)+w;
+  });
+  return day;
+}
+function anStreaks(){
+  return (S.tasks||[]).filter(t=>t.type==='daily').map(t=>({title:t.title,streak:t.streak||0}))
+    .sort((a,b)=>b.streak-a.streak);
+}
+// lifetime milestones for a metric keyword (ignores window — all-time)
+function anMilestones(kw){
+  const [mn,mx]=anSpan();
+  const r=anCumulativeReps(kw,mn,Date.now());
+  const series=anRepsSeries(kw,mn,Date.now());
+  let biggest={d:null,v:0};
+  series.forEach(s=>{ if(s.v>biggest.v) biggest={d:s.d,v:s.v}; });
+  const activityDays = anActivitySeries(kw,mn,Date.now()).length; // real scoring-days
+  const repDays = series.filter(s=>s.v>0).length;                 // days with exact reps
+  const firstDate = series.length? series[0].d : (anActivitySeries(kw,mn,Date.now())[0]||null);
+  return { total:r.total, taps:r.taps, biggestDay:biggest, activityDays, repDays, firstDate, matched:r.matched };
+}
+// group reps into weekly or monthly buckets within window -> [{label,v}]
+function anBreakdown(kw,from,to,mode){
+  const series=anRepsSeries(kw,from,to);
+  const buckets={};
+  series.forEach(s=>{
+    const d=new Date(s.d); let key;
+    if(mode==='month'){ key=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+    else { // ISO-ish week: year + week number (Mon start)
+      const x=new Date(d); const day=(x.getDay()+6)%7; x.setDate(x.getDate()-day);
+      key=x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0');
+    }
+    buckets[key]=(buckets[key]||0)+s.v;
+  });
+  return Object.keys(buckets).sort().map(k=>({label:k,v:buckets[k]}));
+}
+// per-metric totals in window for all saved metrics -> [{name,keyword,total,taps}]
+function anAllMetricTotals(from,to){
+  return anPrefs().metrics.map(m=>{
+    const r=anCumulativeReps(m,from,to);
+    return {id:m.id,name:m.name,keyword:m.keyword,total:r.total,taps:r.taps,matched:r.matched};
+  });
+}
+// daily series for several metrics, aligned on the same day axis (for comparison chart)
+function anCompareSeries(from,to){
+  const metrics=anPrefs().metrics;
+  const dayset=new Set();
+  const per={};
+  metrics.forEach(m=>{ per[m.id]={}; anRepsSeries(m,from,to).forEach(s=>{ per[m.id][s.d]=s.v; dayset.add(s.d); }); });
+  const days=[...dayset].sort((a,b)=>a-b);
+  return { days, metrics, per };
+}
+function fmtDate(ms){ const d=new Date(ms); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function svgSpark(series,cumulative,color,h){
+  h=h||60; const w=300;
+  if(!series.length) return '<svg viewBox="0 0 '+w+' '+h+'"><text x="'+(w/2)+'" y="'+(h/2)+'" fill="var(--muted)" font-size="11" text-anchor="middle">No data in this window</text></svg>';
+  let pts=series.map(s=>s.v), run=0;
+  if(cumulative) pts=pts.map(v=>run+=v);
+  const max=Math.max(1,...pts);
+  const n=pts.length;
+  const X=i=> n===1? w/2 : (i/(n-1))*w;
+  const Y=v=> h-4-(v/max)*(h-10);
+  let dLine='', dArea='M0 '+h+' ';
+  pts.forEach((v,i)=>{ const x=X(i).toFixed(1),y=Y(v).toFixed(1);
+    dLine+=(i?'L':'M')+x+' '+y+' '; dArea+='L'+x+' '+y+' '; });
+  dArea+='L'+w+' '+h+' Z';
+  return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+
+    '<path d="'+dArea+'" fill="'+color+'" opacity="0.18"/>'+
+    '<path d="'+dLine+'" fill="none" stroke="'+color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'+
+    '</svg>';
+}
+function heatColor(v,max){
+  if(!v) return 'var(--panel2)';
+  const t=Math.min(1,v/Math.max(1,max));
+  const stops=['#5b3a86','#6f4ddb','#8a5cff','#a98bff','#bda8ff'];
+  const idx=Math.min(stops.length-1, Math.floor(t*(stops.length-1))+1);
+  return stops[idx];
+}
+const METRIC_COLORS=['#bda8ff','#50b5e9','#48b677','#ffbe5c','#f9a03f','#f74e52','#74b6e0'];
+// multi-line cumulative comparison chart
+function svgCompare(cmp){
+  const w=300,h=110;
+  const all=[];
+  cmp.metrics.forEach(m=>{ let run=0; cmp.days.forEach(d=>{ run+=(cmp.per[m.id][d]||0); all.push(run); }); });
+  const max=Math.max(1,...all);
+  if(!cmp.days.length) return '<svg viewBox="0 0 '+w+' '+h+'"><text x="'+(w/2)+'" y="'+(h/2)+'" fill="var(--muted)" font-size="11" text-anchor="middle">No data in this window</text></svg>';
+  const n=cmp.days.length;
+  const X=i=> n===1? w/2 : (i/(n-1))*w;
+  const Y=v=> h-4-(v/max)*(h-12);
+  let paths='';
+  cmp.metrics.forEach((m,mi)=>{
+    let run=0,d='';
+    cmp.days.forEach((day,i)=>{ run+=(cmp.per[m.id][day]||0); d+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(run).toFixed(1)+' '; });
+    paths+='<path d="'+d+'" fill="none" stroke="'+METRIC_COLORS[mi%METRIC_COLORS.length]+'" stroke-width="2" stroke-linejoin="round"/>';
+  });
+  return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+paths+'</svg>';
+}
+// simple vertical bar chart from [{label,v}]
+function svgBars(data,color){
+  const w=300,h=90;
+  if(!data.length) return '<svg viewBox="0 0 '+w+' '+h+'"><text x="'+(w/2)+'" y="'+(h/2)+'" fill="var(--muted)" font-size="11" text-anchor="middle">No data</text></svg>';
+  const max=Math.max(1,...data.map(d=>d.v));
+  const n=data.length, bw=Math.max(2,(w/n)*0.7), gap=(w/n)*0.3;
+  let bars='';
+  data.forEach((d,i)=>{ const bh=(d.v/max)*(h-14); const x=i*(w/n)+gap/2; const y=h-bh-2;
+    bars+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+bh.toFixed(1)+'" rx="1.5" fill="'+color+'"><title>'+d.label+': '+d.v+'</title></rect>'; });
+  return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+bars+'</svg>';
+}
+function viewAnalytics(){
+  const p=anPrefs();
+  let h='<div class="anWrap">';
+  h+='<div class="anHead"><h2>&#128202; Analytics</h2><span class="anRangeLbl" id="anRangeLbl"></span></div>';
+  const chips=[['7d','7d'],['30d','30d'],['90d','90d'],['1y','365d'],['All','all']];
+  h+='<div class="anChips" id="anSnapChips">'+chips.map(c=>'<span class="anChip'+(p.snap===c[1]?' on':'')+'" data-snap="'+c[1]+'">'+c[0]+'</span>').join('')+'</div>';
+  h+='<div class="anSlider" id="anSlider">'+
+       '<div class="anTrack"></div><div class="anFill" id="anFill"></div>'+
+       '<div class="anHandle" id="anH0"></div><div class="anHandle" id="anH1"></div>'+
+       '<div class="anTicks"><span id="anTickL"></span><span id="anTickR"></span></div>'+
+     '</div>';
+  // saved-metric selector chips + manage button
+  h+='<div class="anSection">Saved metrics</div>';
+  h+='<div class="anChips" id="anMetricChips">'+
+     p.metrics.map(m=>'<span class="anChip'+(m.id===p.activeMetric?' on':'')+'" data-mid="'+m.id+'">'+esc(m.name)+'</span>').join('')+
+     '<span class="anChip" id="anMetricAdd" style="border-style:dashed">+ add</span></div>';
+  h+='<div id="anMetricEdit"></div>';
+  h+='<div id="anBody"></div>';
+  h+='</div>';
+  return h;
+}
+let _anBound=false;
+function initAnalytics(){
+  const p=anPrefs();
+  const [mn,mx]=anSpan();
+  const slider=document.getElementById('anSlider'); if(!slider)return;
+  const h0=document.getElementById('anH0'), h1=document.getElementById('anH1');
+  const fill=document.getElementById('anFill');
+  const totalDays=Math.max(1,Math.round((mx-mn)/DAY));
+  function offToFrac(off){ const t=Date.now()-off*DAY; return clamp((t-mn)/(mx-mn),0,1); }
+  function fracToOff(fr){ const t=mn+fr*(mx-mn); return Math.round((Date.now()-t)/DAY); }
+  function layout(){
+    const w=slider.clientWidth||300;
+    let f0=offToFrac(p.fromOff), f1=offToFrac(p.toOff);
+    if(f0>f1){const t=f0;f0=f1;f1=t;}
+    h0.style.left=(f0*w)+'px'; h1.style.left=(f1*w)+'px';
+    fill.style.left=(f0*w)+'px'; fill.style.width=((f1-f0)*w)+'px';
+    const [from,to]=anWindow();
+    const lbl=document.getElementById('anRangeLbl');
+    if(lbl) lbl.textContent=fmtDate(from)+' → '+fmtDate(to);
+    document.getElementById('anTickL').textContent=fmtDate(mn);
+    document.getElementById('anTickR').textContent='today';
+  }
+  function drag(handle,which){
+    const onMove=(clientX)=>{
+      const r=slider.getBoundingClientRect();
+      const fr=clamp((clientX-r.left)/r.width,0,1);
+      const off=fracToOff(fr);
+      if(which===0) p.fromOff=off; else p.toOff=off;
+      p.snap=null;
+      document.querySelectorAll('#anSnapChips .anChip').forEach(c=>c.classList.remove('on'));
+      layout(); refreshAnalytics(); save();
+    };
+    const mm=e=>{ e.preventDefault(); onMove(e.touches?e.touches[0].clientX:e.clientX); };
+    const up=()=>{ document.removeEventListener('mousemove',mm); document.removeEventListener('mouseup',up);
+      document.removeEventListener('touchmove',mm); document.removeEventListener('touchend',up); };
+    const down=e=>{ e.preventDefault();
+      document.addEventListener('mousemove',mm); document.addEventListener('mouseup',up);
+      document.addEventListener('touchmove',mm,{passive:false}); document.addEventListener('touchend',up); };
+    handle.addEventListener('mousedown',down); handle.addEventListener('touchstart',down,{passive:false});
+  }
+  drag(h0,0); drag(h1,1);
+  document.querySelectorAll('#anSnapChips .anChip').forEach(c=>{
+    c.onclick=()=>{ const s=c.dataset.snap; p.snap=s;
+      if(s==='all'){ p.fromOff=totalDays; p.toOff=0; }
+      else { p.fromOff=parseInt(s); p.toOff=0; }
+      document.querySelectorAll('#anSnapChips .anChip').forEach(x=>x.classList.toggle('on',x===c));
+      layout(); refreshAnalytics(); save();
+    };
+  });
+  bindMetricChips();
+  layout(); refreshAnalytics();
+  if(!_anBound){ window.addEventListener('resize',()=>{ if(TAB==='analytics') layout(); }); _anBound=true; }
+}
+// bind metric selector chips + add/edit form
+function bindMetricChips(){
+  const p=anPrefs();
+  document.querySelectorAll('#anMetricChips .anChip[data-mid]').forEach(c=>{
+    c.onclick=()=>{ p.activeMetric=c.dataset.mid;
+      document.querySelectorAll('#anMetricChips .anChip').forEach(x=>x.classList.toggle('on',x===c));
+      document.getElementById('anMetricEdit').innerHTML='';
+      refreshAnalytics(); save();
+    };
+    // long-press / double-click to edit
+    c.ondblclick=()=>openMetricEditor(c.dataset.mid);
+  });
+  const add=document.getElementById('anMetricAdd');
+  if(add) add.onclick=()=>openMetricEditor(null);
+}
+// working draft of the metric being edited (so the habit picker can mutate it live)
+let MEDIT=null;
+function openMetricEditor(mid){
+  const p=anPrefs();
+  const src = mid ? p.metrics.find(x=>x.id===mid) : {id:null,name:'',keyword:'',exact:false,habits:[]};
+  // deep-ish copy into MEDIT
+  MEDIT = { id:src.id, name:src.name||'', keyword:src.keyword||'', exact:!!src.exact,
+            habits:(src.habits||[]).map(h=>({id:h.id, reps:(h.reps==null?'':h.reps)})), _mid:mid };
+  drawMetricEditor();
+}
+function drawMetricEditor(){
+  const box=document.getElementById('anMetricEdit'); if(!box)return;
+  const m=MEDIT;
+  let h='<div class="anCard full mEditor">';
+  h+='<div class="mEditTitle">'+(m._mid?'Edit metric':'New metric')+'</div>';
+  h+='<label class="mField"><span class="mLabel">Name</span>'+
+     '<input type="text" id="mName" placeholder="e.g. Zdvihy" value="'+esc(m.name)+'"></label>';
+  // mode toggle: Keyword vs Exact
+  h+='<div class="mLabel" style="margin-top:12px">How habits are matched</div>';
+  h+='<div class="mModeToggle">'+
+       '<button type="button" class="mModeBtn'+(!m.exact?' on':'')+'" data-exact="0">By keyword</button>'+
+       '<button type="button" class="mModeBtn'+(m.exact?' on':'')+'" data-exact="1">Pick exact habits</button>'+
+     '</div>';
+  if(!m.exact){
+    h+='<label class="mField"><span class="mLabel">Habit title contains</span>'+
+       '<input type="text" id="mKw" placeholder="e.g. zdvih" value="'+esc(m.keyword)+'" autocomplete="off"></label>';
+    h+='<div class="mHint">Counts the number in each matching habit title × your + taps.</div>';
+  } else {
+    h+='<div class="mHint">Pick the habits to include. Each habit’s reps-per-tap defaults to the number in its title — set a value to override.</div>';
+    // selected section first (the result), then the picker
+    h+='<div class="mSubhead"><span>Selected</span><span id="mSelCount" class="mCount">0</span></div>';
+    h+='<div id="mSelected" class="mSelList"></div>';
+    h+='<div class="mSubhead" style="margin-top:12px">Add habits</div>';
+    h+='<div class="mSearchWrap"><input type="text" id="mFilter" placeholder="Search habits…" autocomplete="off"></div>';
+    h+='<div id="mHabitList" class="mPickList"></div>';
+  }
+  h+='<div class="mActions">'+
+      '<button class="btn primary" id="mSave">Save</button>'+
+      '<button class="btn ghost" id="mCancel">Cancel</button>'+
+      (m._mid?'<button class="btn danger" id="mDel" style="margin-left:auto">Delete</button>':'')+
+    '</div></div>';
+  box.innerHTML=h;
+
+  document.getElementById('mName').oninput=e=>{ MEDIT.name=e.target.value; };
+  document.querySelectorAll('.mModeBtn').forEach(btn=>{
+    btn.onclick=()=>{
+      const wantExact=btn.dataset.exact==='1';
+      if(wantExact===MEDIT.exact) return;
+      if(document.getElementById('mKw')) MEDIT.keyword=document.getElementById('mKw').value;
+      MEDIT.exact=wantExact;
+      drawMetricEditor();
+    };
+  });
+  if(!m.exact){
+    document.getElementById('mKw').oninput=e=>{ MEDIT.keyword=e.target.value; };
+  } else {
+    const filt=document.getElementById('mFilter');
+    filt.oninput=()=>renderHabitPicker(filt.value);
+    renderHabitPicker('');
+    renderSelectedHabits();
+  }
+  document.getElementById('mSave').onclick=saveMetricEditor;
+  if(m._mid){ document.getElementById('mDel').onclick=()=>{
+    const p=anPrefs();
+    p.metrics=p.metrics.filter(x=>x.id!==m._mid);
+    if(p.activeMetric===m._mid) p.activeMetric=p.metrics[0]?p.metrics[0].id:null;
+    MEDIT=null; save(); render();
+  };}
+  document.getElementById('mCancel').onclick=()=>{ MEDIT=null; document.getElementById('anMetricEdit').innerHTML=''; };
+}
+function renderHabitPicker(filter){
+  const list=document.getElementById('mHabitList'); if(!list)return;
+  const f=(filter||'').trim().toLowerCase();
+  const chosen=new Set(MEDIT.habits.map(h=>h.id));
+  // show habits not yet selected; filter by contains
+  const habits=(S.tasks||[]).filter(t=>t.type==='habit' && !chosen.has(t.id) && (!f || t.title.toLowerCase().includes(f)));
+  if(!habits.length){ list.innerHTML='<div class="mEmpty">'+(f?'No matching habits.':'All habits added.')+'</div>'; return; }
+  list.innerHTML=habits.slice(0,50).map(t=>{
+    const tn=t.repsPerTap||repsPerTap(t.title);
+    return '<button type="button" class="mPickItem" data-hid="'+t.id+'">'+
+      '<span class="mPickName">'+esc(t.title)+'</span>'+
+      '<span class="mPickAdd">+ add</span></button>';
+  }).join('');
+  list.querySelectorAll('.mPickItem').forEach(el=>{
+    el.onclick=()=>{ MEDIT.habits.push({id:el.dataset.hid, reps:''});
+      renderHabitPicker(document.getElementById('mFilter').value);
+      renderSelectedHabits();
+    };
+  });
+}
+function renderSelectedHabits(){
+  const wrap=document.getElementById('mSelected'); if(!wrap)return;
+  const cnt=document.getElementById('mSelCount'); if(cnt) cnt.textContent=MEDIT.habits.length;
+  if(!MEDIT.habits.length){ wrap.innerHTML='<div class="mEmpty">No habits selected yet — add some below.</div>'; return; }
+  wrap.innerHTML=MEDIT.habits.map(h=>{
+    const t=(S.tasks||[]).find(x=>x.id===h.id);
+    const titleNum=t? (t.repsPerTap||repsPerTap(t.title)) : '';
+    return '<div class="mSelRow">'+
+      '<button type="button" class="mSelRemove" data-hid="'+h.id+'" title="Remove">×</button>'+
+      '<span class="mSelName">'+esc(t?t.title:h.id)+'</span>'+
+      '<span class="mSelReps"><input type="number" min="0" class="mReps" data-hid="'+h.id+'" value="'+(h.reps===''?'':h.reps)+'" placeholder="'+titleNum+'"><span class="mSelUnit">/tap</span></span>'+
+      '</div>';
+  }).join('');
+  wrap.querySelectorAll('.mReps').forEach(inp=>{
+    inp.oninput=()=>{ const hh=MEDIT.habits.find(x=>x.id===inp.dataset.hid); if(hh) hh.reps=inp.value; };
+  });
+  wrap.querySelectorAll('.mSelRemove').forEach(btn=>{
+    btn.onclick=()=>{ const i=MEDIT.habits.findIndex(x=>x.id===btn.dataset.hid); if(i>=0)MEDIT.habits.splice(i,1);
+      renderSelectedHabits(); renderHabitPicker(document.getElementById('mFilter').value);
+    };
+  });
+}
+function saveMetricEditor(){
+  const p=anPrefs(); const m=MEDIT;
+  const name=(document.getElementById('mName').value||'').trim();
+  if(!name){ toast('Name required'); return; }
+  if(m.exact){
+    if(!m.habits.length){ toast('Pick at least one habit'); return; }
+  } else {
+    m.keyword=(document.getElementById('mKw').value||'').trim();
+    if(!m.keyword){ toast('Keyword required'); return; }
+  }
+  // normalize habit reps: '' -> null (read from title)
+  const habits=m.habits.map(h=>({id:h.id, reps:(h.reps===''||h.reps==null)?null:Number(h.reps)}));
+  if(m._mid){
+    const tgt=p.metrics.find(x=>x.id===m._mid);
+    tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits;
+  } else {
+    const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits};
+    p.metrics.push(nm); p.activeMetric=nm.id;
+  }
+  MEDIT=null; save(); render();
+}
+function refreshAnalytics(){
+  const p=anPrefs(); const [from,to]=anWindow();
+  const body=document.getElementById('anBody'); if(!body)return;
+  const days=Math.max(1,Math.round((to-from)/DAY));
+  let h='';
+  const M=anActiveMetric();
+  const kw = M ? (M.exact ? (M.name) : (M.keyword||'')) : '';  // for display text only
+  const mname = M ? M.name : '(no metric)';
+  const reps=anCumulativeReps(M,from,to);
+  const series=anRepsSeries(M,from,to);
+  const mile=anMilestones(M);
+  // --- active metric: totals over time ---
+  h+='<div class="anSection">'+esc(mname)+' &mdash; totals over time</div>';
+  h+='<div class="anCards">';
+  h+='<div class="anCard"><div class="k">In window</div><div class="v">'+reps.total.toLocaleString()+'</div>'+
+     '<div class="sub">'+reps.taps+' taps · '+days+'d</div></div>';
+  h+='<div class="anCard"><div class="k">Per-day avg</div><div class="v">'+Math.round(reps.total/days).toLocaleString()+'</div>'+
+     '<div class="sub">in this window</div></div>';
+  h+='<div class="anCard full"><div class="k">Cumulative over window</div>'+svgSpark(series,true,'var(--accent)',70)+'</div>';
+  h+='</div>';
+  if(reps.matched){
+    h+='<div class="anNote">Matched habits: '+Object.keys(reps.byTask).map(t=>esc(t)+' ('+reps.byTask[t]+')').join(', ')+'.</div>';
+  } else {
+    h+='<div class="anNote">No habits contain "'+esc(kw)+'" in this window. Edit the metric (double-tap its chip) or pick a keyword that appears in a habit title.</div>';
+  }
+  if(reps.missingTapPts){
+    h+='<div class="anNote">Note: '+reps.missingTapPts+' older imported point(s) predate Habitica logging individual + taps, so those reps are not counted. Newer activity is exact.</div>';
+  }
+  // --- lifetime milestones (all-time, this metric) ---
+  h+='<div class="anSection">'+esc(mname)+' &mdash; lifetime milestones (since '+(mile.firstDate?fmtDate(mile.firstDate):'—')+')</div>';
+  h+='<div class="anCards">';
+  h+='<div class="anCard"><div class="k">All-time reps</div><div class="v">'+mile.total.toLocaleString()+'</div><div class="sub">'+mile.taps+' taps</div></div>';
+  h+='<div class="anCard"><div class="k">Biggest day</div><div class="v">'+(mile.biggestDay.v||0).toLocaleString()+'</div><div class="sub">'+(mile.biggestDay.d?fmtDate(mile.biggestDay.d):'—')+'</div></div>';
+  h+='<div class="anCard"><div class="k">Activity days</div><div class="v">'+mile.activityDays.toLocaleString()+'</div><div class="sub">days you did it</div></div>';
+  h+='<div class="anCard"><div class="k">Exact-rep days</div><div class="v">'+mile.repDays.toLocaleString()+'</div><div class="sub">of '+mile.activityDays+' active</div></div>';
+  h+='</div>';
+  if(mile.activityDays>mile.repDays){
+    h+='<div class="anNote">'+(mile.activityDays-mile.repDays)+' active day(s) have no exact tap count in the Habitica export (exact-only policy: they count as activity but contribute 0 reps, so totals are a verified floor, never estimated).</div>';
+  }
+  // --- value / score trend (real, continuous since 2025) ---
+  const vs=anValueSeries(M,from,to);
+  h+='<div class="anSection">'+esc(mname)+' &mdash; value/score trend</div>';
+  h+='<div class="anCard full"><div class="k">Habitica habit value over window</div>'+svgSpark(vs,false,'var(--mp)',60)+'</div>';
+  // --- weekly / monthly breakdown ---
+  const bdMode = days>120 ? 'month' : 'week';
+  const bd=anBreakdown(M,from,to,bdMode);
+  h+='<div class="anSection">'+esc(mname)+' &mdash; by '+bdMode+'</div>';
+  h+='<div class="anCard full">'+svgBars(bd,'var(--accent)')+'</div>';
+  // --- per-year & per-month rollups (all-time) ---
+  const yr=anRollup(M,'year');
+  h+='<div class="anSection">'+esc(mname)+' &mdash; per-year totals</div>';
+  h+='<div class="anCards">';
+  yr.forEach(y=>{ h+='<div class="anCard"><div class="k">'+y.label+'</div><div class="v">'+y.v.toLocaleString()+'</div><div class="sub">reps</div></div>'; });
+  if(!yr.length) h+='<div class="anNote">No reps recorded yet.</div>';
+  h+='</div>';
+  // --- all-metrics comparison ---
+  const totals=anAllMetricTotals(from,to);
+  const cmp=anCompareSeries(from,to);
+  h+='<div class="anSection">All metrics &mdash; comparison</div>';
+  h+='<div class="anCard full"><div class="k">Cumulative (all metrics, this window)</div>'+svgCompare(cmp)+'</div>';
+  h+='<div class="anCards">';
+  totals.forEach((t,i)=>{ h+='<div class="anCard"><div class="k" style="color:'+METRIC_COLORS[i%METRIC_COLORS.length]+'">'+esc(t.name)+'</div>'+
+     '<div class="v">'+t.total.toLocaleString()+'</div><div class="sub">'+t.taps+' taps</div></div>'; });
+  h+='</div>';
+  const adh=anAdherenceSeries(from,to);
+  const avgPct=adh.length? Math.round(adh.reduce((s,a)=>s+a.pct,0)/adh.length*100):0;
+  h+='<div class="anSection">Daily adherence</div>';
+  h+='<div class="anCards"><div class="anCard"><div class="k">Avg completion</div><div class="v">'+avgPct+'%</div>'+
+     '<div class="sub">'+adh.length+' tracked days</div></div>'+
+     '<div class="anCard"><div class="k">Days logged</div><div class="v">'+adh.length+'</div><div class="sub">with due dailies</div></div>'+
+     '<div class="anCard full"><div class="k">Completion % over window</div>'+
+       svgSpark(adh.map(a=>({d:a.d,v:a.pct*100})),false,'var(--green)',70)+'</div></div>';
+  const inten=anIntensity(from,to);
+  const maxI=Math.max(1,...Object.values(inten));
+  h+='<div class="anSection">Activity heatmap</div>';
+  h+=anHeatmapHTML(from,to,inten,maxI);
+  h+='<div class="anLegend">Less <i style="background:var(--panel2)"></i><i style="background:#6f4ddb"></i><i style="background:#8a5cff"></i><i style="background:#a98bff"></i><i style="background:#bda8ff"></i> More</div>';
+  h+='<div class="anSection">Streak leaderboard</div>';
+  const st=anStreaks();
+  if(st.length) h+=st.slice(0,12).map(s=>'<div class="anStreak"><span class="t">'+esc(s.title)+'</span><span class="s">&#128293; '+s.streak+'</span></div>').join('');
+  else h+='<div class="anNote">No dailies yet.</div>';
+  h+='<div class="anNote">History reflects dated value/tap snapshots from Habitica (engagement events), not a per-calendar-day completion grid. Counts shown are from logged + taps and completion flags.</div>';
+  body.innerHTML=h;
+  bindHeatTooltips();
+}
+function anHeatmapHTML(from,to,inten,maxI){
+  const start=new Date(Math.floor(from/DAY)*DAY); start.setHours(0,0,0,0);
+  start.setDate(start.getDate()-start.getDay());
+  const end=new Date(Math.floor(to/DAY)*DAY); end.setHours(0,0,0,0);
+  let cols='', col='', dow=0;
+  for(let t=start.getTime(); t<=end.getTime(); t+=DAY){
+    const v=inten[Math.floor(t/DAY)*DAY]||0;
+    const title=fmtDate(t)+': '+(v? v+' activity':'no activity');
+    col+='<div class="anHeatCell" style="background:'+heatColor(v,maxI)+'" data-tip="'+title+'"></div>';
+    dow++;
+    if(dow===7){ cols+='<div class="anHeatCol">'+col+'</div>'; col=''; dow=0; }
+  }
+  if(col) cols+='<div class="anHeatCol">'+col+'</div>';
+  return '<div class="anHeat">'+cols+'</div>';
+}
+
+function saveScroll(){ if(S.prefs&&S.prefs.scroll){ S.prefs.scroll[TAB]=window.scrollY||window.pageYOffset||0; } }
+function restoreScroll(){
+  const y=(S.prefs&&S.prefs.scroll&&S.prefs.scroll[TAB])||0;
+  // wait a frame so the freshly-rendered content has height
+  requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo(0,y)));
+}
 function render(){
   renderStats();
   const v=document.getElementById('view');
-  v.innerHTML = TAB==='habits'?viewHabits() : TAB==='dailies'?viewDailies() : TAB==='todos'?viewTodos() : viewRewards();
+  v.innerHTML = TAB==='habits'?viewHabits() : TAB==='dailies'?viewDailies() : TAB==='todos'?viewTodos() : TAB==='analytics'?viewAnalytics() : viewRewards();
+  if(TAB==='analytics') initAnalytics();
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===TAB));
+  if(TAB!=='analytics') enableDragReorder();
+  restoreScroll();
+}
+// persist scroll continuously (lightweight, debounced)
+let _scrollT=null;
+window.addEventListener('scroll',()=>{ if(_scrollT)return; _scrollT=setTimeout(()=>{ _scrollT=null; saveScroll(); save(); },400); });
+// ---- drag & drop reordering (tasks + rewards), persisted to S ----
+let _dragEl=null, _dragList=null;
+function enableDragReorder(){
+  const cards=document.querySelectorAll('#view .task[draggable="true"]');
+  cards.forEach(card=>{
+    card.addEventListener('dragstart',e=>{
+      _dragEl=card; _dragList=card.dataset.list; card.classList.add('dragging');
+      e.dataTransfer.effectAllowed='move';
+      try{ e.dataTransfer.setData('text/plain',card.dataset.id); }catch(_){}
+    });
+    card.addEventListener('dragend',()=>{ card.classList.remove('dragging'); _dragEl=null; commitOrder(); });
+    card.addEventListener('dragover',e=>{
+      if(!_dragEl || card===_dragEl || card.dataset.list!==_dragList) return;
+      e.preventDefault();
+      const r=card.getBoundingClientRect();
+      const after=(e.clientY-r.top)/r.height > 0.5;
+      card.parentNode.insertBefore(_dragEl, after?card.nextSibling:card);
+    });
+  });
+}
+// read the DOM order back into S.tasks / S.rewards
+function commitOrder(){
+  const cards=[...document.querySelectorAll('#view .task[draggable="true"]')];
+  if(!cards.length) return;
+  const list=cards[0].dataset.list;
+  const order=cards.map(c=>c.dataset.id);
+  if(list==='rewards'){
+    S.rewards.sort((a,b)=>order.indexOf(a.id)-order.indexOf(b.id));
+  } else {
+    // reorder only the tasks of the current tab's type; keep other types' relative order
+    const typeOfTab = TAB==='habits'?'habit':TAB==='dailies'?'daily':'todo';
+    const moved=order.map(id=>S.tasks.find(t=>t.id===id)).filter(Boolean);
+    const others=S.tasks.filter(t=>t.type!==typeOfTab);
+    // rebuild: place reordered same-type tasks where they were, others appended in original order
+    const sameType=[];
+    moved.forEach(t=>{ if(t.type===typeOfTab) sameType.push(t); });
+    S.tasks = others.concat(sameType);
+  }
+  save();
+}
+// ---- heatmap tooltip with 2s hover delay ----
+let _heatTimer=null, _heatTip=null;
+function heatTipEl(){
+  if(!_heatTip){ _heatTip=document.createElement('div'); _heatTip.id='heatTip';
+    _heatTip.style.cssText='position:fixed;z-index:80;pointer-events:none;background:#1d1233;color:var(--ink);'+
+      'border:1px solid var(--accent);border-radius:8px;padding:5px 9px;font-size:12px;display:none;box-shadow:0 4px 12px rgba(0,0,0,.5)';
+    document.body.appendChild(_heatTip); }
+  return _heatTip;
+}
+function bindHeatTooltips(){
+  document.querySelectorAll('.anHeatCell[data-tip]').forEach(cell=>{
+    cell.addEventListener('mouseenter',e=>{
+      clearTimeout(_heatTimer);
+      const x=e.clientX, y=e.clientY;
+      _heatTimer=setTimeout(()=>{
+        const tip=heatTipEl(); tip.textContent=cell.dataset.tip;
+        tip.style.display='block'; tip.style.left=(x+12)+'px'; tip.style.top=(y+12)+'px';
+      },2000); // 2-second delay
+    });
+    cell.addEventListener('mouseleave',()=>{ clearTimeout(_heatTimer); if(_heatTip)_heatTip.style.display='none'; });
+  });
 }
 function toggle(id){
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
   if(t.type==='daily'){ t.done? uncompleteDaily(t) : completeTask(t); }
+  else if(t.type==='todo'){ t.done? uncompleteTodo(t) : completeTask(t); }
   else { completeTask(t); }
 }
 function openEdit(id,type){
   const t = id? S.tasks.find(x=>x.id===id)
     : {id:null,type:type||'todo',title:'',notes:'',difficulty:'easy',value:0,done:false,
-       checklist:[],repeat:[true,true,true,true,true,true,true],up:true,down:true};
+       checklist:[],repeat:[true,true,true,true,true,true,true],up:true,down:true,resetFreq:'daily'};
   EDIT = JSON.parse(JSON.stringify(t));
   drawSheet();
   document.getElementById('scrim').classList.add('show');
@@ -408,10 +1357,26 @@ function drawSheet(){
       '<button class="'+(t.up!==false?'on':'')+'" onclick="EDIT.up=!(EDIT.up!==false);drawSheet()">+ Positive</button>'+
       '<button class="'+(t.down!==false?'on':'')+'" onclick="EDIT.down=!(EDIT.down!==false);drawSheet()">− Negative</button></div>'+
       '<div class="small" style="margin-top:6px">+ rewards XP/gold; − costs HP. Enable either or both.</div>';
+    const rf=t.resetFreq||'daily';
+    h+='<label>Reset counter</label><div class="seg">'+
+      [['Daily','daily'],['Weekly','weekly'],['Monthly','monthly']].map(o=>'<button class="'+(rf===o[1]?'on':'')+'" onclick="EDIT.resetFreq=\''+o[1]+'\';drawSheet()">'+o[0]+'</button>').join('')+'</div>'+
+      '<div class="small" style="margin-top:6px">How often the + / − counts reset to zero.</div>';
+    h+='<label>Adjust counter (this period)</label><div class="adjRow">'+
+      '<div class="adj"><span>+ '+(t.cUp||0)+'</span>'+
+        '<button onclick="EDIT.cUp=Math.max(0,(EDIT.cUp||0)-1);drawSheet()">−</button>'+
+        '<button onclick="EDIT.cUp=(EDIT.cUp||0)+1;drawSheet()">+</button></div>'+
+      '<div class="adj"><span>− '+(t.cDown||0)+'</span>'+
+        '<button onclick="EDIT.cDown=Math.max(0,(EDIT.cDown||0)-1);drawSheet()">−</button>'+
+        '<button onclick="EDIT.cDown=(EDIT.cDown||0)+1;drawSheet()">+</button></div></div>';
   }
   if(t.type==='daily'){
     h+='<label>Repeat on</label><div class="days" id="eDays">'+
       dayLabels.map((d,i)=>'<button style="border:1px solid var(--line);border-radius:8px;background:'+(t.repeat[i]?'var(--panel2)':'var(--panel)')+';color:var(--ink);cursor:pointer" onclick="EDIT.repeat['+i+']=!EDIT.repeat['+i+'];drawSheet()">'+d+'</button>').join('')+'</div>';
+    h+='<label>Adjust streak</label><div class="adjRow">'+
+      '<div class="adj"><span>🔥 '+(t.streak||0)+'</span>'+
+        '<button onclick="EDIT.streak=Math.max(0,(EDIT.streak||0)-1);drawSheet()">−</button>'+
+        '<button onclick="EDIT.streak=(EDIT.streak||0)+1;drawSheet()">+</button></div></div>'+
+      '<div class="small" style="margin-top:6px">Restore a streak if you completed it but forgot to check it off.</div>';
   }
   if(t.type!=='habit'){
     h+='<label>Checklist (subtasks)</label><div class="checklist" id="eCheck">'+
@@ -488,6 +1453,10 @@ function openSettings(){
   h+='<label>Interface width (on PC / wide screens)</label><div class="seg" id="setWidth">'+
     [['Slim',430],['Medium',560],['Wide',720],['Full',3000]].map(o=>'<button class="'+((S.prefs.width||480)===o[1]?'on':'')+'" onclick="setWidth('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
   h+='<div class="small" style="margin-top:6px">On a phone it always fills the screen. This caps the width on a monitor and keeps it centered.</div>';
+  const nl=(S.prefs.notesLines==null?3:S.prefs.notesLines);
+  h+='<label>Note lines shown on cards</label><div class="seg" id="setNotes">'+
+    [['Off',0],['1',1],['2',2],['3',3],['5',5]].map(o=>'<button class="'+(nl===o[1]?'on':'')+'" onclick="setNotesLines('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
+  h+='<div class="small" style="margin-top:6px">How many lines of a task\'s notes preview on the list (default 3, like Habitica).</div>';
   h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue.</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
@@ -500,6 +1469,7 @@ function openSettings(){
   document.getElementById('scrim').classList.add('show');
 }
 function setWidth(px){ S.prefs.width=px; applyWidth(); save(); openSettings(); }
+function setNotesLines(n){ S.prefs.notesLines=n; save(); openSettings(); }
 function saveSettings(){
   S.char.name=document.getElementById('setName').value.trim()||'Adventurer';
   S.char.face=document.getElementById('setFace').value||'🧙';
@@ -522,7 +1492,7 @@ function importData(ev){
   rd.readAsText(f); ev.target.value='';
 }
 function esc(s){ return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ TAB=b.dataset.tab; render(); });
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ TAB=b.dataset.tab; if(S.prefs){S.prefs.lastTab=TAB; save();} render(); });
 document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };
 applyWidth();
 runCron();

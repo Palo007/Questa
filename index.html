@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#4f2a93">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Questa</title>
+<link rel="manifest" href="manifest.json">
+<style>
+  :root{
+    --bg:#36205c; --panel:#432263; --panel2:#4f2a93; --ink:#f4f1fb; --muted:#bca8e0;
+    --hp:#f74e52; --xp:#ffd200; --gold:#ffbe5c; --mp:#50b5e9;
+    --blue:#2995cd; --lblue:#74b6e0; --green:#48b677; --yellow:#ffbe5c;
+    --orange:#f9a03f; --red:#f74e52; --darkred:#b0375a;
+    --line:#5b3a86; --accent:#bda8ff;
+    --appw:480px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0;background:#1d1233;color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    overscroll-behavior:none}
+  body{padding-bottom:calc(70px + env(safe-area-inset-bottom))}
+  header,main{margin-left:auto;margin-right:auto;max-width:var(--appw)}
+  @media (min-width:520px){
+    header{border-left:1px solid var(--line);border-right:1px solid var(--line)}
+    nav{border-left:1px solid var(--line);border-right:1px solid var(--line)}
+    .sheet{border-radius:16px;margin-bottom:24px;max-width:var(--appw)}
+    .scrim{align-items:center}
+  }
+  header{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#2a1947,#36205c);
+    border-bottom:1px solid var(--line);padding:calc(10px + env(safe-area-inset-top)) 12px 8px}
+  .avatarRow{display:flex;align-items:center;gap:12px}
+  .avatar{width:54px;height:54px;border-radius:12px;background:var(--panel2);
+    display:flex;align-items:center;justify-content:center;font-size:30px;flex:none;
+    border:1px solid var(--line);transition:transform .15s, box-shadow .3s}
+  .avatar.bump{transform:scale(1.12)}
+  .who{flex:1;min-width:0}
+  .who .lvl{font-size:13px;color:var(--muted)}
+  .who .name{font-weight:700;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .coins{display:flex;gap:10px;font-size:13px;font-weight:700;align-items:center}
+  .coins span{display:flex;align-items:center;gap:3px}
+  #gearBtn{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;
+    padding:4px;line-height:1;flex:none;opacity:.7}
+  #gearBtn:hover{opacity:1}
+  .bars{margin-top:8px;display:flex;flex-direction:column;gap:5px}
+  .bar{height:14px;border-radius:8px;background:#23143d;position:relative;overflow:hidden;
+    border:1px solid #1a0f2e}
+  .bar>i{position:absolute;left:0;top:0;bottom:0;border-radius:8px;transition:width .35s ease}
+  .bar.hp>i{background:linear-gradient(90deg,#ff7e7e,var(--hp))}
+  .bar.xp>i{background:linear-gradient(90deg,#fff07a,var(--xp))}
+  .bar>i::after{content:"";position:absolute;inset:0;border-radius:8px;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);
+    transform:translateX(-100%);animation:shine 3.2s ease-in-out infinite}
+  @keyframes shine{0%,60%{transform:translateX(-100%)}100%{transform:translateX(220%)}}
+  .bar .lab{position:absolute;width:100%;text-align:center;font-size:10px;line-height:14px;
+    font-weight:700;color:#fff;text-shadow:0 1px 1px rgba(0,0,0,.5)}
+  body.lowhp header{animation:hpwarn 1.4s ease-in-out infinite}
+  @keyframes hpwarn{0%,100%{box-shadow:none}50%{box-shadow:inset 0 0 0 2px var(--hp)}}
+  main{padding:10px 10px 0}
+  .colTitle{display:flex;align-items:center;justify-content:space-between;margin:14px 4px 8px}
+  .colTitle h2{margin:0;font-size:15px;letter-spacing:.3px}
+  .addBtn{background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+    border-radius:8px;font-size:20px;width:32px;height:32px;line-height:1;cursor:pointer}
+  .task{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    margin-bottom:8px;overflow:hidden;display:flex;align-items:stretch;
+    transition:transform .12s, opacity .2s}
+  .task.flash{animation:flash .5s}
+  @keyframes flash{0%{transform:scale(1)}40%{transform:scale(.98)}100%{transform:scale(1)}}
+  .task .check{width:44px;flex:none;display:flex;align-items:center;justify-content:center;
+    cursor:pointer;font-size:20px;border-right:1px solid var(--line);user-select:none}
+  .task.daily .check{background:rgba(255,255,255,.03)}
+  .task.done .check{background:var(--green);color:#fff}
+  .task.shopitem .check{background:rgba(247,78,82,.12)}
+  .task.habit .check.hbtn{font-size:22px;font-weight:700}
+  .task.habit .check.up{color:var(--green);border-right:1px solid var(--line)}
+  .task.habit .check.down{color:var(--red);border-left:1px solid var(--line);border-right:none}
+  .task.habit .check.off{color:#4a3568;cursor:default}
+  .task .body{flex:1;min-width:0;padding:9px 10px;cursor:pointer}
+  .task .ttl{font-weight:600;font-size:14px;word-break:break-word}
+  .task.done .ttl{text-decoration:line-through;color:var(--muted)}
+  .task .meta{margin-top:3px;font-size:11px;color:var(--muted);display:flex;gap:8px;flex-wrap:wrap}
+  .valdot{width:10px;flex:none;align-self:stretch}
+  .pill{font-size:10px;padding:1px 6px;border-radius:6px;background:#2a1947;border:1px solid var(--line)}
+  .scrim{position:fixed;inset:0;background:rgba(10,5,20,.66);display:none;z-index:50;
+    align-items:flex-end;justify-content:center}
+  .scrim.show{display:flex}
+  .sheet{background:var(--bg);width:100%;max-width:560px;border-radius:16px 16px 0 0;
+    border-top:1px solid var(--line);max-height:92vh;overflow:auto;padding:16px 16px 26px}
+  .sheet h3{margin:2px 0 12px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+  input[type=text],textarea,select{width:100%;background:var(--panel);color:var(--ink);
+    border:1px solid var(--line);border-radius:8px;padding:9px 10px;font-size:14px;font-family:inherit}
+  textarea{min-height:60px;resize:vertical}
+  .seg{display:flex;gap:6px;flex-wrap:wrap}
+  .seg button{flex:1;min-width:64px;background:var(--panel);border:1px solid var(--line);
+    color:var(--ink);border-radius:8px;padding:8px;font-size:13px;cursor:pointer}
+  .seg button.on{background:var(--panel2);border-color:var(--accent);font-weight:700}
+  .checklist .ci{display:flex;align-items:center;gap:8px;margin:6px 0}
+  .checklist .ci input[type=text]{flex:1}
+  .checklist .ci .box{width:26px;height:26px;border:1px solid var(--line);border-radius:6px;
+    background:var(--panel);flex:none;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .checklist .ci .box.on{background:var(--green)}
+  .checklist .ci .del{background:none;border:none;color:var(--red);font-size:18px;cursor:pointer}
+  .rowBtns{display:flex;gap:8px;margin-top:18px}
+  .btn{flex:1;border:none;border-radius:9px;padding:12px;font-size:15px;font-weight:700;cursor:pointer}
+  .btn.primary{background:var(--accent);color:#1d0f38}
+  .btn.ghost{background:var(--panel);color:var(--ink);border:1px solid var(--line)}
+  .btn.danger{background:var(--red);color:#fff}
+  .days{display:flex;gap:5px}
+  .days button{flex:1;padding:8px 0;font-size:12px}
+  #navWrap{position:fixed;bottom:0;left:0;right:0;z-index:30;display:flex;justify-content:center}
+  nav{width:100%;max-width:var(--appw);background:#2a1947;border-top:1px solid var(--line);display:flex}
+  nav button{flex:1;background:none;border:none;color:var(--muted);
+    padding:9px 0 calc(12px + env(safe-area-inset-bottom));font-size:11px;cursor:pointer}
+  nav button .ic{font-size:20px;display:block}
+  nav button.on{color:var(--accent)}
+  #toast{position:fixed;left:50%;transform:translateX(-50%);bottom:84px;z-index:60;
+    display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:none}
+  .toastMsg{background:#1d0f38;border:1px solid var(--accent);color:var(--ink);padding:7px 14px;
+    border-radius:20px;font-size:13px;font-weight:700;animation:pop 2.4s forwards}
+  @keyframes pop{0%{opacity:0;transform:translateY(8px)}10%{opacity:1;transform:none}
+    80%{opacity:1}100%{opacity:0;transform:translateY(-6px)}}
+  .empty{color:var(--muted);font-size:13px;text-align:center;padding:18px;font-style:italic}
+  #lvlFlash{position:fixed;inset:0;z-index:65;pointer-events:none;display:flex;
+    align-items:center;justify-content:center;opacity:0}
+  #lvlFlash.go{animation:lvlpop 1.3s ease-out}
+  #lvlFlash b{font-size:42px;color:var(--xp);text-shadow:0 2px 12px rgba(255,210,0,.6)}
+  @keyframes lvlpop{0%{opacity:0;transform:scale(.6)}25%{opacity:1;transform:scale(1)}
+    75%{opacity:1}100%{opacity:0;transform:scale(1.2)}}
+  .settingsRow{display:flex;gap:8px;margin:10px 0}
+  .settingsRow .btn{font-size:13px;padding:10px}
+  .small{font-size:11px;color:var(--muted);line-height:1.5}
+  .deathOverlay{position:fixed;inset:0;background:rgba(40,5,20,.92);z-index:70;display:none;
+    align-items:center;justify-content:center;text-align:center;padding:30px}
+  .deathOverlay.show{display:flex}
+  .deathOverlay .card{max-width:340px}
+  .deathOverlay h2{color:var(--red)}
+</style>
+</head>
+<body>
+<header>
+  <div class="avatarRow">
+    <div class="avatar" id="avatarFace">WIZ</div>
+    <div class="who">
+      <div class="name" id="charName">Adventurer</div>
+      <div class="lvl">Level <b id="charLvl">1</b> &middot; <span id="charClass">Warrior</span></div>
+    </div>
+    <div class="coins">
+      <span title="Gold">G <b id="statGold">0</b></span>
+      <span title="Mana">M <b id="statMp">0</b></span>
+    </div>
+    <button id="gearBtn" title="Settings" onclick="openSettings()">&#9881;</button>
+  </div>
+  <div class="bars">
+    <div class="bar hp"><i id="hpFill"></i><div class="lab" id="hpLab"></div></div>
+    <div class="bar xp"><i id="xpFill"></i><div class="lab" id="xpLab"></div></div>
+  </div>
+</header>
+
+<main id="view"></main>
+
+<div id="navWrap">
+<nav>
+  <button data-tab="habits" class="on"><span class="ic">&#128257;</span>Habits</button>
+  <button data-tab="dailies"><span class="ic">&#128197;</span>Dailies</button>
+  <button data-tab="todos"><span class="ic">&#9989;</span>To-Dos</button>
+  <button data-tab="rewards"><span class="ic">&#127978;</span>Rewards</button>
+</nav>
+</div>
+
+<div class="scrim" id="scrim"><div class="sheet" id="sheet"></div></div>
+<div id="toast"></div>
+<div id="lvlFlash"><b id="lvlFlashTxt"></b></div>
+<div class="deathOverlay" id="deathOverlay"><div class="card">
+  <h2>You died!</h2>
+  <p class="small">You ran out of Health. You lost a level and some gold, and your HP was restored. Be careful out there.</p>
+  <button class="btn primary" onclick="document.getElementById('deathOverlay').classList.remove('show')">Continue</button>
+</div></div>
+
+<script>
+const STORE_KEY = "questa.save.v1";
+function freshState(){
+  return {
+    version:1,
+    char:{ name:"Adventurer", face:"🧙", cls:"Warrior",
+           lvl:1, xp:0, hp:50, maxHp:50, mp:0, gold:0 },
+    tasks:[], rewards:[],
+    lastCron: dayStamp(new Date()),
+    history:[], prefs:{ width:480 }
+  };
+}
+let S = load();
+function load(){
+  try{ const raw = localStorage.getItem(STORE_KEY);
+    if(raw){ return migrate(JSON.parse(raw)); } }catch(e){}
+  return freshState();
+}
+function migrate(s){ const f=freshState();
+  const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
+  out.prefs=Object.assign({width:480}, s.prefs||{});
+  return out; }
+function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
+function applyWidth(){ document.documentElement.style.setProperty('--appw',(S.prefs.width||480)+'px'); }
+
+const uid = ()=> Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+function dayStamp(d){ return d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate(); }
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
+const DIFF = { trivial:0.1, easy:1, medium:1.5, hard:2 };
+function xpToLevel(lvl){ return Math.round(0.25*lvl*lvl + 10*lvl + 139.75); }
+function valColor(v){
+  if(v < -16) return ["Dark red","var(--darkred)"];
+  if(v < -9)  return ["Red","var(--red)"];
+  if(v < -1)  return ["Orange","var(--orange)"];
+  if(v < 1)   return ["Yellow","var(--yellow)"];
+  if(v < 6)   return ["Green","var(--green)"];
+  if(v < 12)  return ["Light blue","var(--lblue)"];
+  return ["Bright blue","var(--blue)"];
+}
+function valueDelta(value){ return Math.pow(0.9747, clamp(value, -47.27, 21.27)); }
+function completionReward(task){
+  const d = valueDelta(task.value);
+  const m = DIFF[task.difficulty] || 1;
+  return { xp:Math.max(1, Math.round(d*m*7)), gold:Math.max(0,+(d*m*1.2).toFixed(2)), mp:Math.round(m) };
+}
+function missDamage(task){
+  const base = task.difficulty==='hard'?4 : task.difficulty==='medium'?3 : task.difficulty==='trivial'?1 : 2;
+  return +(base * valueDelta(task.value) * 0.9).toFixed(2);
+}
+function gainXp(xp){
+  S.char.xp += xp;
+  let need = xpToLevel(S.char.lvl);
+  while(S.char.xp >= need){
+    S.char.xp -= need; S.char.lvl++;
+    S.char.maxHp = 50; S.char.hp = S.char.maxHp;
+    levelFlash(S.char.lvl);
+    need = xpToLevel(S.char.lvl);
+  }
+}
+function takeDamage(amount){ S.char.hp = +(S.char.hp - amount).toFixed(2); if(S.char.hp <= 0){ death(); } }
+function death(){
+  S.char.lvl = Math.max(1, S.char.lvl - 1);
+  S.char.gold = +Math.max(0, S.char.gold * 0.75).toFixed(2);
+  S.char.hp = S.char.maxHp; S.char.xp = 0;
+  document.getElementById('deathOverlay').classList.add('show');
+}
+function completeTask(t){
+  if(t.done) return;
+  const r = completionReward(t);
+  gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
+  t.value = clamp(t.value + valueDelta(t.value), -47.27, 99);
+  t.done = true;
+  toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar();
+  save(); render();
+}
+function uncompleteDaily(t){
+  t.done = false;
+  t.value = clamp(t.value - valueDelta(t.value), -47.27, 99);
+  save(); render();
+}
+function scoreHabit(id, dir){
+  const t=S.tasks.find(x=>x.id===id); if(!t)return;
+  if(dir>0){
+    const r=completionReward(t);
+    gainXp(r.xp); S.char.gold=+(S.char.gold+r.gold).toFixed(2); S.char.mp+=r.mp;
+    t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
+    toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar();
+  } else {
+    const dmg=missDamage(t);
+    t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
+    takeDamage(dmg); toast('-'+dmg.toFixed(1)+' HP');
+  }
+  save(); render();
+}
+function runCron(){
+  const today = dayStamp(new Date());
+  if(S.lastCron === today) return;
+  const dow = new Date().getDay();
+  let totalDmg = 0;
+  S.tasks.forEach(t=>{
+    if(t.type!=='daily') return;
+    const scheduledYesterday = !t.repeat || t.repeat[(dow+6)%7];
+    if(scheduledYesterday && !t.done){
+      totalDmg += missDamage(t);
+      t.value = clamp(t.value - valueDelta(t.value), -47.27, 99);
+    }
+    t.done = false;
+    (t.checklist||[]).forEach(c=>c.done=false);
+  });
+  S.lastCron = today;
+  if(totalDmg>0){ takeDamage(totalDmg); toast('-'+totalDmg.toFixed(1)+' HP (missed dailies)'); }
+  save();
+}
+function levelFlash(lvl){
+  const f=document.getElementById('lvlFlash'); const t=document.getElementById('lvlFlashTxt');
+  t.textContent='⭐ Level '+lvl+'!'; f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');
+}
+function bumpAvatar(){ const a=document.getElementById('avatarFace');
+  a.classList.add('bump'); setTimeout(()=>a.classList.remove('bump'),150); }
+function toast(msg){
+  const w=document.getElementById('toast'); const e=document.createElement('div');
+  e.className='toastMsg'; e.textContent=msg; w.appendChild(e);
+  setTimeout(()=>e.remove(),2400);
+}
+let TAB='habits', EDIT=null;
+function renderStats(){
+  const c=S.char;
+  document.getElementById('avatarFace').textContent=c.face;
+  document.getElementById('charName').textContent=c.name;
+  document.getElementById('charLvl').textContent=c.lvl;
+  document.getElementById('charClass').textContent=c.cls;
+  document.getElementById('statGold').textContent=Math.floor(c.gold);
+  document.getElementById('statMp').textContent=Math.floor(c.mp);
+  document.getElementById('hpFill').style.width=clamp(c.hp/c.maxHp*100,0,100)+'%';
+  document.getElementById('hpLab').textContent=Math.ceil(Math.max(0,c.hp))+' / '+c.maxHp+' HP';
+  const need=xpToLevel(c.lvl);
+  document.getElementById('xpFill').style.width=clamp(c.xp/need*100,0,100)+'%';
+  document.getElementById('xpLab').textContent=Math.floor(c.xp)+' / '+need+' XP';
+  document.body.classList.toggle('lowhp', c.hp/c.maxHp <= 0.3);
+}
+function metaRow(t){
+  const cname=valColor(t.value)[0];
+  const cl=(t.checklist||[]); const doneCl=cl.filter(c=>c.done).length;
+  return '<div class="meta"><span class="pill">'+t.difficulty+'</span>'+
+    (cl.length?'<span>✓ '+doneCl+'/'+cl.length+'</span>':'')+
+    (t.notes?'<span>📝</span>':'')+'<span>'+cname+'</span></div>';
+}
+function taskCard(t){
+  const ccol=valColor(t.value)[1];
+  const checkIcon = t.done ? '✔' : (t.type==='daily'?'○':'▫');
+  return '<div class="task '+t.type+' '+(t.done?'done':'')+'">'+
+    '<div class="valdot" style="background:'+ccol+'"></div>'+
+    '<div class="check" onclick="toggle(\''+t.id+'\')">'+checkIcon+'</div>'+
+    '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div></div>';
+}
+function habitCard(t){
+  const ccol=valColor(t.value)[1];
+  const up = t.up!==false, down = t.down!==false;
+  return '<div class="task habit"><div class="valdot" style="background:'+ccol+'"></div>'+
+    (up?'<div class="check hbtn up" onclick="scoreHabit(\''+t.id+'\',1)">+</div>':'<div class="check hbtn off">+</div>')+
+    '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+
+    (down?'<div class="check hbtn down" onclick="scoreHabit(\''+t.id+'\',-1)">−</div>':'<div class="check hbtn off">−</div>')+'</div>';
+}
+function viewHabits(){
+  const habits=S.tasks.filter(t=>t.type==='habit');
+  return '<div class="colTitle"><h2>Habits</h2><button class="addBtn" onclick="openEdit(null,\'habit\')">+</button></div>'+
+    (habits.length?habits.map(habitCard).join(''):'<div class="empty">No habits yet — add good or bad behaviors to reinforce with + / −.</div>');
+}
+function viewDailies(){
+  const dailies=S.tasks.filter(t=>t.type==='daily');
+  return '<div class="colTitle"><h2>Dailies</h2><button class="addBtn" onclick="openEdit(null,\'daily\')">+</button></div>'+
+    (dailies.length?dailies.map(taskCard).join(''):'<div class="empty">No dailies yet — add scheduled tasks here.</div>');
+}
+function viewTodos(){
+  const todos=S.tasks.filter(t=>t.type==='todo' && !t.done);
+  const done=S.tasks.filter(t=>t.type==='todo' && t.done);
+  return '<div class="colTitle"><h2>To-Dos</h2><button class="addBtn" onclick="openEdit(null,\'todo\')">+</button></div>'+
+    (todos.length?todos.map(taskCard).join(''):'<div class="empty">Nothing to do. Add a one-off task.</div>')+
+    (done.length?'<div class="colTitle"><h2 style="color:var(--muted);font-size:13px">Completed</h2></div>'+done.map(taskCard).join(''):'');
+}
+function viewRewards(){
+  let h='<div class="colTitle"><h2>Shop</h2></div>'+
+    '<div class="small" style="margin:0 4px 10px">Built-in items. Drink a potion to recover HP before a death wipes your gold and level.</div>';
+  h+=SHOP_ITEMS.map(i=>'<div class="task shopitem"><div class="valdot" style="background:var(--hp)"></div>'+
+    '<div class="check" onclick="buyShopItem(\''+i.id+'\')" title="Buy">'+i.icon+'</div>'+
+    '<div class="body" onclick="buyShopItem(\''+i.id+'\')"><div class="ttl">'+i.title+'</div>'+
+    '<div class="meta"><span class="pill">'+i.cost+' gold</span><span>'+i.desc+'</span></div></div></div>').join('');
+  h+='<div class="colTitle"><h2>Your Rewards</h2><button class="addBtn" onclick="openReward(null)">+</button></div>'+
+    '<div class="small" style="margin:0 4px 10px">Spend gold on real-life rewards you define yourself.</div>';
+  h+= S.rewards.length ? S.rewards.map(r=>'<div class="task"><div class="valdot" style="background:var(--gold)"></div>'+
+    '<div class="check" onclick="buyReward(\''+r.id+'\')" title="Buy">🪙</div>'+
+    '<div class="body" onclick="openReward(\''+r.id+'\')"><div class="ttl">'+esc(r.title)+'</div>'+
+    '<div class="meta"><span class="pill">'+r.cost+' gold</span>'+(r.notes?'<span>📝</span>':'')+'</div></div></div>').join('')
+    : '<div class="empty">No rewards yet. Create one to spend your gold on.</div>';
+  return h;
+}
+function render(){
+  renderStats();
+  const v=document.getElementById('view');
+  v.innerHTML = TAB==='habits'?viewHabits() : TAB==='dailies'?viewDailies() : TAB==='todos'?viewTodos() : viewRewards();
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===TAB));
+}
+function toggle(id){
+  const t=S.tasks.find(x=>x.id===id); if(!t)return;
+  if(t.type==='daily'){ t.done? uncompleteDaily(t) : completeTask(t); }
+  else { completeTask(t); }
+}
+function openEdit(id,type){
+  const t = id? S.tasks.find(x=>x.id===id)
+    : {id:null,type:type||'todo',title:'',notes:'',difficulty:'easy',value:0,done:false,
+       checklist:[],repeat:[true,true,true,true,true,true,true],up:true,down:true};
+  EDIT = JSON.parse(JSON.stringify(t));
+  drawSheet();
+  document.getElementById('scrim').classList.add('show');
+}
+function drawSheet(){
+  const t=EDIT; const dayLabels=['S','M','T','W','T','F','S'];
+  const sheet=document.getElementById('sheet');
+  let h='<h3>'+(t.id?'Edit':'New')+' '+(t.type==='daily'?'Daily':t.type==='habit'?'Habit':'To-Do')+'</h3>';
+  h+='<label>Title</label><input type="text" id="eTitle" value="'+esc(t.title)+'" placeholder="What needs doing?">';
+  h+='<label>Difficulty</label><div class="seg" id="eDiff">'+
+    ['trivial','easy','medium','hard'].map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
+  if(t.type==='habit'){
+    h+='<label>Buttons</label><div class="seg">'+
+      '<button class="'+(t.up!==false?'on':'')+'" onclick="EDIT.up=!(EDIT.up!==false);drawSheet()">+ Positive</button>'+
+      '<button class="'+(t.down!==false?'on':'')+'" onclick="EDIT.down=!(EDIT.down!==false);drawSheet()">− Negative</button></div>'+
+      '<div class="small" style="margin-top:6px">+ rewards XP/gold; − costs HP. Enable either or both.</div>';
+  }
+  if(t.type==='daily'){
+    h+='<label>Repeat on</label><div class="days" id="eDays">'+
+      dayLabels.map((d,i)=>'<button style="border:1px solid var(--line);border-radius:8px;background:'+(t.repeat[i]?'var(--panel2)':'var(--panel)')+';color:var(--ink);cursor:pointer" onclick="EDIT.repeat['+i+']=!EDIT.repeat['+i+'];drawSheet()">'+d+'</button>').join('')+'</div>';
+  }
+  if(t.type!=='habit'){
+    h+='<label>Checklist (subtasks)</label><div class="checklist" id="eCheck">'+
+      (t.checklist||[]).map((c,i)=>'<div class="ci"><div class="box '+(c.done?'on':'')+'" onclick="EDIT.checklist['+i+'].done=!EDIT.checklist['+i+'].done;drawSheet()">'+(c.done?'✔':'')+'</div>'+
+        '<input type="text" value="'+esc(c.text)+'" oninput="EDIT.checklist['+i+'].text=this.value">'+
+        '<button class="del" onclick="EDIT.checklist.splice('+i+',1);drawSheet()">✕</button></div>').join('')+
+      '<button class="btn ghost" style="padding:8px" onclick="EDIT.checklist.push({id:uid(),text:\'\',done:false});drawSheet()">+ Add subtask</button></div>';
+  }
+  h+='<label>Notes / comments</label><textarea id="eNotes" placeholder="Notes, thoughts, log...">'+esc(t.notes)+'</textarea>';
+  h+='<div class="rowBtns">'+(t.id?'<button class="btn danger" onclick="deleteTask()">Delete</button>':'')+
+    '<button class="btn ghost" onclick="closeSheet()">Cancel</button>'+
+    '<button class="btn primary" onclick="saveTask()">Save</button></div>';
+  sheet.innerHTML=h;
+}
+function saveTask(){
+  EDIT.title=document.getElementById('eTitle').value.trim()||'Untitled';
+  EDIT.notes=document.getElementById('eNotes').value;
+  document.querySelectorAll('#eCheck .ci input[type=text]').forEach((inp,i)=>{ if(EDIT.checklist[i]) EDIT.checklist[i].text=inp.value; });
+  EDIT.checklist=(EDIT.checklist||[]).filter(c=>c.text.trim());
+  if(EDIT.id){ const idx=S.tasks.findIndex(x=>x.id===EDIT.id); S.tasks[idx]=EDIT; }
+  else { EDIT.id=uid(); S.tasks.push(EDIT); }
+  closeSheet(); save(); render();
+}
+function deleteTask(){ if(!confirm('Delete this task?'))return; S.tasks=S.tasks.filter(x=>x.id!==EDIT.id); closeSheet(); save(); render(); }
+function closeSheet(){ document.getElementById('scrim').classList.remove('show'); EDIT=null; }
+let REDIT=null;
+function openReward(id){
+  REDIT = id? JSON.parse(JSON.stringify(S.rewards.find(r=>r.id===id))) : {id:null,title:'',cost:10,notes:''};
+  const sheet=document.getElementById('sheet');
+  sheet.innerHTML='<h3>'+(REDIT.id?'Edit':'New')+' Reward</h3>'+
+    '<label>Reward</label><input type="text" id="rTitle" value="'+esc(REDIT.title)+'" placeholder="e.g. 30 min of gaming">'+
+    '<label>Cost (gold)</label><input type="text" id="rCost" value="'+REDIT.cost+'">'+
+    '<label>Notes</label><textarea id="rNotes">'+esc(REDIT.notes)+'</textarea>'+
+    '<div class="rowBtns">'+(REDIT.id?'<button class="btn danger" onclick="delReward()">Delete</button>':'')+
+    '<button class="btn ghost" onclick="closeSheet()">Cancel</button>'+
+    '<button class="btn primary" onclick="saveReward()">Save</button></div>';
+  document.getElementById('scrim').classList.add('show');
+}
+function saveReward(){
+  REDIT.title=document.getElementById('rTitle').value.trim()||'Reward';
+  REDIT.cost=Math.max(0,parseFloat(document.getElementById('rCost').value)||0);
+  REDIT.notes=document.getElementById('rNotes').value;
+  if(REDIT.id){ const i=S.rewards.findIndex(r=>r.id===REDIT.id); S.rewards[i]=REDIT; }
+  else { REDIT.id=uid(); S.rewards.push(REDIT); }
+  closeSheet(); save(); render();
+}
+function delReward(){ S.rewards=S.rewards.filter(r=>r.id!==REDIT.id); closeSheet(); save(); render(); }
+function buyReward(id){
+  const r=S.rewards.find(x=>x.id===id); if(!r)return;
+  if(S.char.gold < r.cost){ toast('Not enough gold'); return; }
+  S.char.gold=+(S.char.gold-r.cost).toFixed(2);
+  toast('Bought: '+r.title); save(); render();
+}
+const SHOP_ITEMS = [
+  { id:'potion', icon:'❤️', title:'Health Potion', cost:25, desc:'Restore 15 HP.',
+    use:function(){ S.char.hp = clamp(S.char.hp+15,0,S.char.maxHp); toast('+15 HP'); } },
+  { id:'bigpotion', icon:'💖', title:'Greater Potion', cost:60, desc:'Fully restore HP.',
+    use:function(){ S.char.hp = S.char.maxHp; toast('HP fully restored'); } }
+];
+function buyShopItem(id){
+  const item = SHOP_ITEMS.find(i=>i.id===id); if(!item) return;
+  if((item.id==='potion'||item.id==='bigpotion') && S.char.hp>=S.char.maxHp){ toast('Already at full HP'); return; }
+  if(S.char.gold < item.cost){ toast('Not enough gold'); return; }
+  S.char.gold = +(S.char.gold-item.cost).toFixed(2);
+  item.use();
+  save(); render();
+}
+function openSettings(){
+  const sheet=document.getElementById('sheet');
+  let h='<h3>Settings</h3>';
+  h+='<label>Character name</label><input type="text" id="setName" value="'+esc(S.char.name)+'">';
+  h+='<label>Avatar emoji</label><input type="text" id="setFace" value="'+esc(S.char.face)+'" maxlength="2">';
+  h+='<div class="settingsRow"><button class="btn primary" onclick="saveSettings()">Save</button></div>';
+  h+='<label>Interface width (on PC / wide screens)</label><div class="seg" id="setWidth">'+
+    [['Slim',430],['Medium',560],['Wide',720],['Full',3000]].map(o=>'<button class="'+((S.prefs.width||480)===o[1]?'on':'')+'" onclick="setWidth('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
+  h+='<div class="small" style="margin-top:6px">On a phone it always fills the screen. This caps the width on a monitor and keeps it centered.</div>';
+  h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
+  h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue.</div>';
+  h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
+    '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button></div>';
+  h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
+  h+='<div class="settingsRow"><button class="btn danger" onclick="if(confirm(\'Erase ALL progress on this device?\')){localStorage.removeItem(STORE_KEY);S=freshState();save();applyWidth();closeSheet();render();}">Reset everything</button></div>';
+  h+='<div class="settingsRow"><button class="btn ghost" onclick="closeSheet()">Close</button></div>';
+  h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
+  sheet.innerHTML=h;
+  document.getElementById('scrim').classList.add('show');
+}
+function setWidth(px){ S.prefs.width=px; applyWidth(); save(); openSettings(); }
+function saveSettings(){
+  S.char.name=document.getElementById('setName').value.trim()||'Adventurer';
+  S.char.face=document.getElementById('setFace').value||'🧙';
+  save(); render(); toast('Saved');
+}
+function exportData(){
+  const blob=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob); const a=document.createElement('a');
+  const d=new Date(); const stamp=''+d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0');
+  a.href=url; a.download='questa-backup-'+stamp+'.json'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function importData(ev){
+  const f=ev.target.files[0]; if(!f)return;
+  const rd=new FileReader();
+  rd.onload=()=>{ try{ const data=JSON.parse(rd.result);
+      if(!data.char||!Array.isArray(data.tasks)) throw 0;
+      if(confirm('Replace current progress with the imported file?')){ S=migrate(data); save(); applyWidth(); closeSheet(); render(); toast('Imported'); }
+    }catch(e){ alert('That file does not look like a valid Questa backup.'); } };
+  rd.readAsText(f); ev.target.value='';
+}
+function esc(s){ return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ TAB=b.dataset.tab; render(); });
+document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };
+applyWidth();
+runCron();
+render();
+if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }
+</script>
+</body>
+</html>

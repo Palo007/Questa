@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.24-1848";
+const APP_VERSION = "v2026.06.24-1932";
 
 const STORE_KEY = "questa.save.v1";
 function freshState(){
@@ -995,6 +995,9 @@ function restoreScroll(){
   requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo(0,y)));
 }
 function render(){
+  // tearing down #view orphans any in-flight drag node; clear all drag state
+  // first so a lingering ghost/listeners can't freeze the next screen.
+  if(typeof resetDragState==='function') resetDragState();
   renderStats();
   const v=document.getElementById('view');
   v.innerHTML = TAB==='habits'?viewHabits() : TAB==='dailies'?viewDailies() : TAB==='todos'?viewTodos() : TAB==='analytics'?viewAnalytics() : viewRewards();
@@ -1037,43 +1040,43 @@ function enableDragReorder(){
 let _tDrag=null, _tTimer=null, _tStartY=0, _tStartX=0, _tGhost=null, _tGrabDY=0,
     _tAutoScroll=null, _tPointerY=0, _tActive=false;
 function enableTouchDrag(card){
+  // Cards have touch-action:none (see CSS), so the browser will NOT scroll on its
+  // own from a touch that starts on a card. That removes the scroll-vs-drag race
+  // that produced "cancelable=false" interventions and the freeze. The trade-off:
+  // we must drive list scrolling ourselves until the long-press decides it's a drag.
   card.addEventListener('touchstart',e=>{
     if(e.touches.length!==1) return;
     if(e.target.closest('.check')) return;        // don't hijack +/-/check taps
+    if(_tActive || _tGhost || _tDrag) resetDragState();   // clean slate every gesture
     const t=e.touches[0];
     _tStartX=t.clientX; _tStartY=t.clientY; _tPointerY=t.clientY;
+    let _lastY=t.clientY, _decided=false, _isScroll=false;
     clearTimeout(_tTimer);
-    _tTimer=setTimeout(()=>{ beginTouchDrag(card,t); },200);  // long-press
-    // During the press window the card's touchmove is NON-passive so we can
-    // suppress the browser's scroll until we know the user's intent. This is
-    // what was missing on scrollable screens (Habits/Dailies): a passive
-    // listener let the browser start scrolling and cancel the gesture, freezing
-    // the lifted card. To-Dos "worked" only because its list didn't scroll.
+    _tTimer=setTimeout(()=>{ if(!_isScroll){ _decided=true; beginTouchDrag(card,t); } },200);  // long-press
     const pressMove=ev=>{
-      if(_tActive){ ev.preventDefault(); return; }  // already dragging: keep blocking scroll
+      if(_tActive){ if(ev.cancelable) ev.preventDefault(); return; }   // dragging: block scroll (handled at doc level too)
       const tt=ev.touches[0]; if(!tt) return;
-      const dx=Math.abs(tt.clientX-_tStartX), dy=Math.abs(tt.clientY-_tStartY);
-      if(dy>12 || dx>12){
-        // user moved before the long-press fired => it's a scroll: release & allow it
-        clearTimeout(_tTimer); _tTimer=null;
-        cleanup();
-      }
-      // (else) finger essentially still: do NOT preventDefault yet, so a real
-      // scroll started with a quick flick is never blocked; the long-press timer
-      // decides. Once it fires, beginTouchDrag locks touch-action:none on the card.
+      const dy=tt.clientY-_lastY;
+      const totDy=Math.abs(tt.clientY-_tStartY), totDx=Math.abs(tt.clientX-_tStartX);
+      // First clear movement before the press fires = a scroll. From then on we
+      // scroll the page MANUALLY (browser won't, since touch-action:none) so the
+      // list still scrolls smoothly from a touch that began on a card.
+      if(!_decided && (totDy>10 || totDx>10)){ _decided=true; _isScroll=true; clearTimeout(_tTimer); _tTimer=null; }
+      if(_isScroll){ if(ev.cancelable) ev.preventDefault(); window.scrollBy(0,-dy); }
+      _lastY=tt.clientY;
     };
     const cleanup=()=>{ clearTimeout(_tTimer); _tTimer=null;
       card.removeEventListener('touchmove',pressMove);
       card.removeEventListener('touchend',cleanup); card.removeEventListener('touchcancel',cleanup); };
     card.addEventListener('touchmove',pressMove,{passive:false});
     card.addEventListener('touchend',cleanup); card.addEventListener('touchcancel',cleanup);
-  },{passive:true});
+  },{passive:false});
 }
 // document-level handlers installed only while actively dragging.
 // capture:true + passive:false so our preventDefault wins over the page scroller.
 function _docTouchMove(e){
   if(!_tActive) return;
-  e.preventDefault();                              // <- stops page scroll
+  if(e.cancelable) e.preventDefault();             // <- stops page scroll (skip if browser already committed)
   const t=e.touches[0]; if(!t) return;
   _tPointerY=t.clientY;
   moveTouchDrag(t.clientX,t.clientY);
@@ -1095,7 +1098,7 @@ function beginTouchDrag(card,t){
   requestAnimationFrame(()=>{ if(_tGhost) _tGhost.classList.add('lifted'); });
   card.classList.add('dragging');
   card.style.touchAction='none';                 // browser must not scroll from this card now
-  if(navigator.vibrate) navigator.vibrate(15);
+  try{ if(navigator.vibrate) navigator.vibrate(15); }catch(_){ }
   // capture:true so we intercept the move before the page's scroll handling
   document.addEventListener('touchmove',_docTouchMove,{passive:false,capture:true});
   document.addEventListener('touchend',_docTouchEnd,{capture:true});
@@ -1137,27 +1140,36 @@ function startAutoScroll(){
   },16);
 }
 function stopAutoScroll(){ if(_tAutoScroll){ clearInterval(_tAutoScroll); _tAutoScroll=null; } }
-function endTouchDrag(){
+// Remove every listener/class/timer and clear all drag globals. Idempotent and
+// safe to call at any time (gesture end, interruption, or before a new gesture).
+function resetDragState(){
   clearTimeout(_tTimer); _tTimer=null;
   stopAutoScroll();
   // capture flag must match addEventListener for removal to take effect
   document.removeEventListener('touchmove',_docTouchMove,{capture:true});
   document.removeEventListener('touchend',_docTouchEnd,{capture:true});
   document.removeEventListener('touchcancel',_docTouchEnd,{capture:true});
-  if(_tDrag){ _tDrag.style.touchAction=''; }      // restore normal scrolling on the card
-  const dropTarget=_tDrag;
-  // animate the ghost snapping into the card's final position, then remove it
-  if(_tGhost && dropTarget){
-    const r=dropTarget.getBoundingClientRect();
-    _tGhost.classList.remove('lifted');
-    _tGhost.style.transition='left .16s ease, top .16s ease, transform .16s ease';
-    _tGhost.style.left=r.left+'px'; _tGhost.style.top=r.top+'px'; _tGhost.style.transform='scale(1)';
-    const g=_tGhost; _tGhost=null;
-    setTimeout(()=>{ g.remove(); },170);
-  } else if(_tGhost){ _tGhost.remove(); _tGhost=null; }
   document.documentElement.classList.remove('dragging-active');
+  if(_tGhost){ _tGhost.remove(); _tGhost=null; }
+  if(_tDrag){ _tDrag.style.touchAction=''; _tDrag.classList.remove('dragging'); _tDrag=null; }
   _tActive=false;
-  if(_tDrag){ _tDrag.classList.remove('dragging'); _tDrag=null; commitOrder(); }
+}
+function endTouchDrag(){
+  if(!_tActive && !_tDrag){ resetDragState(); return; }  // nothing in flight
+  const dropTarget=_tDrag, ghost=_tGhost;
+  // detach listeners + clear globals FIRST so the next gesture is never blocked,
+  // even though we still animate the ghost snap below using local references.
+  _tGhost=null;                                   // hand the ghost to the animation
+  if(dropTarget) commitOrder();                   // persist order before clearing _tDrag
+  resetDragState();                               // clears _tActive/_tDrag/classes/listeners
+  // animate the (now-detached) ghost snapping into the card's final slot
+  if(ghost && dropTarget){
+    const r=dropTarget.getBoundingClientRect();
+    ghost.classList.remove('lifted');
+    ghost.style.transition='left .16s ease, top .16s ease, transform .16s ease';
+    ghost.style.left=r.left+'px'; ghost.style.top=r.top+'px'; ghost.style.transform='scale(1)';
+    setTimeout(()=>{ ghost.remove(); },170);
+  } else if(ghost){ ghost.remove(); }
 }
 // read the DOM order back into S.tasks / S.rewards
 function commitOrder(){

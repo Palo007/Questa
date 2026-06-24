@@ -80,7 +80,11 @@
   .ckbox{width:22px;height:22px;border:2px solid var(--muted);border-radius:6px;display:block}
   .ckmark{font-size:22px;font-weight:900;color:#fff;line-height:1}
   .task.shopitem .check{background:rgba(247,78,82,.12)}
-  .task[draggable="true"]{cursor:grab;touch-action:pan-y;transition:transform .18s ease,opacity .15s ease}
+  /* touch-action:none so the browser NEVER auto-scrolls from a touch that starts
+     on a card (which would commit a scroll before our long-press can claim it and
+     trigger "cancelable=false" interventions). We drive list scrolling manually
+     in JS during the pre-press phase instead — see enableTouchDrag. */
+  .task[draggable="true"]{cursor:grab;touch-action:none;transition:transform .18s ease,opacity .15s ease}
   /* the original card becomes a dim placeholder gap while its ghost is dragged */
   .task.dragging{opacity:.25;outline:2px dashed var(--accent);transform:scale(.98)}
   /* floating clone that follows the finger while reordering on touch */

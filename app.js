@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.24-2022";
+const APP_VERSION = "v2026.06.24-2038";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 200.
@@ -1022,6 +1022,13 @@ function render(){
 // persist scroll continuously (lightweight, debounced)
 let _scrollT=null;
 window.addEventListener('scroll',()=>{ if(_scrollT)return; _scrollT=setTimeout(()=>{ _scrollT=null; saveScroll(); save(); },400); });
+// Mobile PWAs (esp. Android Chrome) can freeze/discard a backgrounded page before a
+// tap-triggered localStorage write is committed, reverting to an older snapshot on
+// relaunch (e.g. filter re-opens). Force a synchronous flush on the durable
+// 'page is going away' signals: visibilitychange->hidden and pagehide.
+function flushState(){ if(_scrollT){ clearTimeout(_scrollT); _scrollT=null; } saveScroll(); save(); }
+document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden') flushState(); });
+window.addEventListener('pagehide', flushState);
 // ---- drag & drop reordering (tasks + rewards), persisted to S ----
 let _dragEl=null, _dragList=null;
 function enableDragReorder(){
@@ -1431,7 +1438,7 @@ function openSettings(){
   let h='<h3>Settings</h3>';
   h+='<label>Character name</label><input type="text" id="setName" value="'+esc(S.char.name)+'">';
   h+='<label>Avatar emoji</label><input type="text" id="setFace" value="'+esc(S.char.face)+'" maxlength="2">';
-  h+='<div class="settingsRow"><button class="btn primary" onclick="saveSettings()">Save</button></div>';
+  h+='<div class="settingsRow"><button class="btn primary" onclick="saveSettings()">Save</button><button class="btn ghost" onclick="closeSheet()">Close</button></div>';
   h+='<label>Interface width (on PC / wide screens)</label><div class="seg" id="setWidth">'+
     [['Slim',430],['Medium',560],['Wide',720],['Full',3000]].map(o=>'<button class="'+((S.prefs.width||480)===o[1]?'on':'')+'" onclick="setWidth('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
   h+='<div class="small" style="margin-top:6px">On a phone it always fills the screen. This caps the width on a monitor and keeps it centered.</div>';
@@ -1452,7 +1459,6 @@ function openSettings(){
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
-  h+='<div class="settingsRow"><button class="btn ghost" onclick="closeSheet()">Close</button></div>';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
   h+='<div class="resetRow"><button class="btn resetMini" onclick="if(confirm(\'Erase ALL progress on this device? This cannot be undone.\')){localStorage.removeItem(STORE_KEY);S=freshState();save();applyWidth();closeSheet();render();}">Reset everything</button></div>';
@@ -1467,7 +1473,7 @@ function saveSettings(){
   S.char.face=document.getElementById('setFace').value||'🧙';
   const ddEl=document.getElementById('setDragDelay');
   if(ddEl){ let n=parseInt(ddEl.value,10); if(!isFinite(n)||n<0) n=DRAG_DELAY_DEFAULT; n=Math.min(2000,n); S.prefs.dragDelay=n; }
-  save(); render(); toast('Saved');
+  save(); render(); closeSheet(); toast('Saved');
 }
 function exportData(){
   const blob=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});

@@ -1374,17 +1374,17 @@ function enableTouchDrag(card){
     // listener let the browser start scrolling and cancel the gesture, freezing
     // the lifted card. To-Dos "worked" only because its list didn't scroll.
     const pressMove=ev=>{
-      if(_tActive){ return; }                      // active drag handled at document level
+      if(_tActive){ ev.preventDefault(); return; }  // already dragging: keep blocking scroll
       const tt=ev.touches[0]; if(!tt) return;
       const dx=Math.abs(tt.clientX-_tStartX), dy=Math.abs(tt.clientY-_tStartY);
-      if(dy>14 || dx>14){
-        // clear movement before the press fired => it's a scroll: release & allow it
+      if(dy>12 || dx>12){
+        // user moved before the long-press fired => it's a scroll: release & allow it
         clearTimeout(_tTimer); _tTimer=null;
         cleanup();
-      } else {
-        // small jitter while holding to drag => block the page from scrolling
-        ev.preventDefault();
       }
+      // (else) finger essentially still: do NOT preventDefault yet, so a real
+      // scroll started with a quick flick is never blocked; the long-press timer
+      // decides. Once it fires, beginTouchDrag locks touch-action:none on the card.
     };
     const cleanup=()=>{ clearTimeout(_tTimer); _tTimer=null;
       card.removeEventListener('touchmove',pressMove);
@@ -1393,7 +1393,8 @@ function enableTouchDrag(card){
     card.addEventListener('touchend',cleanup); card.addEventListener('touchcancel',cleanup);
   },{passive:true});
 }
-// document-level handlers installed only while actively dragging
+// document-level handlers installed only while actively dragging.
+// capture:true + passive:false so our preventDefault wins over the page scroller.
 function _docTouchMove(e){
   if(!_tActive) return;
   e.preventDefault();                              // <- stops page scroll
@@ -1417,10 +1418,12 @@ function beginTouchDrag(card,t){
   // animate the lift, then leave a dim placeholder gap where the card was
   requestAnimationFrame(()=>{ if(_tGhost) _tGhost.classList.add('lifted'); });
   card.classList.add('dragging');
+  card.style.touchAction='none';                 // browser must not scroll from this card now
   if(navigator.vibrate) navigator.vibrate(15);
-  document.addEventListener('touchmove',_docTouchMove,{passive:false});
-  document.addEventListener('touchend',_docTouchEnd);
-  document.addEventListener('touchcancel',_docTouchEnd);
+  // capture:true so we intercept the move before the page's scroll handling
+  document.addEventListener('touchmove',_docTouchMove,{passive:false,capture:true});
+  document.addEventListener('touchend',_docTouchEnd,{capture:true});
+  document.addEventListener('touchcancel',_docTouchEnd,{capture:true});
   startAutoScroll();
 }
 function moveTouchDrag(x,y){
@@ -1461,9 +1464,11 @@ function stopAutoScroll(){ if(_tAutoScroll){ clearInterval(_tAutoScroll); _tAuto
 function endTouchDrag(){
   clearTimeout(_tTimer); _tTimer=null;
   stopAutoScroll();
-  document.removeEventListener('touchmove',_docTouchMove,{passive:false});
-  document.removeEventListener('touchend',_docTouchEnd);
-  document.removeEventListener('touchcancel',_docTouchEnd);
+  // capture flag must match addEventListener for removal to take effect
+  document.removeEventListener('touchmove',_docTouchMove,{capture:true});
+  document.removeEventListener('touchend',_docTouchEnd,{capture:true});
+  document.removeEventListener('touchcancel',_docTouchEnd,{capture:true});
+  if(_tDrag){ _tDrag.style.touchAction=''; }      // restore normal scrolling on the card
   const dropTarget=_tDrag;
   // animate the ghost snapping into the card's final position, then remove it
   if(_tGhost && dropTarget){

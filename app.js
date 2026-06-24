@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.24-1945";
+const APP_VERSION = "v2026.06.24-1955";
 
 const STORE_KEY = "questa.save.v1";
 function freshState(){
@@ -1040,10 +1040,12 @@ function enableDragReorder(){
 let _tDrag=null, _tTimer=null, _tStartY=0, _tStartX=0, _tGhost=null, _tGrabDY=0,
     _tAutoScroll=null, _tPointerY=0, _tActive=false;
 function enableTouchDrag(card){
-  // Cards have touch-action:none (see CSS), so the browser will NOT scroll on its
-  // own from a touch that starts on a card. That removes the scroll-vs-drag race
-  // that produced "cancelable=false" interventions and the freeze. The trade-off:
-  // we must drive list scrolling ourselves until the long-press decides it's a drag.
+  // ONE non-passive touchmove listener on the card spans the ENTIRE gesture
+  // (press window AND active drag). It calls preventDefault() from the very
+  // first move, so the browser's scroll-vs-drag arbitration can NEVER commit to
+  // a scroll: our cancel is in force before the browser ever sees a cancelable
+  // move it could turn into a scroll. This closes the gap that let the page
+  // scroll while the card stayed lifted (the "hold longer then freeze" bug).
   card.addEventListener('touchstart',e=>{
     if(e.touches.length!==1) return;
     if(e.target.closest('.check')) return;        // don't hijack +/-/check taps
@@ -1053,15 +1055,19 @@ function enableTouchDrag(card){
     let _lastY=t.clientY, _decided=false, _isScroll=false;
     clearTimeout(_tTimer);
     _tTimer=setTimeout(()=>{ if(!_isScroll){ _decided=true; beginTouchDrag(card,t); } },200);  // long-press
-    const pressMove=ev=>{
-      // ALWAYS preventDefault here. The card is touch-action:none, but on a long
-      // stationary hold some browsers still try to start a scroll/callout on the
-      // first move; if we don't cancel it immediately it becomes non-cancelable
-      // and the page scrolls while the card stays lifted -> the "hold longer then
-      // freeze" bug. Cancelling every move from the start keeps the touch ours.
+
+    const onMove=ev=>{
+      // Cancel EVERY move from the first one. Card is touch-action:none, but we
+      // still cancel defensively so a stationary hold can never let the browser
+      // start its own scroll/callout and flip subsequent moves non-cancelable.
       if(ev.cancelable) ev.preventDefault();
-      if(_tActive){ return; }                         // active drag handled at document level
       const tt=ev.touches[0]; if(!tt) return;
+      if(_tActive){                                // ACTIVE DRAG phase
+        _tPointerY=tt.clientY;
+        moveTouchDrag(tt.clientX,tt.clientY);
+        return;
+      }
+      // PRESS-WINDOW phase (before the long-press fires)
       const dy=tt.clientY-_lastY;
       const totDy=Math.abs(tt.clientY-_tStartY), totDx=Math.abs(tt.clientX-_tStartX);
       // First clear movement before the press fires = a scroll: drive it manually.
@@ -1069,23 +1075,19 @@ function enableTouchDrag(card){
       if(_isScroll){ window.scrollBy(0,-dy); }
       _lastY=tt.clientY;
     };
-    const cleanup=()=>{ clearTimeout(_tTimer); _tTimer=null;
-      card.removeEventListener('touchmove',pressMove);
-      card.removeEventListener('touchend',cleanup); card.removeEventListener('touchcancel',cleanup); };
-    card.addEventListener('touchmove',pressMove,{passive:false});
-    card.addEventListener('touchend',cleanup); card.addEventListener('touchcancel',cleanup);
+    const onEnd=()=>{
+      clearTimeout(_tTimer); _tTimer=null;
+      card.removeEventListener('touchmove',onMove);
+      card.removeEventListener('touchend',onEnd);
+      card.removeEventListener('touchcancel',onEnd);
+      if(_tActive) endTouchDrag();                 // finish an active drag
+    };
+    card.addEventListener('touchmove',onMove,{passive:false});
+    card.addEventListener('touchend',onEnd);
+    card.addEventListener('touchcancel',onEnd);
   },{passive:false});
 }
-// document-level handlers installed only while actively dragging.
-// capture:true + passive:false so our preventDefault wins over the page scroller.
-function _docTouchMove(e){
-  if(!_tActive) return;
-  if(e.cancelable) e.preventDefault();             // <- stops page scroll (skip if browser already committed)
-  const t=e.touches[0]; if(!t) return;
-  _tPointerY=t.clientY;
-  moveTouchDrag(t.clientX,t.clientY);
-}
-function _docTouchEnd(){ endTouchDrag(); }
+
 function beginTouchDrag(card,t){
   _tActive=true; _tDrag=card; _dragList=card.dataset.list;
   const r=card.getBoundingClientRect();
@@ -1103,10 +1105,9 @@ function beginTouchDrag(card,t){
   card.classList.add('dragging');
   card.style.touchAction='none';                 // browser must not scroll from this card now
   try{ if(navigator.vibrate) navigator.vibrate(15); }catch(_){ }
-  // capture:true so we intercept the move before the page's scroll handling
-  document.addEventListener('touchmove',_docTouchMove,{passive:false,capture:true});
-  document.addEventListener('touchend',_docTouchEnd,{capture:true});
-  document.addEventListener('touchcancel',_docTouchEnd,{capture:true});
+  // NOTE: no document-level touch listeners. The card's own non-passive
+  // touchmove listener (bound at touchstart) drives the active drag, so our
+  // preventDefault has been in force since the first move of the gesture.
   startAutoScroll();
 }
 function moveTouchDrag(x,y){
@@ -1149,10 +1150,6 @@ function stopAutoScroll(){ if(_tAutoScroll){ clearInterval(_tAutoScroll); _tAuto
 function resetDragState(){
   clearTimeout(_tTimer); _tTimer=null;
   stopAutoScroll();
-  // capture flag must match addEventListener for removal to take effect
-  document.removeEventListener('touchmove',_docTouchMove,{capture:true});
-  document.removeEventListener('touchend',_docTouchEnd,{capture:true});
-  document.removeEventListener('touchcancel',_docTouchEnd,{capture:true});
   document.documentElement.classList.remove('dragging-active');
   if(_tGhost){ _tGhost.remove(); _tGhost=null; }
   if(_tDrag){ _tDrag.style.touchAction=''; _tDrag.classList.remove('dragging'); _tDrag=null; }

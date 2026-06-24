@@ -89,8 +89,10 @@
     outline:2px solid var(--accent);border-radius:10px;
     transition:transform .14s ease, box-shadow .14s ease}
   .dragGhost.lifted{transform:scale(1.04);box-shadow:0 16px 36px rgba(0,0,0,.7)}
-  /* lock background scroll while a touch-drag is in progress (html+body) */
-  html.dragging-active,html.dragging-active body{overflow:hidden;touch-action:none;overscroll-behavior:none}
+  /* While dragging we block scrolling via preventDefault in JS (not overflow:hidden,
+     which would jump the scroll position on long lists and freeze the gesture).
+     touch-action:none just tells the browser we'll handle the gesture ourselves. */
+  html.dragging-active,html.dragging-active body{touch-action:none;overscroll-behavior:none;-webkit-user-select:none;user-select:none}
   .task .check.coin{display:flex;align-items:center;justify-content:center}
   .task .check.coin svg{display:block}
   .task.habit .check.hbtn{font-size:22px;font-weight:700}
@@ -1366,19 +1368,29 @@ function enableTouchDrag(card){
     _tStartX=t.clientX; _tStartY=t.clientY; _tPointerY=t.clientY;
     clearTimeout(_tTimer);
     _tTimer=setTimeout(()=>{ beginTouchDrag(card,t); },200);  // long-press
-    // while waiting for the long-press, watch for movement = user is scrolling
-    const cancelIfScroll=ev=>{
+    // During the press window the card's touchmove is NON-passive so we can
+    // suppress the browser's scroll until we know the user's intent. This is
+    // what was missing on scrollable screens (Habits/Dailies): a passive
+    // listener let the browser start scrolling and cancel the gesture, freezing
+    // the lifted card. To-Dos "worked" only because its list didn't scroll.
+    const pressMove=ev=>{
+      if(_tActive){ return; }                      // active drag handled at document level
       const tt=ev.touches[0]; if(!tt) return;
-      if(!_tActive && _tTimer && (Math.abs(tt.clientY-_tStartY)>10 || Math.abs(tt.clientX-_tStartX)>10)){
+      const dx=Math.abs(tt.clientX-_tStartX), dy=Math.abs(tt.clientY-_tStartY);
+      if(dy>14 || dx>14){
+        // clear movement before the press fired => it's a scroll: release & allow it
         clearTimeout(_tTimer); _tTimer=null;
-        card.removeEventListener('touchmove',cancelIfScroll);
+        cleanup();
+      } else {
+        // small jitter while holding to drag => block the page from scrolling
+        ev.preventDefault();
       }
     };
-    card.addEventListener('touchmove',cancelIfScroll,{passive:true});
-    const clear=()=>{ clearTimeout(_tTimer); _tTimer=null;
-      card.removeEventListener('touchmove',cancelIfScroll);
-      card.removeEventListener('touchend',clear); card.removeEventListener('touchcancel',clear); };
-    card.addEventListener('touchend',clear); card.addEventListener('touchcancel',clear);
+    const cleanup=()=>{ clearTimeout(_tTimer); _tTimer=null;
+      card.removeEventListener('touchmove',pressMove);
+      card.removeEventListener('touchend',cleanup); card.removeEventListener('touchcancel',cleanup); };
+    card.addEventListener('touchmove',pressMove,{passive:false});
+    card.addEventListener('touchend',cleanup); card.addEventListener('touchcancel',cleanup);
   },{passive:true});
 }
 // document-level handlers installed only while actively dragging

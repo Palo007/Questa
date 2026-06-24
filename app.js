@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.24-2038";
+const APP_VERSION = "v2026.06.24-2127";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 200.
@@ -23,7 +23,7 @@ function freshState(){
            lvl:1, xp:0, hp:50, maxHp:50, mp:0, gold:0 },
     tasks:[], rewards:[],
     lastCron: dayStamp(new Date()),
-    history:[], prefs:{ width:480, notesLines:3, lastTab:'habits' }
+    history:[], events:[], charHistory:[], prefs:{ width:480, notesLines:3, lastTab:'habits' }
   };
 }
 let S = load();
@@ -37,6 +37,23 @@ function migrate(s){ const f=freshState();
   out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0}, s.prefs||{});
   return out; }
 function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
+// --- append-only event log -------------------------------------------
+// Unlike history (one merged point/day), events are NEVER merged: each tap,
+// subtask toggle, completion and miss is its own timestamped record. This is
+// the fidelity layer for time-of-day / per-subtask analytics. Capped to avoid
+// unbounded localStorage growth (oldest dropped first).
+const EVENT_CAP = 50000;
+function logEvent(ev){
+  S.events = S.events || [];
+  S.events.push(Object.assign({ts:Date.now()}, ev));
+  if(S.events.length > EVENT_CAP) S.events.splice(0, S.events.length - EVENT_CAP);
+}
+// Once-per-day snapshot of the character vitals, for progression charts.
+function logCharSnapshot(){
+  S.charHistory = S.charHistory || [];
+  const c=S.char||{};
+  S.charHistory.push({date:Date.now(), hp:c.hp, maxHp:c.maxHp, xp:c.xp, mp:c.mp, gold:c.gold, lvl:c.lvl});
+}
 function applyWidth(){ document.documentElement.style.setProperty('--appw',(S.prefs.width||480)+'px'); }
 
 const uid = ()=> Date.now().toString(36)+Math.random().toString(36).slice(2,7);
@@ -96,6 +113,11 @@ function logHistory(t, patch){
     if('scoredUp' in patch) last.scoredUp = (last.scoredUp||0) + patch.scoredUp;
     if('scoredDown' in patch) last.scoredDown = (last.scoredDown||0) + patch.scoredDown;
     if('completed' in patch) last.completed = patch.completed;
+    if('checklist' in patch) last.checklist = patch.checklist;
+    if('reward' in patch) last.reward = patch.reward;
+    if('reps' in patch) last.reps = (last.reps||0) + patch.reps;
+    if('repCounted' in patch) last.repCounted = last.repCounted || patch.repCounted;
+    if('scored' in patch) last.scored = last.scored || patch.scored;
   } else {
     t.history.push(Object.assign({date:now}, patch));
   }
@@ -108,8 +130,16 @@ function completeTask(t){
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };  // remember exactly what was granted
-  if(t.type==='daily'){ t.streak = (t.streak||0) + 1; logHistory(t,{value:t.value,completed:true,isDue:true}); }
-  if(t.type==='todo'){ logHistory(t,{value:t.value,completed:true}); }
+  if(t.type==='daily'){ t.streak = (t.streak||0) + 1;
+    const cl=(t.checklist||[]); const snap = cl.length? {checklist:cl.map(c=>({text:c.text,done:!!c.done}))} : {};
+    logHistory(t,Object.assign({value:t.value,completed:true,isDue:true,reward:Object.assign({},t._gr),repeat:(t.repeat||[]).slice()},snap));
+    logEvent({kind:'complete', taskType:'daily', taskId:t.id, taskTitle:t.title,
+              streak:t.streak, reward:Object.assign({},t._gr), repeat:(t.repeat||[]).slice(),
+              checklist:cl.map(c=>({id:c.id||null,text:c.text,done:!!c.done}))}); }
+  if(t.type==='todo'){ t.completedAt = Date.now();
+    logHistory(t,{value:t.value,completed:true,reward:Object.assign({},t._gr)});
+    logEvent({kind:'complete', taskType:'todo', taskId:t.id, taskTitle:t.title,
+              reward:Object.assign({},t._gr), createdAt:t.createdAt||null, completedAt:t.completedAt}); }
   toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar();
   save(); render();
 }
@@ -154,13 +184,16 @@ function scoreHabit(id, dir){
     gainXp(r.xp); S.char.gold=+(S.char.gold+r.gold).toFixed(2); S.char.mp+=r.mp;
     t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
     t.cUp=(t.cUp||0)+1;
-    logHistory(t,{value:t.value,scoredUp:1});
+    const _rpt = t.repsPerTap || repsPerTap(t.title);
+    logHistory(t,{value:t.value,scoredUp:1,reps:_rpt,repCounted:true,scored:true});
+    logEvent({kind:'habitTap', dir:1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value});
     toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar();
   } else {
     const dmg=missDamage(t);
     t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
     t.cDown=(t.cDown||0)+1;
     logHistory(t,{value:t.value,scoredDown:1});
+    logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, value:t.value});
     takeDamage(dmg); toast('-'+dmg.toFixed(1)+' HP');
   }
   save(); render();
@@ -192,13 +225,18 @@ function runCron(){
       totalDmg += missDamage(t);
       t.value = clamp(t.value - valueDelta(t.value), -47.27, 99);
       t.streak = 0;
-      logHistory(t,{value:t.value,completed:false,isDue:true});
+      logHistory(t,{value:t.value,completed:false,isDue:true,repeat:(t.repeat||[]).slice()});
+      const cl=(t.checklist||[]);
+      logEvent({kind:'miss', taskType:'daily', taskId:t.id, taskTitle:t.title,
+                repeat:(t.repeat||[]).slice(),
+                checklist:cl.map(c=>({id:c.id||null,text:c.text,done:!!c.done}))});
     }
     t.done = false;
     (t.checklist||[]).forEach(c=>c.done=false);
   });
   S.lastCron = today;
   if(totalDmg>0){ takeDamage(totalDmg); toast('-'+totalDmg.toFixed(1)+' HP (missed dailies)'); }
+  logCharSnapshot();
   save();
 }
 function levelFlash(lvl){
@@ -229,7 +267,10 @@ const EXPANDED={}; // taskId -> bool (checklist expanded on card)
 function toggleExpand(id){ EXPANDED[id]=!EXPANDED[id]; render(); }
 function toggleSub(taskId, idx){
   const t=S.tasks.find(x=>x.id===taskId); if(!t||!t.checklist||!t.checklist[idx])return;
-  t.checklist[idx].done=!t.checklist[idx].done;
+  const c=t.checklist[idx];
+  c.done=!c.done;
+  logEvent({kind:'subtask', taskId:t.id, taskTitle:t.title, taskType:t.type,
+            subId:c.id||null, subText:c.text, done:c.done});
   save(); render();
 }
 function checklistBlock(t){
@@ -246,7 +287,10 @@ function checklistBlock(t){
 }
 function renderStats(){
   const c=S.char;
-  document.getElementById('avatarFace').textContent=c.face;
+  (function(){ var a=document.getElementById('avatarFace');
+    if(c.faceImg){ a.textContent=''; a.style.backgroundImage='url("'+c.faceImg+'")';
+      a.style.backgroundSize='cover'; a.style.backgroundPosition='center'; }
+    else { a.style.backgroundImage=''; a.textContent=c.face; } })();
   document.getElementById('charName').textContent=c.name;
   document.getElementById('charLvl').textContent=c.lvl;
   document.getElementById('charClass').textContent=c.cls;
@@ -439,6 +483,8 @@ function anAllEvents(){
         date:p.date, value:p.value,
         scoredUp:su, scoredDown:p.scoredDown||0,
         reps:reps, repCounted:repCounted, scored:scored,
+        reward:('reward' in p)? p.reward : null,
+        checklist:('checklist' in p)? p.checklist : null,
         completed:('completed' in p)? !!p.completed : null });
     });
   });
@@ -1386,7 +1432,7 @@ function saveTask(){
   document.querySelectorAll('#eCheck .ci input[type=text]').forEach((inp,i)=>{ if(EDIT.checklist[i]) EDIT.checklist[i].text=inp.value; });
   EDIT.checklist=(EDIT.checklist||[]).filter(c=>c.text.trim());
   if(EDIT.id){ const idx=S.tasks.findIndex(x=>x.id===EDIT.id); S.tasks[idx]=EDIT; }
-  else { EDIT.id=uid(); S.tasks.push(EDIT); }
+  else { EDIT.id=uid(); EDIT.createdAt=Date.now(); S.tasks.push(EDIT); }
   closeSheet(); save(); render();
 }
 function deleteTask(){ if(!confirm('Delete this task?'))return; S.tasks=S.tasks.filter(x=>x.id!==EDIT.id); closeSheet(); save(); render(); }
@@ -1437,7 +1483,16 @@ function openSettings(){
   const sheet=document.getElementById('sheet');
   let h='<h3>Settings</h3>';
   h+='<label>Character name</label><input type="text" id="setName" value="'+esc(S.char.name)+'">';
-  h+='<label>Avatar emoji</label><input type="text" id="setFace" value="'+esc(S.char.face)+'" maxlength="2">';
+  h+='<label>Avatar</label>';
+  h+='<div class="avatarSetRow">'+
+     '<input type="text" id="setFace" value="'+esc(S.char.face)+'" maxlength="2" placeholder="emoji">'+
+     '<button class="btn ghost" type="button" onclick="document.getElementById(\'faceFile\').click()">Browse image\u2026</button>'+
+     '</div>';
+  h+='<input type="file" id="faceFile" accept="image/jpeg,image/gif,.jpg,.jpeg,.gif" style="display:none" onchange="uploadFace(event)">';
+  if(S.char.faceImg){ h+='<div class="small" style="margin-top:6px;display:flex;align-items:center;gap:8px">'+
+     '<img src="'+S.char.faceImg+'" alt="" style="width:32px;height:32px;border-radius:8px;object-fit:cover;border:1px solid var(--line)">'+
+     'Custom image in use. <a href="#" onclick="removeFace();return false">Remove</a> to use the emoji instead.</div>'; }
+  else { h+='<div class="small" style="margin-top:6px">Type an emoji, or upload a JPEG/GIF (max 1\u00a0MB) to use as your avatar. An uploaded image takes priority over the emoji.</div>'; }
   h+='<div class="settingsRow"><button class="btn primary" onclick="saveSettings()">Save</button><button class="btn ghost" onclick="closeSheet()">Close</button></div>';
   h+='<label>Interface width (on PC / wide screens)</label><div class="seg" id="setWidth">'+
     [['Slim',430],['Medium',560],['Wide',720],['Full',3000]].map(o=>'<button class="'+((S.prefs.width||480)===o[1]?'on':'')+'" onclick="setWidth('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
@@ -1491,6 +1546,16 @@ function importData(ev){
     }catch(e){ alert('That file does not look like a valid Questa backup.'); } };
   rd.readAsText(f); ev.target.value='';
 }
+function uploadFace(ev){
+  const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
+  if(!/^image\/(jpeg|gif)$/.test(f.type)){ alert('Please choose a JPEG or GIF image.'); return; }
+  if(f.size>1048576){ alert('That image is '+(f.size/1048576).toFixed(1)+' MB. Please use one under 1 MB.'); return; }
+  const rd=new FileReader();
+  rd.onload=()=>{ S.char.faceImg=rd.result; save(); renderStats(); openSettings(); toast('Avatar image set'); };
+  rd.onerror=()=>alert('Could not read that file.');
+  rd.readAsDataURL(f);
+}
+function removeFace(){ delete S.char.faceImg; save(); renderStats(); openSettings(); toast('Image removed'); }
 function esc(s){ return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ saveScroll(); TAB=b.dataset.tab; if(S.prefs){S.prefs.lastTab=TAB; save();} render(); });
 document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };

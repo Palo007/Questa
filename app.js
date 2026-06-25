@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.25-1741";
+const APP_VERSION = "v2026.06.25-1753";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -1504,9 +1504,10 @@ function startInertia(v0){
   stopInertia();
   // v0 is px/ms (finger speed). Convert to px/frame and cap so a hard flick
   // doesn't launch absurdly fast. Below threshold, don't bother coasting.
-  let v=Math.max(-40,Math.min(40, v0*16));
+  // Tuned 50% stronger: higher launch multiplier + cap, slower friction = longer coast.
+  let v=Math.max(-60,Math.min(60, v0*24));
   if(Math.abs(v)<0.6) return;
-  const FRICTION=0.94;                          // per-frame decay (~iOS feel)
+  const FRICTION=0.96;                          // per-frame decay (slower = farther coast)
   const step=()=>{
     window.scrollBy(0,-v);                       // same sign convention as manual scroll
     v*=FRICTION;

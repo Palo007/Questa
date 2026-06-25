@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.25-2035";
+const APP_VERSION = "v2026.06.25-2359";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -15,6 +15,9 @@ function longPressMs(){
   const n = (v==null ? DRAG_DELAY_DEFAULT : +v);
   return (isFinite(n) && n>=0) ? n : DRAG_DELAY_DEFAULT;
 }
+let _buzzLastResult = null;
+let _buzzCount = 0;
+function getBuzzDiag(){ return { type: typeof navigator.vibrate, lastResult: _buzzLastResult, count: _buzzCount }; }
 const STORE_KEY = "questa.save.v1";
 function freshState(){
   return {
@@ -23,7 +26,7 @@ function freshState(){
            lvl:1, xp:0, hp:50, maxHp:50, mp:0, gold:0 },
     tasks:[], rewards:[],
     lastCron: dayStamp(new Date()),
-    history:[], charHistory:[], prefs:{ width:480, notesLines:3, lastTab:'habits' }
+    history:[], charHistory:[], prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true }
   };
 }
 let S = load();
@@ -34,7 +37,7 @@ function load(){
 }
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
-  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0}, s.prefs||{});
+  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true}, s.prefs||{});
   // Tooltip delay is fixed at Instant; the control was removed, so normalize any saved value.
   out.prefs.tipDelay=0;
   // Card drag delay now lives on a 100-300 ms slider; clamp legacy values into range.
@@ -557,7 +560,7 @@ function levelFlash(lvl){
   const f=document.getElementById('lvlFlash'); const t=document.getElementById('lvlFlashTxt');
   t.textContent='⭐ Level '+lvl+'!'; f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');
 }
-function buzz(p){ try{ if(navigator.vibrate && !(S.prefs&&S.prefs.haptics===false)) navigator.vibrate(p); }catch(_){ } }
+function buzz(p){ _buzzCount++; try{ if(navigator.vibrate && !(S.prefs&&S.prefs.haptics===false)){ _buzzLastResult=navigator.vibrate(p); return _buzzLastResult; } }catch(_){} _buzzLastResult=false; return false; }
 // Habitica-style floating gain/loss anchored to the tapped control.
 // kind: 'pos' (green) or 'neg' (red). ev: the click event (for x/y).
 function floatFx(parts, kind, ev){
@@ -1647,7 +1650,7 @@ function beginTouchDrag(card,t){
   requestAnimationFrame(()=>{ if(_tGhost) _tGhost.classList.add('lifted'); });
   card.classList.add('dragging');
   card.style.touchAction='none';                 // browser must not scroll from this card now
-  try{ if(navigator.vibrate) navigator.vibrate(15); }catch(_){ }
+  buzz(15);
   // NOTE: no document-level touch listeners. The card's own non-passive touchmove
   // listener (bound at touchstart) drives the active drag, so preventDefault has
   // been in force since the first move of the gesture.
@@ -1980,6 +1983,7 @@ function openSettings(){
   h+=settingRow('width','Width','Caps the width on a monitor and keeps it centered.',(widthLabels[wv]||'Custom'));
   h+=settingRow('notes','Note lines','Lines of a task\'s notes shown in the list preview.',(nl===0?'Off':(''+nl)));
   h+=settingRow('drag','Drag delay','Hold time before a card lifts for reordering on touch.',(ddv+' ms'));
+  h+=settingRow('haptics','Haptics','Vibration on taps and completions.',(S.prefs.haptics===false?'Off':'On'));
   h+='</div>';
   h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
@@ -1987,6 +1991,12 @@ function openSettings(){
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
+  const _bd=getBuzzDiag();
+  h+='<div class="colTitle"><h2 style="font-size:13px">Vibration diagnostics</h2></div>';
+  h+='<div class="small">navigator.vibrate type: <b>'+esc(_bd.type)+'</b></div>';
+  h+='<div class="small">Last buzz result: <b>'+(_bd.lastResult===null?'(never called)':''+_bd.lastResult)+'</b></div>';
+  h+='<div class="small">Buzz call count: <b>'+_bd.count+'</b></div>';
+  h+='<div class="settingsRow"><button class="btn ghost" onclick="var _r=(typeof navigator.vibrate===\'function\'?navigator.vibrate(400):false);toast(\'Vibrate returned: \'+_r);openSettings()">Test Vibration (400ms)</button></div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
   h+='<div class="resetRow"><button class="btn resetMini" onclick="if(confirm(\'Erase ALL progress on this device? This cannot be undone.\')){localStorage.removeItem(STORE_KEY);S=freshState();save();applyWidth();closeSheet();render();}">Reset everything</button></div>';
   sheet.innerHTML=h;
@@ -1995,6 +2005,7 @@ function openSettings(){
 // Tooltip delay is fixed at Instant (0); the user-facing control was removed.
 function setWidth(px){ S.prefs.width=px; applyWidth(); save(); closeOpt(); openSettings(); }
 function setNotesLines(n){ S.prefs.notesLines=n; save(); closeOpt(); openSettings(); }
+function setHaptics(n){ S.prefs.haptics=!!n; save(); closeOpt(); openSettings(); }
 // --- Settings rows + foreground options menu -------------------------------
 // Build one tappable row: a label + short description on the left, current
 // value + chevron on the right. Tapping opens the matching options menu.
@@ -2034,6 +2045,15 @@ function openOpt(key){
         'onchange="setDragDelay(this.value)">'+
       '<div class="sEnds"><span>100</span><span>300</span></div>'+
       '</div>';
+  }
+  if(key==='haptics'){
+    const hv=S.prefs.haptics!==false;
+    h+='<h4>Haptics</h4>';
+    h+='<p class="optHint">Vibration feedback when you tap buttons, check tasks, and complete dailies. Requires device support.</p>';
+    h+='<div class="optChoices">';
+    h+='<button type="button" class="'+(hv?'on':'')+'" onclick="setHaptics(1)">On</button>';
+    h+='<button type="button" class="'+(hv?'':'on')+'" onclick="setHaptics(0)">Off</button>';
+    h+='</div>';
   }
   h+='<button class="btn ghost optClose" type="button" onclick="closeOpt()">Done</button>';
   document.getElementById('optMenu').innerHTML=h;

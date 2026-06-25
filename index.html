@@ -175,6 +175,40 @@
   .seg button{flex:1;min-width:64px;background:var(--panel);border:1px solid var(--line);
     color:var(--ink);border-radius:8px;padding:8px;font-size:13px;cursor:pointer}
   .seg button.on{background:var(--panel2);border-color:var(--accent);font-weight:700}
+  /* Setting chips: compact tappable buttons sitting on one horizontal row.
+     Each shows a short label + current value; full description lives in the popover. */
+  .setList{display:flex;flex-direction:row;gap:6px;margin:8px 0 4px}
+  .setItem{flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:3px;cursor:pointer;background:var(--panel);
+    border:1px solid var(--line);border-radius:10px;padding:8px 5px;color:var(--ink);text-align:center}
+  .setItem:active{background:var(--panel2)}
+  .setItem .setLabel{display:block;width:100%;font-size:10px;color:var(--muted);
+    line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .setItem .setVal{display:block;width:100%;font-size:14px;font-weight:700;color:var(--accent);
+    line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .setItem .setVal .chev{color:var(--muted);font-weight:400;font-size:11px;margin-left:1px}
+  .setItem .setDesc{display:none}
+  /* Foreground options menu, centered over a dim backdrop. */
+  .optScrim{position:fixed;inset:0;background:rgba(10,5,20,.72);display:none;z-index:70;
+    align-items:center;justify-content:center;padding:18px}
+  .optScrim.show{display:flex}
+  .optMenu{background:var(--bg);border:1px solid var(--line);border-radius:16px;width:100%;
+    max-width:340px;max-height:84vh;overflow:auto;padding:16px 16px 14px;box-shadow:0 18px 50px rgba(0,0,0,.5)}
+  .optMenu h4{margin:0 0 3px;font-size:15px}
+  .optMenu .optHint{font-size:11px;color:var(--muted);margin:0 0 12px;line-height:1.35}
+  .optMenu .optChoices{display:flex;flex-direction:column;gap:8px}
+  .optMenu .optChoices button{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    width:100%;text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:11px 13px;font-size:14px;color:var(--ink);cursor:pointer}
+  .optMenu .optChoices button:active{background:var(--panel2)}
+  .optMenu .optChoices button.on{border-color:var(--accent);background:var(--panel2);font-weight:700}
+  .optMenu .optChoices button.on::after{content:"\2713";color:var(--accent);font-weight:700}
+  /* Slider variant inside the options menu (card drag delay). */
+  .optMenu .optSlide{display:flex;flex-direction:column;gap:6px;margin:2px 0 2px}
+  .optMenu .optSlide .sVal{font-size:22px;font-weight:800;color:var(--accent);text-align:center}
+  .optMenu .optSlide input[type=range]{width:100%;accent-color:var(--accent)}
+  .optMenu .optSlide .sEnds{display:flex;justify-content:space-between;font-size:11px;color:var(--muted)}
+  .optMenu .optClose{margin-top:14px}
   .checklist .ci{display:flex;align-items:center;gap:8px;margin:6px 0}
   .checklist .ci input[type=text]{flex:1}
   .checklist .ci .box{width:26px;height:26px;border:1px solid var(--line);border-radius:6px;
@@ -375,9 +409,9 @@
 </div>
 
 <div class="scrim" id="scrim"><div class="sheet" id="sheet"></div></div>
+<div class="optScrim" id="optScrim"><div class="optMenu" id="optMenu"></div></div>
 <div id="toast"></div>
 <div id="lvlFlash"><b id="lvlFlashTxt"></b></div>
-<div class="scrim yScrim" id="yScrim"></div>
 <div class="deathOverlay" id="deathOverlay"><div class="card">
   <h2>You died!</h2>
   <p class="small">You ran out of Health. You lost a level and some gold, and your HP was restored. Be careful out there.</p>

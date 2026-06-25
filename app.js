@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.25-2010";
+const APP_VERSION = "v2026.06.25-2035";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -317,7 +317,7 @@ function logHistory(t, patch){
     t.history.push(Object.assign({date:now}, patch));
   }
 }
-function completeTask(t){
+function completeTask(t, ev){
   if(t.done) return;
   const r = completionReward(t);
   const delta = valueDelta(t.value);
@@ -335,7 +335,7 @@ function completeTask(t){
     logHistory(t,{value:t.value,completed:true,reward:Object.assign({},t._gr)});
     logEvent({kind:'complete', taskType:'todo', taskId:t.id, taskTitle:t.title,
               reward:Object.assign({},t._gr), createdAt:t.createdAt||null, completedAt:t.completedAt}); }
-  toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar(); buzz([12,40,18]);
+  bumpAvatar(); buzz([12,40,18]); floatFx(fxGain(r.xp,r.gold),'pos',ev);
   save(); render();
 }
 function reverseGrant(t){
@@ -372,7 +372,7 @@ function uncompleteTodo(t){
   toast('Reverted');
   save(); render();
 }
-function scoreHabit(id, dir){
+function scoreHabit(id, dir, ev){
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
   if(dir>0){
     const r=completionReward(t);
@@ -382,16 +382,51 @@ function scoreHabit(id, dir){
     const _rpt = t.repsPerTap || repsPerTap(t.title);
     logHistory(t,{value:t.value,scoredUp:1,reps:_rpt,repCounted:true,scored:true});
     logEvent({kind:'habitTap', dir:1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value});
-    toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar(); buzz([12,40,18]);
+    bumpAvatar(); buzz([12,40,18]); floatFx(fxGain(r.xp,r.gold),'pos',ev);
   } else {
     const dmg=missDamage(t);
     t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
     t.cDown=(t.cDown||0)+1;
     logHistory(t,{value:t.value,scoredDown:1});
     logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, value:t.value});
-    takeDamage(dmg); toast('-'+dmg.toFixed(1)+' HP');
+    takeDamage(dmg); buzz([28,30,28]); floatFx('-'+dmg.toFixed(1)+' HP','neg',ev);
   }
   save(); render();
+}
+// Adjust the habit counter from the editor sheet AND reflect it in the economy.
+// step: +1 increments the count, -1 decrements. sign: +1 = positive (XP/gold)
+// tally, -1 = negative (HP) tally. Decrementing a + reverses its reward;
+// incrementing re-grants it. Mirrors a real tap so corrections stay honest.
+function adjustCount(step, sign){
+  const t=EDIT; if(!t) return;
+  if(sign>0){
+    if(step>0){
+      const r=completionReward(t);
+      gainXp(r.xp); S.char.gold=+(S.char.gold+r.gold).toFixed(2); S.char.mp+=r.mp;
+      t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
+      t.cUp=(t.cUp||0)+1;
+    } else {
+      if(!(t.cUp>0)) { drawSheet(); return; }
+      const r=completionReward(t);
+      S.char.xp=Math.max(0,S.char.xp-r.xp);
+      S.char.gold=+Math.max(0,S.char.gold-r.gold).toFixed(2);
+      S.char.mp=Math.max(0,S.char.mp-r.mp);
+      t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
+      t.cUp=Math.max(0,(t.cUp||0)-1);
+    }
+  } else {
+    if(step>0){
+      takeDamage(missDamage(t));
+      t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
+      t.cDown=(t.cDown||0)+1;
+    } else {
+      if(!(t.cDown>0)) { drawSheet(); return; }
+      S.char.hp=+Math.min(S.char.maxHp,(S.char.hp+missDamage(t))).toFixed(2);
+      t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
+      t.cDown=Math.max(0,(t.cDown||0)-1);
+    }
+  }
+  renderStats(); drawSheet();
 }
 function periodBoundaryCrossed(freq, lastStamp, now){
   // lastStamp is YYYYMMDD of the previous cron; now is a Date (today)
@@ -523,6 +558,27 @@ function levelFlash(lvl){
   t.textContent='⭐ Level '+lvl+'!'; f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');
 }
 function buzz(p){ try{ if(navigator.vibrate && !(S.prefs&&S.prefs.haptics===false)) navigator.vibrate(p); }catch(_){ } }
+// Habitica-style floating gain/loss anchored to the tapped control.
+// kind: 'pos' (green) or 'neg' (red). ev: the click event (for x/y).
+function floatFx(parts, kind, ev){
+  try{
+    let x = window.innerWidth/2, y = window.innerHeight/2;
+    const src = ev && (ev.currentTarget || ev.target);
+    if(src && src.getBoundingClientRect){ const r=src.getBoundingClientRect(); x=r.left+r.width/2; y=r.top; }
+    else if(ev && ev.clientX){ x=ev.clientX; y=ev.clientY; }
+    const e=document.createElement('div');
+    e.className='floatFx '+(kind==='neg'?'neg':'pos');
+    e.style.left=x+'px'; e.style.top=(y-8)+'px';
+    e.innerHTML=parts;
+    document.body.appendChild(e);
+    setTimeout(()=>e.remove(),1150);
+  }catch(_){ }
+}
+// Build the inline parts for a positive gain (coin + amounts).
+function fxGain(xp,gold){
+  const coin='<svg class="fxCoin" viewBox="0 0 24 24" width="20" height="20"><circle cx="12" cy="12" r="10" fill="#ffbe5c" stroke="#c8862f" stroke-width="1.5"/><circle cx="12" cy="12" r="6.5" fill="none" stroke="#c8862f" stroke-width="1.2" opacity="0.7"/><text x="12" y="16" text-anchor="middle" font-size="9" font-weight="700" fill="#7a4d12" font-family="serif">$</text></svg>';
+  return '+'+xp+' XP '+coin+'+'+(+gold).toFixed(1);
+}
 function bumpAvatar(){ const a=document.getElementById('avatarFace');
   a.classList.add('bump'); setTimeout(()=>a.classList.remove('bump'),150); }
 function toast(msg){
@@ -549,6 +605,7 @@ function toggleSub(taskId, idx){
   const t=S.tasks.find(x=>x.id===taskId); if(!t||!t.checklist||!t.checklist[idx])return;
   const c=t.checklist[idx];
   c.done=!c.done;
+  if(c.done) buzz([12,40,18]);
   logEvent({kind:'subtask', taskId:t.id, taskTitle:t.title, taskType:t.type,
             subId:c.id||null, subText:c.text, done:c.done});
   save(); render();
@@ -620,16 +677,16 @@ function taskCard(t){
   const inner = t.done ? '<span class="ckmark">✓</span>' : '<span class="ckbox"></span>';
   return '<div class="task '+t.type+' '+(t.done?'done':'')+'" draggable="true" data-id="'+t.id+'" data-list="tasks">'+
     '<div class="valdot" style="background:'+ccol+'"></div>'+
-    '<div class="check" onclick="toggle(\''+t.id+'\')">'+inner+'</div>'+
+    '<div class="check" onclick="toggle(\''+t.id+'\',event)">'+inner+'</div>'+
     '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+rail(t)+'</div>';
 }
 function habitCard(t){
   const ccol=valColor(t.value)[1];
   const up = t.up!==false, down = t.down!==false;
   return '<div class="task habit" draggable="true" data-id="'+t.id+'" data-list="tasks"><div class="valdot" style="background:'+ccol+'"></div>'+
-    (up?'<div class="check hbtn up" onclick="scoreHabit(\''+t.id+'\',1)">+</div>':'<div class="check hbtn off">+</div>')+
+    (up?'<div class="check hbtn up" onclick="scoreHabit(\''+t.id+'\',1,event)">+</div>':'<div class="check hbtn off">+</div>')+
     '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+rail(t)+
-    (down?'<div class="check hbtn down" onclick="scoreHabit(\''+t.id+'\',-1)">−</div>':'<div class="check hbtn off">−</div>')+'</div>';
+    (down?'<div class="check hbtn down" onclick="scoreHabit(\''+t.id+'\',-1,event)">−</div>':'<div class="check hbtn off">−</div>')+'</div>';
 }
 function colTitle(title, addType){
   const tabKey = addType==='habit'?'habits':addType==='daily'?'dailies':'todos';
@@ -1785,11 +1842,11 @@ function bindTips(selector){
   });
 }
 function bindHeatTooltips(){ bindTips('.anHeatCell'); }
-function toggle(id){
+function toggle(id, ev){
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
-  if(t.type==='daily'){ t.done? uncompleteDaily(t) : completeTask(t); }
-  else if(t.type==='todo'){ t.done? uncompleteTodo(t) : completeTask(t); }
-  else { completeTask(t); }
+  if(t.type==='daily'){ t.done? uncompleteDaily(t) : completeTask(t, ev); }
+  else if(t.type==='todo'){ t.done? uncompleteTodo(t) : completeTask(t, ev); }
+  else { completeTask(t, ev); }
 }
 function openEdit(id,type){
   const t = id? S.tasks.find(x=>x.id===id)
@@ -1817,11 +1874,12 @@ function drawSheet(){
       '<div class="small" style="margin-top:6px">How often the + / − counts reset to zero.</div>';
     h+='<label>Adjust counter (this period)</label><div class="adjRow">'+
       '<div class="adj"><span>+ '+(t.cUp||0)+'</span>'+
-        '<button onclick="EDIT.cUp=Math.max(0,(EDIT.cUp||0)-1);drawSheet()">−</button>'+
-        '<button onclick="EDIT.cUp=(EDIT.cUp||0)+1;drawSheet()">+</button></div>'+
+        '<button onclick="adjustCount(-1,1)">−</button>'+
+        '<button onclick="adjustCount(1,1)">+</button></div>'+
       '<div class="adj"><span>− '+(t.cDown||0)+'</span>'+
-        '<button onclick="EDIT.cDown=Math.max(0,(EDIT.cDown||0)-1);drawSheet()">−</button>'+
-        '<button onclick="EDIT.cDown=(EDIT.cDown||0)+1;drawSheet()">+</button></div></div>';
+        '<button onclick="adjustCount(-1,-1)">−</button>'+
+        '<button onclick="adjustCount(1,-1)">+</button></div></div>'+
+      '<div class="small" style="margin-top:6px">Adjusting the + count also adds/removes its XP &amp; gold.</div>';
   }
   if(t.type==='daily'){
     h+='<label>Repeat on</label><div class="days" id="eDays">'+

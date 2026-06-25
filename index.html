@@ -238,6 +238,18 @@
     border-radius:20px;font-size:13px;font-weight:700;animation:pop 2.4s forwards}
   @keyframes pop{0%{opacity:0;transform:translateY(8px)}10%{opacity:1;transform:none}
     80%{opacity:1}100%{opacity:0;transform:translateY(-6px)}}
+  /* Habitica-style floating reward/penalty near the tapped control */
+  .floatFx{position:fixed;z-index:70;pointer-events:none;font-weight:800;
+    font-size:22px;line-height:1;text-shadow:0 1px 3px rgba(0,0,0,.55);
+    white-space:nowrap;transform:translate(-50%,0);will-change:transform,opacity;
+    animation:floatUp 1100ms cubic-bezier(.2,.7,.3,1) forwards}
+  .floatFx.pos{color:#3fcf5b}
+  .floatFx.neg{color:#ff5252}
+  .floatFx .fxCoin{vertical-align:-3px;margin:0 1px}
+  @keyframes floatUp{0%{opacity:0;transform:translate(-50%,4px) scale(.8)}
+    15%{opacity:1;transform:translate(-50%,-6px) scale(1.05)}
+    35%{transform:translate(-50%,-16px) scale(1)}
+    100%{opacity:0;transform:translate(-50%,-54px) scale(1)}}
   .empty{color:var(--muted);font-size:13px;text-align:center;padding:18px;font-style:italic}
   /* Yesterday's check-in (RYA) modal — blocking, shown before cron on a new day */
   .yScrim{z-index:60;align-items:center}

@@ -1996,7 +1996,7 @@ function openSettings(){
   h+='<div class="small">navigator.vibrate type: <b>'+esc(_bd.type)+'</b></div>';
   h+='<div class="small">Last buzz result: <b>'+(_bd.lastResult===null?'(never called)':''+_bd.lastResult)+'</b></div>';
   h+='<div class="small">Buzz call count: <b>'+_bd.count+'</b></div>';
-  h+='<div class="settingsRow"><button class="btn ghost" onclick="var _r=(typeof navigator.vibrate===\'function\'?navigator.vibrate(400):false);toast(\'Vibrate returned: \'+_r);openSettings()">Test Vibration (400ms)</button></div>';
+  h+='<div class="small" style="margin-top:2px;color:#888">If buzz() returns true but no vibration is felt: Android DND / Silent mode suppresses vibration silently. The API returns "accepted" even when blocked by the OS.</div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
   h+='<div class="resetRow"><button class="btn resetMini" onclick="if(confirm(\'Erase ALL progress on this device? This cannot be undone.\')){localStorage.removeItem(STORE_KEY);S=freshState();save();applyWidth();closeSheet();render();}">Reset everything</button></div>';
   sheet.innerHTML=h;

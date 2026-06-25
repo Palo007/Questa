@@ -205,6 +205,27 @@
   @keyframes pop{0%{opacity:0;transform:translateY(8px)}10%{opacity:1;transform:none}
     80%{opacity:1}100%{opacity:0;transform:translateY(-6px)}}
   .empty{color:var(--muted);font-size:13px;text-align:center;padding:18px;font-style:italic}
+  /* Yesterday's check-in (RYA) modal — blocking, shown before cron on a new day */
+  .yScrim{z-index:60;align-items:center}
+  .ySheet{background:var(--bg);width:100%;max-width:420px;margin:0 14px;border:1px solid var(--line);
+    border-radius:16px;padding:18px 18px 16px;max-height:88vh;overflow:auto}
+  .yHead{display:flex;align-items:center;gap:9px;margin-bottom:6px}
+  .yHead .yIcon{font-size:22px}
+  .yHead h3{margin:0;font-size:18px}
+  .ySub{margin:0 0 14px;font-size:13px;color:var(--muted);line-height:1.55}
+  .yList{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+  .yItem{display:flex;align-items:center;gap:11px;background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:11px 12px;cursor:pointer;transition:border-color .15s,background-color .15s}
+  .yItem.on{border-color:var(--green);background:var(--panel2)}
+  .yItem .yBox{width:24px;height:24px;flex:none;border:1.5px solid var(--muted);border-radius:7px;
+    display:flex;align-items:center;justify-content:center;font-size:15px;color:#1d0f38}
+  .yItem.on .yBox{background:var(--green);border-color:var(--green)}
+  .yBody{display:flex;flex-direction:column;gap:1px;min-width:0}
+  .yTitle{font-size:14px;color:var(--ink)}
+  .yNote{font-size:12px;color:var(--muted)}
+  .yItem.on .yNote{color:var(--green)}
+  .yGo{width:100%}
+  .yFine{margin:9px 0 0;text-align:center;font-size:11px;color:var(--muted)}
   #lvlFlash{position:fixed;inset:0;z-index:65;pointer-events:none;display:flex;
     align-items:center;justify-content:center;opacity:0}
   #lvlFlash.go{animation:lvlpop 1.3s ease-out}
@@ -273,6 +294,19 @@
   .anStreak .t{font-size:14px}
   .anStreak .s{font-size:14px;color:var(--gold);font-weight:700;white-space:nowrap}
   .anNote{font-size:11px;color:var(--muted);margin:6px 4px;line-height:1.4}
+  /* event-log detail (IndexedDB-driven) */
+  .anEvDays{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+  .anEvDay{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+  .anEvHead{font-size:13px;margin-bottom:2px}
+  .anEvSubs{font-size:12px;color:var(--ink);margin-top:4px;line-height:1.5}
+  .anEvSyn{font-size:10px;color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:1px 5px;margin-left:4px;white-space:nowrap}
+  .evPickRow{display:flex;align-items:center;gap:8px;margin:8px 0 4px}
+  .evPickLbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .evSelect{flex:1;background:#2a1947;border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:7px 8px;font-size:13px}
+  .evPager{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px}
+  .evPg{background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer}
+  .evPg:disabled{opacity:.4;cursor:default}
+  .evPgLbl{font-size:11px;color:var(--muted);white-space:nowrap}
   /* metric editor */
   .mEditor{padding:14px}
   .mEditTitle{font-size:15px;font-weight:700;margin-bottom:10px}
@@ -343,6 +377,7 @@
 <div class="scrim" id="scrim"><div class="sheet" id="sheet"></div></div>
 <div id="toast"></div>
 <div id="lvlFlash"><b id="lvlFlashTxt"></b></div>
+<div class="scrim yScrim" id="yScrim"></div>
 <div class="deathOverlay" id="deathOverlay"><div class="card">
   <h2>You died!</h2>
   <p class="small">You ran out of Health. You lost a level and some gold, and your HP was restored. Be careful out there.</p>

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.24-2156";
+const APP_VERSION = "v2026.06.25-1607";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 200.
@@ -23,7 +23,7 @@ function freshState(){
            lvl:1, xp:0, hp:50, maxHp:50, mp:0, gold:0 },
     tasks:[], rewards:[],
     lastCron: dayStamp(new Date()),
-    history:[], events:[], charHistory:[], prefs:{ width:480, notesLines:3, lastTab:'habits' }
+    history:[], charHistory:[], prefs:{ width:480, notesLines:3, lastTab:'habits' }
   };
 }
 let S = load();
@@ -35,18 +35,206 @@ function load(){
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
   out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0}, s.prefs||{});
+  // SPLIT: events live in IndexedDB, never in localStorage/S. Drop any events
+  // array carried in from a legacy save or an import file so it can't bloat the
+  // localStorage blob or be mistaken for a live source.
+  delete out.events;
   return out; }
 function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
-// --- append-only event log -------------------------------------------
+// --- append-only event log (IndexedDB-backed) ------------------------
 // Unlike history (one merged point/day), events are NEVER merged: each tap,
 // subtask toggle, completion and miss is its own timestamped record. This is
-// the fidelity layer for time-of-day / per-subtask analytics. Capped to avoid
-// unbounded localStorage growth (oldest dropped first).
-const EVENT_CAP = 50000;
+// the fidelity layer for time-of-day / per-subtask analytics.
+//
+// SPLIT ARCHITECTURE: the whole S object (tasks/char/prefs/per-day history/
+// charHistory) still lives in localStorage via save()/load(). ONLY this
+// append-only event log lives in IndexedDB, so it can grow far past the
+// ~5 MB localStorage quota and be queried by time window / task / kind
+// without loading the entire log into memory.
+//
+// One database ("questa"), one object store ("events"), keyed by an
+// auto-increment id, with indexes on ts, kind and taskId.
+const IDB_NAME = "questa";
+const IDB_VERSION = 1;
+const EVENTS_STORE = "events";
+// Prune policy (see HISTORY-TRACKING.md): drop events older than this many
+// months, with a generous hard-count backstop. localStorage's old 5 MB quota
+// no longer applies to events; IDB origin storage is typically hundreds of MB
+// to GB, so we keep a long, high-fidelity window and only prune to stay tidy.
+const EVENT_AGE_LIMIT_MS = 18 * 30 * 86400000; // ~18 months
+const EVENT_HARD_CAP = 200000;                 // backstop count, far above realistic use
+let _idbPromise = null;          // cached open() promise (fire-and-forget callers reuse it)
+let _idbPruned = false;          // prune runs at most once per session
+function idbOpen(){
+  if(_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((resolve,reject)=>{
+    if(typeof indexedDB === "undefined"){ reject(new Error("IndexedDB unavailable")); return; }
+    let req;
+    try{ req = indexedDB.open(IDB_NAME, IDB_VERSION); }
+    catch(e){ reject(e); return; }
+    req.onupgradeneeded = ()=>{
+      const db = req.result;
+      if(!db.objectStoreNames.contains(EVENTS_STORE)){
+        const os = db.createObjectStore(EVENTS_STORE, {keyPath:"id", autoIncrement:true});
+        os.createIndex("ts", "ts", {unique:false});
+        os.createIndex("kind", "kind", {unique:false});
+        os.createIndex("taskId", "taskId", {unique:false});
+      }
+    };
+    req.onsuccess = ()=>{ const db=req.result; resolve(db); schedulePrune(db); };
+    req.onerror = ()=>reject(req.error || new Error("IndexedDB open failed"));
+  });
+  return _idbPromise;
+}
+// Fire-and-forget event append. Callers (toggleSub, scoreHabit, completeTask,
+// runCron, creditYesterday) stay synchronous; all async + failure handling is
+// internal here, so a missing/blocked IDB never breaks task scoring.
 function logEvent(ev){
-  S.events = S.events || [];
-  S.events.push(Object.assign({ts:Date.now()}, ev));
-  if(S.events.length > EVENT_CAP) S.events.splice(0, S.events.length - EVENT_CAP);
+  const rec = Object.assign({ts:Date.now()}, ev);
+  idbOpen().then(db=>{
+    try{
+      const tx = db.transaction(EVENTS_STORE, "readwrite");
+      tx.objectStore(EVENTS_STORE).add(rec);
+    }catch(e){ /* swallow: fidelity layer is best-effort, never blocks scoring */ }
+  }).catch(()=>{ /* IDB unavailable (e.g. private mode) — silently skip logging */ });
+}
+// Async read API: resolve to events in [from,to] (ms, inclusive) optionally
+// filtered by kind and/or taskId. Uses the ts index range so we never load the
+// whole store for a windowed query. Returns [] on any failure (never throws).
+function getEvents(opts){
+  opts = opts || {};
+  const from = (opts.from!=null) ? opts.from : -Infinity;
+  const to   = (opts.to!=null)   ? opts.to   : Infinity;
+  const wantKind = opts.kind || null;
+  const wantTask = opts.taskId || null;
+  return idbOpen().then(db=>new Promise((resolve)=>{
+    const out=[];
+    let tx;
+    try{ tx = db.transaction(EVENTS_STORE, "readonly"); }
+    catch(e){ resolve([]); return; }
+    const store = tx.objectStore(EVENTS_STORE);
+    let range=null;
+    try{
+      if(from!==-Infinity && to!==Infinity) range = IDBKeyRange.bound(from,to);
+      else if(from!==-Infinity) range = IDBKeyRange.lowerBound(from);
+      else if(to!==Infinity) range = IDBKeyRange.upperBound(to);
+    }catch(e){ range=null; }
+    const cursorReq = store.index("ts").openCursor(range);
+    cursorReq.onsuccess = ()=>{
+      const cur = cursorReq.result;
+      if(!cur){ resolve(out); return; }
+      const v = cur.value;
+      if((!wantKind || v.kind===wantKind) && (!wantTask || v.taskId===wantTask)) out.push(v);
+      cur.continue();
+    };
+    cursorReq.onerror = ()=>resolve(out);
+  })).catch(()=>[]);
+}
+// Count of stored events (diagnostic / docs). Resolves 0 on failure.
+function countEvents(){
+  return idbOpen().then(db=>new Promise((resolve)=>{
+    try{
+      const req = db.transaction(EVENTS_STORE,"readonly").objectStore(EVENTS_STORE).count();
+      req.onsuccess=()=>resolve(req.result||0); req.onerror=()=>resolve(0);
+    }catch(e){ resolve(0); }
+  })).catch(()=>0);
+}
+// --- event backfill (synthesized from Habitica history) --------------
+// The importer emits a separate file of synthetic events (each flagged
+// synthetic:true). These let the event-driven dashboard show usable data right
+// after import, even though Habitica never recorded per-tap/per-subtask events.
+// Loading is idempotent: we first delete any previously-loaded SYNTHETIC events
+// (live events the user generated by tapping are kept), then bulk-add the file.
+function clearAllEvents(){
+  return idbOpen().then(db=>new Promise((resolve)=>{
+    let tx;
+    try{ tx = db.transaction(EVENTS_STORE,"readwrite"); }catch(e){ resolve(false); return; }
+    try{ tx.objectStore(EVENTS_STORE).clear(); }catch(e){}
+    tx.oncomplete=()=>resolve(true); tx.onerror=()=>resolve(false); tx.onabort=()=>resolve(false);
+  })).catch(()=>false);
+}
+function clearSyntheticEvents(){
+  return idbOpen().then(db=>new Promise((resolve)=>{
+    let removed=0, tx;
+    try{ tx = db.transaction(EVENTS_STORE,"readwrite"); }catch(e){ resolve(0); return; }
+    const cur = tx.objectStore(EVENTS_STORE).openCursor();
+    cur.onsuccess = ()=>{ const c=cur.result;
+      if(!c){ return; }
+      if(c.value && c.value.synthetic){ try{c.delete();}catch(e){} removed++; }
+      c.continue();
+    };
+    tx.oncomplete = ()=>resolve(removed);
+    tx.onerror = ()=>resolve(removed);
+    tx.onabort = ()=>resolve(removed);
+  })).catch(()=>0);
+}
+function bulkAddEvents(list){
+  return idbOpen().then(db=>new Promise((resolve)=>{
+    let added=0, tx;
+    try{ tx = db.transaction(EVENTS_STORE,"readwrite"); }catch(e){ resolve(0); return; }
+    const store = tx.objectStore(EVENTS_STORE);
+    list.forEach(ev=>{
+      if(!ev || typeof ev!=="object") return;
+      // ensure ts/kind exist; drop any incoming id so autoIncrement assigns fresh
+      const rec = Object.assign({}, ev); delete rec.id;
+      if(typeof rec.ts!=="number") rec.ts = Date.now();
+      try{ store.add(rec); added++; }catch(e){}
+    });
+    tx.oncomplete = ()=>resolve(added);
+    tx.onerror = ()=>resolve(added);
+    tx.onabort = ()=>resolve(added);
+  })).catch(()=>0);
+}
+// Settings -> "Load event backfill": read the JSON the importer produced and
+// load its events into IndexedDB (replacing prior synthetic events).
+function importEventsBackfill(ev){
+  const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{
+    let blob;
+    try{ blob=JSON.parse(rd.result); }catch(e){ alert('That file is not valid JSON.'); return; }
+    const list = Array.isArray(blob) ? blob : (blob && Array.isArray(blob.events) ? blob.events : null);
+    if(!list){ alert('That file does not look like a Questa event backfill (no events array).'); return; }
+    if(typeof indexedDB==="undefined"){ alert('IndexedDB is unavailable here (e.g. private browsing), so events cannot be loaded.'); return; }
+    if(!confirm('Load '+list.length+' synthesized events? This replaces any previously loaded backfill (your live taps are kept).')) return;
+    // mark everything from this load as synthetic so a re-load can replace it
+    list.forEach(e=>{ if(e && typeof e==="object" && e.synthetic===undefined) e.synthetic=true; });
+    clearSyntheticEvents().then(()=>bulkAddEvents(list)).then(added=>{
+      toast('Loaded '+added+' events');
+      if(TAB==='analytics') render();
+    });
+  };
+  rd.readAsText(f);
+}
+// Prune once per session: delete events older than EVENT_AGE_LIMIT_MS via a
+// ts-index cursor, then enforce the hard-count backstop (oldest first). All
+// best-effort; failures are swallowed.
+function schedulePrune(db){
+  if(_idbPruned) return; _idbPruned = true;
+  setTimeout(()=>{ try{ pruneEvents(db); }catch(e){} }, 0);
+}
+function pruneEvents(db){
+  const cutoff = Date.now() - EVENT_AGE_LIMIT_MS;
+  let tx;
+  try{ tx = db.transaction(EVENTS_STORE,"readwrite"); }catch(e){ return; }
+  const store = tx.objectStore(EVENTS_STORE);
+  // 1) age-based delete: everything with ts < cutoff
+  try{
+    const ageReq = store.index("ts").openCursor(IDBKeyRange.upperBound(cutoff, true));
+    ageReq.onsuccess = ()=>{ const c=ageReq.result; if(c){ try{c.delete();}catch(e){} c.continue(); } };
+  }catch(e){}
+  // 2) hard-count backstop: if still over cap, drop oldest by ts until under
+  try{
+    const cReq = store.count();
+    cReq.onsuccess = ()=>{
+      const over = (cReq.result||0) - EVENT_HARD_CAP;
+      if(over <= 0) return;
+      let removed=0;
+      const tx2 = db.transaction(EVENTS_STORE,"readwrite");
+      const cur2 = tx2.objectStore(EVENTS_STORE).index("ts").openCursor();
+      cur2.onsuccess = ()=>{ const c=cur2.result; if(c && removed<over){ try{c.delete();}catch(e){} removed++; c.continue(); } };
+    };
+  }catch(e){}
 }
 // Once-per-day snapshot of the character vitals, for progression charts.
 function logCharSnapshot(){
@@ -211,6 +399,90 @@ function periodBoundaryCrossed(freq, lastStamp, now){
     return now.getFullYear()*12+now.getMonth() > last.getFullYear()*12+last.getMonth();
   }
   return true; // daily (or unknown) -> reset every cron
+}
+// ── Yesterday's check-in (RYA) ─────────────────────────────────────────────
+// Dailies that were due yesterday and are still unticked. Computed with the
+// same scheduledYesterday test runCron() uses, so the two stay in sync.
+function missedYesterdayDailies(){
+  if(S.lastCron === dayStamp(new Date())) return []; // already crossed today
+  const dow = new Date().getDay();
+  return S.tasks.filter(t=>{
+    if(t.type!=='daily') return false;
+    const scheduledYesterday = !t.repeat || t.repeat[(dow+6)%7];
+    return scheduledYesterday && !t.done;
+  });
+}
+// Credit a daily the user forgot to tick yesterday. Mirrors completeTask()'s
+// reward/streak/history logic, but stamps the history point to YESTERDAY and
+// stays silent (no per-task toast, no render) for batch use by the modal.
+function creditYesterday(t){
+  if(t.done) return;
+  const r = completionReward(t);
+  const delta = valueDelta(t.value);
+  gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
+  t.value = clamp(t.value + delta, -47.27, 99);
+  t.done = true;
+  t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };
+  t.streak = (t.streak||0) + 1;
+  const cl=(t.checklist||[]);
+  const yMs = Date.now() - 86400000; // backdate the point to yesterday
+  t.history = t.history || [];
+  const snap = cl.length ? {checklist:cl.map(c=>({text:c.text,done:true}))} : {};
+  t.history.push(Object.assign({date:yMs,value:t.value,completed:true,isDue:true,
+    reward:Object.assign({},t._gr),repeat:(t.repeat||[]).slice()},snap));
+  logEvent({kind:'complete', taskType:'daily', taskId:t.id, taskTitle:t.title,
+            streak:t.streak, reward:Object.assign({},t._gr), repeat:(t.repeat||[]).slice(),
+            late:true, checklist:cl.map(c=>({id:c.id||null,text:c.text,done:true}))});
+}
+// Render the blocking check-in modal listing yesterday's unfinished dailies.
+let _yesterMissed = [];
+let _yesterTick = {}; // id -> bool
+function openYesterCheck(missed){
+  _yesterMissed = missed;
+  _yesterTick = {};
+  drawYesterCheck();
+  document.getElementById('yScrim').classList.add('show');
+}
+function toggleYesterTick(id){
+  _yesterTick[id] = !_yesterTick[id];
+  drawYesterCheck();
+}
+function drawYesterCheck(){
+  const n=_yesterMissed.length;
+  let h='<div class="ySheet">';
+  h+='<div class="yHead"><span class="yIcon">🌅</span><h3>New day — quick check</h3></div>';
+  h+='<p class="ySub">You had '+n+' '+(n===1?'daily':'dailies')+' due yesterday that '+(n===1?"isn't":"aren't")+
+     ' ticked. Tick anything you actually did to keep your 🔥 streak and avoid the HP hit.</p>';
+  h+='<div class="yList">';
+  _yesterMissed.forEach(t=>{
+    const on=!!_yesterTick[t.id];
+    h+='<div class="yItem'+(on?' on':'')+'" onclick="toggleYesterTick(\''+t.id+'\')">'+
+         '<span class="yBox">'+(on?'✓':'')+'</span>'+
+         '<span class="yBody"><span class="yTitle">'+esc(t.title)+'</span>'+
+           '<span class="yNote">'+(on?'Will restore streak · +XP':'Leave unticked → counts as missed')+'</span>'+
+         '</span></div>';
+  });
+  h+='</div>';
+  h+='<button class="btn primary yGo" onclick="commitYesterCheck()">Start my day</button>';
+  h+='<p class="yFine">Anything left unticked applies its miss damage now.</p>';
+  h+='</div>';
+  document.getElementById('yScrim').innerHTML=h;
+}
+function commitYesterCheck(){
+  _yesterMissed.forEach(t=>{ if(_yesterTick[t.id]) creditYesterday(t); });
+  const credited=_yesterMissed.filter(t=>_yesterTick[t.id]).length;
+  document.getElementById('yScrim').classList.remove('show');
+  document.getElementById('yScrim').innerHTML='';
+  _yesterMissed=[]; _yesterTick={};
+  runCron();            // finalize the day; corrected dailies are now done, so cron skips them
+  render();
+  if(credited>0) toast('Credited '+credited+' daily'+(credited===1?'':'s')+' from yesterday');
+}
+// Startup gate: prompt if anything was missed yesterday, else run cron directly.
+function startDay(){
+  const missed=missedYesterdayDailies();
+  if(missed.length){ openYesterCheck(missed); }
+  else { runCron(); render(); }
 }
 function runCron(){
   const today = dayStamp(new Date());
@@ -1027,13 +1299,123 @@ function refreshAnalytics(){
   if(st.length) h+=st.slice(0,12).map(s=>'<div class="anStreak"><span class="t">'+esc(s.title)+'</span><span class="s">&#128293; '+s.streak+'</span></div>').join('');
   else h+='<div class="anNote">No dailies yet.</div>';
   h+='<div class="anNote">History reflects dated value/tap snapshots from Habitica (engagement events), not a per-calendar-day completion grid. Counts shown are from logged + taps and completion flags.</div>';
+  // --- event-driven detail (IndexedDB) -------------------------------
+  // Renders asynchronously: shows a loading state first, then fills once the
+  // IDB read resolves. Powered by the append-only event log, which captures
+  // detail history arrays cannot: per-subtask completion (name + time of day),
+  // individual habit-tap times, per-completion reward, miss-time partial state.
+  h+='<div class="anSection">&#128203; Event log detail (live)</div>';
+  h+='<div id="anEventDetail" class="anCard full"><div class="k">From IndexedDB event log</div>'+
+     '<div class="anNote">Loading events&hellip;</div></div>';
   body.innerHTML=h;
   bindHeatTooltips();
   bindTips('.spkPt'); bindTips('.spkHit'); bindTips('.barHit');
+  renderEventDetail(from,to);   // async; fills #anEventDetail when ready
+}
+// Async, event-driven dashboard section. Proves the IDB read API end to end on
+// the data of interest: the "Kliky - aspoň 50" daily. Shows per-day completion
+// and, where subtask events exist, which subtasks were checked and at what time
+// of day. Falls back gracefully when there are no events yet (fresh install) or
+// IDB is unavailable. Existing history-based charts above are untouched.
+function findKlikyTask(){
+  return (S.tasks||[]).find(t=>/kliky/i.test(t.title||''))
+      || (S.tasks||[]).find(t=>/klik/i.test(t.title||'')) || null;
+}
+function timeOfDay(ts){ const d=new Date(ts); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
+function taskTitleById(id){ const t=(S.tasks||[]).find(x=>x.id===id); return t?t.title:'(deleted task)'; }
+// Event-detail view state (survives the async re-render).
+let _evTaskId=null;     // currently selected task id (null = auto-pick)
+let _evPage=0;          // current page of days
+let _evWin=null;        // [from,to] of the last render (to detect window change)
+const EV_PAGE_SIZE=14;  // days per page
+function evPickTask(id){ _evTaskId=id||null; _evPage=0; if(_evWin) renderEventDetail(_evWin[0],_evWin[1]); }
+function evGoPage(n){ _evPage=Math.max(0,n); if(_evWin) renderEventDetail(_evWin[0],_evWin[1]); }
+// Async, event-driven dashboard section. Lets you pick ANY task that has events
+// in the current window (defaults to Kliky), respects the date-window slider,
+// and pages the per-day breakdown. Shows per-day completion and, where subtask
+// events exist, which subtasks were checked and at what time of day. Degrades
+// gracefully on a fresh install (no events) or when IDB is unavailable. The
+// existing history-based charts above are untouched.
+function renderEventDetail(from,to){
+  const box=document.getElementById('anEventDetail'); if(!box) return;
+  _evWin=[from,to];
+  getEvents({from:from, to:to}).then(all=>{
+    const cur=document.getElementById('anEventDetail'); if(!cur) return; // tab changed
+    if(!all.length){
+      cur.innerHTML='<div class="k">From IndexedDB event log</div>'+
+        '<div class="anNote">No events recorded in this window yet. Tap a habit, check a subtask, or complete a daily and it will appear here '+
+        '(the event log starts empty by design and fills as you use the app). If you imported a backup or loaded the backfill, widen the date window above.</div>';
+      return;
+    }
+    const counts={};
+    all.forEach(e=>{ if(e.taskId) counts[e.taskId]=(counts[e.taskId]||0)+1; });
+    const taskIds=Object.keys(counts).sort((a,b)=>counts[b]-counts[a]);
+    let sel=_evTaskId;
+    if(!sel || taskIds.indexOf(sel)<0){
+      const kl=findKlikyTask(); sel=(kl && counts[kl.id])? kl.id : taskIds[0];
+      _evTaskId=sel;
+    }
+    let h='<div class="k">Event log detail</div>';
+    h+='<div class="evPickRow"><label class="evPickLbl">Task</label>'+
+       '<select class="evSelect" onchange="evPickTask(this.value)">'+
+       taskIds.map(id=>'<option value="'+esc(id)+'"'+(id===sel?' selected':'')+'>'+esc(taskTitleById(id))+' ('+counts[id]+')</option>').join('')+
+       '</select></div>';
+    const evs=all.filter(e=>e.taskId===sel);
+    const completes=evs.filter(e=>e.kind==='complete');
+    const misses=evs.filter(e=>e.kind==='miss');
+    const subs=evs.filter(e=>e.kind==='subtask');
+    const taps=evs.filter(e=>e.kind==='habitTap');
+    const synCount=evs.filter(e=>e.synthetic).length;
+    h+='<div class="anNote">'+evs.length+' event(s) &middot; '+completes.length+' completion(s), '+misses.length+' miss(es), '+subs.length+' subtask tap(s)'+
+       (taps.length?(' , '+taps.length+' habit tap(s)'):'')+'.'+
+       (synCount? ' <b>'+synCount+'</b> backfilled (synthetic) &mdash; real days, reconstructed times.' : '')+'</div>';
+    function dayKey(ts){ const d=new Date(ts); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+    const byDay={};
+    function dd(k){ return byDay[k]=byDay[k]||{completed:false,missed:false,subs:[],taps:0,synthetic:false,inferred:false}; }
+    completes.forEach(e=>{ const d=dd(dayKey(e.ts)); d.completed=true; d.reward=e.reward; if(e.synthetic)d.synthetic=true; if(e.inferred)d.inferred=true; });
+    misses.forEach(e=>{ const d=dd(dayKey(e.ts)); d.missed=true; if(e.synthetic)d.synthetic=true; });
+    subs.forEach(e=>{ const d=dd(dayKey(e.ts)); d.subs.push({text:e.subText,done:e.done,ts:e.ts}); if(e.synthetic)d.synthetic=true; });
+    taps.forEach(e=>{ const d=dd(dayKey(e.ts)); d.taps++; if(e.synthetic)d.synthetic=true; });
+    const days=Object.keys(byDay).sort().reverse();
+    const pages=Math.max(1,Math.ceil(days.length/EV_PAGE_SIZE));
+    if(_evPage>=pages) _evPage=pages-1;
+    const startI=_evPage*EV_PAGE_SIZE;
+    const pageDays=days.slice(startI,startI+EV_PAGE_SIZE);
+    h+='<div class="anEvDays">';
+    pageDays.forEach(k=>{
+      const d=byDay[k];
+      const status = d.completed ? '<span style="color:var(--green)">&#10003; done</span>'
+                   : d.missed   ? '<span style="color:var(--red)">&#10007; missed</span>'
+                   : '<span style="color:var(--muted)">&mdash;</span>';
+      const rew = (d.reward && d.reward.xp) ? ' &middot; +'+d.reward.xp+' XP' : '';
+      const tp = d.taps ? ' &middot; '+d.taps+' tap'+(d.taps>1?'s':'') : '';
+      const mark = d.synthetic ? ' <span class="anEvSyn" title="Backfilled from Habitica: real day, reconstructed time">~ backfill'+(d.inferred?' &middot; inferred':'')+'</span>' : '';
+      h+='<div class="anEvDay"><div class="anEvHead"><b>'+esc(k)+'</b> '+status+rew+tp+mark+'</div>';
+      if(d.subs.length){
+        const checked=d.subs.filter(s=>s.done), unchecked=d.subs.filter(s=>!s.done);
+        if(checked.length) h+='<div class="anEvSubs">'+checked.map(s=>'&#9745; '+esc(s.text)+' <span style="color:var(--muted)">@ '+timeOfDay(s.ts)+'</span>').join('<br>')+'</div>';
+        if(unchecked.length) h+='<div class="anEvSubs" style="color:var(--muted)">'+unchecked.map(s=>'&#9744; '+esc(s.text)+' (unchecked @ '+timeOfDay(s.ts)+')').join('<br>')+'</div>';
+      }
+      h+='</div>';
+    });
+    h+='</div>';
+    if(pages>1){
+      h+='<div class="evPager">'+
+         '<button class="evPg" '+(_evPage<=0?'disabled':'')+' onclick="evGoPage('+(_evPage-1)+')">&#8592; Newer</button>'+
+         '<span class="evPgLbl">Page '+(_evPage+1)+' / '+pages+' &middot; '+days.length+' days</span>'+
+         '<button class="evPg" '+(_evPage>=pages-1?'disabled':'')+' onclick="evGoPage('+(_evPage+1)+')">Older &#8594;</button>'+
+         '</div>';
+    }
+    cur.innerHTML=h;
+  }).catch(()=>{
+    const cur=document.getElementById('anEventDetail'); if(!cur) return;
+    cur.innerHTML='<div class="k">From IndexedDB event log</div>'+
+      '<div class="anNote">Event log unavailable (IndexedDB may be disabled, e.g. private browsing). History-based charts above are unaffected.</div>';
+  });
 }
 function anHeatmapHTML(from,to,inten,maxI){
   const start=new Date(Math.floor(from/DAY)*DAY); start.setHours(0,0,0,0);
-  start.setDate(start.getDate()-start.getDay());
+  start.setDate(start.getDate()-((start.getDay()+6)%7)); // week starts Monday: top cell = Mon, bottom = Sun
   const end=new Date(Math.floor(to/DAY)*DAY); end.setHours(0,0,0,0);
   let cols='', col='', dow=0;
   for(let t=start.getTime(); t<=end.getTime(); t+=DAY){
@@ -1488,11 +1870,11 @@ function openSettings(){
      '<input type="text" id="setFace" value="'+esc(S.char.face)+'" maxlength="2" placeholder="emoji">'+
      '<button class="btn ghost" type="button" onclick="document.getElementById(\'faceFile\').click()">Browse image\u2026</button>'+
      '</div>';
-  h+='<input type="file" id="faceFile" accept="image/jpeg,image/gif,.jpg,.jpeg,.gif" style="display:none" onchange="uploadFace(event)">';
+  h+='<input type="file" id="faceFile" accept="image/jpeg,image/png,image/gif,.jpg,.jpeg,.png,.gif" style="display:none" onchange="uploadFace(event)">';
   if(S.char.faceImg){ h+='<div class="small" style="margin-top:6px;display:flex;align-items:center;gap:8px">'+
      '<img src="'+S.char.faceImg+'" alt="" style="width:32px;height:32px;border-radius:8px;object-fit:cover;border:1px solid var(--line)">'+
      'Custom image in use. <a href="#" onclick="removeFace();return false">Remove</a> to use the emoji instead.</div>'; }
-  else { h+='<div class="small" style="margin-top:6px">Type an emoji, or upload a JPEG/GIF (max 1\u00a0MB) to use as your avatar. An uploaded image takes priority over the emoji.</div>'; }
+  else { h+='<div class="small" style="margin-top:6px">Type an emoji, or upload a PNG, JPEG or GIF (max 1\u00a0MB) to use as your avatar. An uploaded image takes priority over the emoji.</div>'; }
   h+='<div class="settingsRow"><button class="btn primary" onclick="saveSettings()">Save</button><button class="btn ghost" onclick="closeSheet()">Close</button></div>';
   h+='<label>Interface width (on PC / wide screens)</label><div class="seg" id="setWidth">'+
     [['Slim',430],['Medium',560],['Wide',720],['Full',3000]].map(o=>'<button class="'+((S.prefs.width||480)===o[1]?'on':'')+'" onclick="setWidth('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
@@ -1510,10 +1892,13 @@ function openSettings(){
   h+='<input type="number" id="setDragDelay" min="0" max="2000" step="50" value="'+dd+'">';
   h+='<div class="small" style="margin-top:6px">How long to hold a card still before it lifts for reordering on touch (default '+DRAG_DELAY_DEFAULT+'). Lower = quicker pickup; higher values can make the card freeze while the page scrolls on some phones. Saved with Save above.</div>';
   h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
-  h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue.</div>';
+  h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
+  h+='<div class="small" style="margin-top:10px">Event backfill: load synthesized events (from the importer) into the live event log so the Analytics &ldquo;Event log detail&rdquo; view has data immediately. Days are real; times-of-day are plausible reconstructions.</div>';
+  h+='<div class="settingsRow"><button class="btn ghost" onclick="document.getElementById(\'eventsFile\').click()">Load event backfill</button></div>';
+  h+='<input type="file" id="eventsFile" accept="application/json,.json" style="display:none" onchange="importEventsBackfill(event)">';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
   h+='<div class="resetRow"><button class="btn resetMini" onclick="if(confirm(\'Erase ALL progress on this device? This cannot be undone.\')){localStorage.removeItem(STORE_KEY);S=freshState();save();applyWidth();closeSheet();render();}">Reset everything</button></div>';
@@ -1530,25 +1915,53 @@ function saveSettings(){
   if(ddEl){ let n=parseInt(ddEl.value,10); if(!isFinite(n)||n<0) n=DRAG_DELAY_DEFAULT; n=Math.min(2000,n); S.prefs.dragDelay=n; }
   save(); render(); closeSheet(); toast('Saved');
 }
+// Complete single-file backup: the localStorage S object PLUS the IndexedDB
+// event log, embedded under an `events` key. Async because reading IDB is async;
+// localStorage stays lean (events are only added to the export blob, never back
+// into S — migrate() strips `events` on import). Falls back to S-only if IDB is
+// unavailable so export never fails outright.
 function exportData(){
-  const blob=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});
-  const url=URL.createObjectURL(blob); const a=document.createElement('a');
-  const d=new Date(); const stamp=''+d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0');
-  a.href=url; a.download='questa-backup-'+stamp+'.json'; a.click();
-  setTimeout(()=>URL.revokeObjectURL(url),1000);
+  const finish=(eventsArr)=>{
+    // Build the backup from S without mutating S; attach events for portability.
+    const backup=Object.assign({}, S, {events: eventsArr||[]});
+    backup._backup={ exportedAt:new Date().toISOString(), appVersion:APP_VERSION,
+                     eventCount:(eventsArr||[]).length };
+    const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
+    const url=URL.createObjectURL(blob); const a=document.createElement('a');
+    const d=new Date(); const stamp=''+d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0');
+    a.href=url; a.download='questa-backup-'+stamp+'.json'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+    toast('Exported'+((eventsArr&&eventsArr.length)?(' ('+eventsArr.length+' events)'):''));
+  };
+  getEvents({}).then(finish).catch(()=>finish([]));
 }
 function importData(ev){
   const f=ev.target.files[0]; if(!f)return;
   const rd=new FileReader();
   rd.onload=()=>{ try{ const data=JSON.parse(rd.result);
       if(!data.char||!Array.isArray(data.tasks)) throw 0;
-      if(confirm('Replace current progress with the imported file?')){ S=migrate(data); save(); applyWidth(); closeSheet(); render(); toast('Imported'); }
+      // Capture any embedded event log BEFORE migrate() (which strips `events`
+      // from S so it never re-enters localStorage). A full backup is a full
+      // restore: replace the IDB event log entirely (clear then bulk-add) so a
+      // re-import never duplicates. Done async; localStorage restore stays sync.
+      const embeddedEvents = Array.isArray(data.events) ? data.events : null;
+      if(confirm('Replace current progress with the imported file?')){
+        S=migrate(data); save(); applyWidth(); closeSheet(); render();
+        if(embeddedEvents && typeof indexedDB!=="undefined"){
+          clearAllEvents().then(()=>bulkAddEvents(embeddedEvents)).then(n=>{
+            toast('Imported · '+n+' events restored');
+            if(TAB==='analytics') render();
+          });
+        } else {
+          toast('Imported');
+        }
+      }
     }catch(e){ alert('That file does not look like a valid Questa backup.'); } };
   rd.readAsText(f); ev.target.value='';
 }
 function uploadFace(ev){
   const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
-  if(!/^image\/(jpeg|gif)$/.test(f.type)){ alert('Please choose a JPEG or GIF image.'); return; }
+  if(!/^image\/(jpeg|png|gif)$/.test(f.type)){ alert('Please choose a PNG, JPEG or GIF image.'); return; }
   if(f.size>1048576){ alert('That image is '+(f.size/1048576).toFixed(1)+' MB. Please use one under 1 MB.'); return; }
   const rd=new FileReader();
   rd.onload=()=>{ S.char.faceImg=rd.result; save(); renderStats(); openSettings(); toast('Avatar image set'); };
@@ -1626,6 +2039,5 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
 
 document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };
 applyWidth();
-runCron();
-render();
+startDay();
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }

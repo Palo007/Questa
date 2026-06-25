@@ -1,15 +1,15 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.25-1607";
+const APP_VERSION = "v2026.06.25-1652";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
-// pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 200.
+// pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
 // KEEP IT SMALL. Research + this project's own history show Chrome Android commits the
 // touch stream to a SCROLL during a long stationary hold, BEFORE the timer fires; once
 // committed, touchmove is non-cancelable and the card freezes lifted while the page
 // scrolls. A short window (~200) beats that commit; raising it (e.g. 1000) makes the
 // freeze MORE likely, not less. The setting exists so it can be tuned on a real device.
-const DRAG_DELAY_DEFAULT = 200;
+const DRAG_DELAY_DEFAULT = 100;
 function longPressMs(){
   const v = (S.prefs && S.prefs.dragDelay);
   const n = (v==null ? DRAG_DELAY_DEFAULT : +v);
@@ -35,6 +35,11 @@ function load(){
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
   out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0}, s.prefs||{});
+  // Tooltip delay is fixed at Instant; the control was removed, so normalize any saved value.
+  out.prefs.tipDelay=0;
+  // Card drag delay now lives on a 100-300 ms slider; clamp legacy values into range.
+  if(out.prefs.dragDelay!=null){ let d=parseInt(out.prefs.dragDelay,10);
+    out.prefs.dragDelay=isFinite(d)?Math.min(300,Math.max(100,d)):DRAG_DELAY_DEFAULT; }
   // SPLIT: events live in IndexedDB, never in localStorage/S. Drop any events
   // array carried in from a legacy save or an import file so it can't bloat the
   // localStorage blob or be mistaken for a live source.
@@ -185,8 +190,10 @@ function bulkAddEvents(list){
     tx.onabort = ()=>resolve(added);
   })).catch(()=>0);
 }
-// Settings -> "Load event backfill": read the JSON the importer produced and
-// load its events into IndexedDB (replacing prior synthetic events).
+// (Retained, no longer wired to a Settings button.) Loads a standalone events
+// JSON into IndexedDB, replacing prior synthetic events. The importer now embeds
+// events directly in the import file, so normal Settings -> Import handles them;
+// this remains available for loading a separate events file if ever needed.
 function importEventsBackfill(ev){
   const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
   const rd=new FileReader();
@@ -1876,43 +1883,85 @@ function openSettings(){
      'Custom image in use. <a href="#" onclick="removeFace();return false">Remove</a> to use the emoji instead.</div>'; }
   else { h+='<div class="small" style="margin-top:6px">Type an emoji, or upload a PNG, JPEG or GIF (max 1\u00a0MB) to use as your avatar. An uploaded image takes priority over the emoji.</div>'; }
   h+='<div class="settingsRow"><button class="btn primary" onclick="saveSettings()">Save</button><button class="btn ghost" onclick="closeSheet()">Close</button></div>';
-  h+='<label>Interface width (on PC / wide screens)</label><div class="seg" id="setWidth">'+
-    [['Slim',430],['Medium',560],['Wide',720],['Full',3000]].map(o=>'<button class="'+((S.prefs.width||480)===o[1]?'on':'')+'" onclick="setWidth('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
-  h+='<div class="small" style="margin-top:6px">On a phone it always fills the screen. This caps the width on a monitor and keeps it centered.</div>';
+  // Display preferences as tappable rows; each opens a foreground options menu (openOpt).
+  const widthLabels={430:'Slim',560:'Medium',720:'Wide',3000:'Full'};
+  const wv=(S.prefs.width||480);
   const nl=(S.prefs.notesLines==null?3:S.prefs.notesLines);
-  h+='<label>Note lines shown on cards</label><div class="seg" id="setNotes">'+
-    [['Off',0],['1',1],['2',2],['3',3],['5',5]].map(o=>'<button class="'+(nl===o[1]?'on':'')+'" onclick="setNotesLines('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
-  h+='<div class="small" style="margin-top:6px">How many lines of a task\'s notes preview on the list (default 3, like Habitica).</div>';
-  const td=(S.prefs.tipDelay==null?0:S.prefs.tipDelay);
-  h+='<label>Hover tooltip delay</label><div class="seg" id="setTipDelay">'+
-    [['Instant',0],['0.5s',0.5],['1s',1],['2s',2]].map(o=>'<button class="'+(td===o[1]?'on':'')+'" onclick="setTipDelay('+o[1]+')">'+o[0]+'</button>').join('')+'</div>';
-  h+='<div class="small" style="margin-top:6px">Delay before the date/value tooltip shows on the analytics heatmap and charts (default Instant).</div>';
-  const dd=(S.prefs.dragDelay==null?DRAG_DELAY_DEFAULT:S.prefs.dragDelay);
-  h+='<label>Card drag long-press delay (ms)</label>';
-  h+='<input type="number" id="setDragDelay" min="0" max="2000" step="50" value="'+dd+'">';
-  h+='<div class="small" style="margin-top:6px">How long to hold a card still before it lifts for reordering on touch (default '+DRAG_DELAY_DEFAULT+'). Lower = quicker pickup; higher values can make the card freeze while the page scrolls on some phones. Saved with Save above.</div>';
+  const ddv=(S.prefs.dragDelay==null?DRAG_DELAY_DEFAULT:S.prefs.dragDelay);
+  h+='<div class="setList">';
+  h+=settingRow('width','Width','Caps the width on a monitor and keeps it centered.',(widthLabels[wv]||'Custom'));
+  h+=settingRow('notes','Note lines','Lines of a task\'s notes shown in the list preview.',(nl===0?'Off':(''+nl)));
+  h+=settingRow('drag','Drag delay','Hold time before a card lifts for reordering on touch.',(ddv+' ms'));
+  h+='</div>';
   h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
-  h+='<div class="small" style="margin-top:10px">Event backfill: load synthesized events (from the importer) into the live event log so the Analytics &ldquo;Event log detail&rdquo; view has data immediately. Days are real; times-of-day are plausible reconstructions.</div>';
-  h+='<div class="settingsRow"><button class="btn ghost" onclick="document.getElementById(\'eventsFile\').click()">Load event backfill</button></div>';
-  h+='<input type="file" id="eventsFile" accept="application/json,.json" style="display:none" onchange="importEventsBackfill(event)">';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
   h+='<div class="resetRow"><button class="btn resetMini" onclick="if(confirm(\'Erase ALL progress on this device? This cannot be undone.\')){localStorage.removeItem(STORE_KEY);S=freshState();save();applyWidth();closeSheet();render();}">Reset everything</button></div>';
   sheet.innerHTML=h;
   document.getElementById('scrim').classList.add('show');
 }
-function setWidth(px){ S.prefs.width=px; applyWidth(); save(); openSettings(); }
-function setNotesLines(n){ S.prefs.notesLines=n; save(); openSettings(); }
-function setTipDelay(s){ S.prefs.tipDelay=s; save(); openSettings(); }
+// Tooltip delay is fixed at Instant (0); the user-facing control was removed.
+function setWidth(px){ S.prefs.width=px; applyWidth(); save(); closeOpt(); openSettings(); }
+function setNotesLines(n){ S.prefs.notesLines=n; save(); closeOpt(); openSettings(); }
+// --- Settings rows + foreground options menu -------------------------------
+// Build one tappable row: a label + short description on the left, current
+// value + chevron on the right. Tapping opens the matching options menu.
+function settingRow(key,label,desc,val){
+  return '<button class="setItem" type="button" onclick="openOpt(\''+key+'\')">'+
+    '<span class="setLabel">'+esc(label)+'</span>'+
+    '<span class="setVal">'+esc(val)+'<span class="chev">\u203a</span></span></button>';
+}
+function closeOpt(){ document.getElementById('optScrim').classList.remove('show'); document.getElementById('optMenu').innerHTML=''; }
+// Render the foreground menu for a given setting key over a dim backdrop.
+function openOpt(key){
+  let h='';
+  if(key==='width'){
+    const wv=(S.prefs.width||480);
+    h+='<h4>Interface width</h4>';
+    h+='<p class="optHint">On a phone it always fills the screen. This caps the width on a monitor and keeps it centered.</p>';
+    h+='<div class="optChoices">'+
+      [['Slim',430],['Medium',560],['Wide',720],['Full',3000]].map(o=>
+        '<button type="button" class="'+(wv===o[1]?'on':'')+'" onclick="setWidth('+o[1]+')"><span>'+o[0]+'</span></button>').join('')+
+      '</div>';
+  } else if(key==='notes'){
+    const nl=(S.prefs.notesLines==null?3:S.prefs.notesLines);
+    h+='<h4>Note lines on cards</h4>';
+    h+='<p class="optHint">How many lines of a task\'s notes preview on the list (default 3, like Habitica).</p>';
+    h+='<div class="optChoices">'+
+      [['Off',0],['1 line',1],['2 lines',2],['3 lines',3],['5 lines',5]].map(o=>
+        '<button type="button" class="'+(nl===o[1]?'on':'')+'" onclick="setNotesLines('+o[1]+')"><span>'+o[0]+'</span></button>').join('')+
+      '</div>';
+  } else if(key==='drag'){
+    const ddv=(S.prefs.dragDelay==null?DRAG_DELAY_DEFAULT:Math.min(300,Math.max(100,S.prefs.dragDelay)));
+    h+='<h4>Card drag delay</h4>';
+    h+='<p class="optHint">How long to hold a card still before it lifts for reordering on touch (default 100\u00a0ms). Lower = quicker pickup; higher values can make the card freeze while the page scrolls on some phones.</p>';
+    h+='<div class="optSlide">'+
+      '<div class="sVal"><span id="ddVal">'+ddv+'</span> ms</div>'+
+      '<input type="range" id="ddRange" min="100" max="300" step="10" value="'+ddv+'" '+
+        'oninput="document.getElementById(\'ddVal\').textContent=this.value" '+
+        'onchange="setDragDelay(this.value)">'+
+      '<div class="sEnds"><span>100</span><span>300</span></div>'+
+      '</div>';
+  }
+  h+='<button class="btn ghost optClose" type="button" onclick="closeOpt()">Done</button>';
+  document.getElementById('optMenu').innerHTML=h;
+  document.getElementById('optScrim').classList.add('show');
+}
+// Slider commit for card drag delay: clamp to 100-300, persist live, refresh display.
+function setDragDelay(v){
+  let n=parseInt(v,10); if(!isFinite(n)) n=DRAG_DELAY_DEFAULT;
+  n=Math.min(300,Math.max(100,n));
+  S.prefs.dragDelay=n; save(); openSettings();
+}
 function saveSettings(){
   S.char.name=document.getElementById('setName').value.trim()||'Adventurer';
   S.char.face=document.getElementById('setFace').value||'🧙';
-  const ddEl=document.getElementById('setDragDelay');
-  if(ddEl){ let n=parseInt(ddEl.value,10); if(!isFinite(n)||n<0) n=DRAG_DELAY_DEFAULT; n=Math.min(2000,n); S.prefs.dragDelay=n; }
+  // Card drag delay is set live by its slider (setDragDelay); nothing to read here.
+  S.prefs.tipDelay=0; // tooltip delay is fixed at Instant
   save(); render(); closeSheet(); toast('Saved');
 }
 // Complete single-file backup: the localStorage S object PLUS the IndexedDB

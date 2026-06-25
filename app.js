@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.25-1753";
+const APP_VERSION = "v2026.06.25-2010";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -335,7 +335,7 @@ function completeTask(t){
     logHistory(t,{value:t.value,completed:true,reward:Object.assign({},t._gr)});
     logEvent({kind:'complete', taskType:'todo', taskId:t.id, taskTitle:t.title,
               reward:Object.assign({},t._gr), createdAt:t.createdAt||null, completedAt:t.completedAt}); }
-  toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar();
+  toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar(); buzz([12,40,18]);
   save(); render();
 }
 function reverseGrant(t){
@@ -382,7 +382,7 @@ function scoreHabit(id, dir){
     const _rpt = t.repsPerTap || repsPerTap(t.title);
     logHistory(t,{value:t.value,scoredUp:1,reps:_rpt,repCounted:true,scored:true});
     logEvent({kind:'habitTap', dir:1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value});
-    toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar();
+    toast('+'+r.xp+' XP · +'+r.gold.toFixed(1)+' gold'); bumpAvatar(); buzz([12,40,18]);
   } else {
     const dmg=missDamage(t);
     t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
@@ -522,6 +522,7 @@ function levelFlash(lvl){
   const f=document.getElementById('lvlFlash'); const t=document.getElementById('lvlFlashTxt');
   t.textContent='⭐ Level '+lvl+'!'; f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');
 }
+function buzz(p){ try{ if(navigator.vibrate && !(S.prefs&&S.prefs.haptics===false)) navigator.vibrate(p); }catch(_){ } }
 function bumpAvatar(){ const a=document.getElementById('avatarFace');
   a.classList.add('bump'); setTimeout(()=>a.classList.remove('bump'),150); }
 function toast(msg){
@@ -574,7 +575,6 @@ function renderStats(){
   document.getElementById('charLvl').textContent=c.lvl;
   document.getElementById('charClass').textContent=c.cls;
   document.getElementById('statGold').textContent=Math.floor(c.gold);
-  document.getElementById('statMp').textContent=Math.floor(c.mp);
   document.getElementById('hpFill').style.width=clamp(c.hp/c.maxHp*100,0,100)+'%';
   document.getElementById('hpLab').textContent=Math.ceil(Math.max(0,c.hp))+' / '+c.maxHp+' HP';
   const need=xpToLevel(c.lvl);
@@ -1851,7 +1851,7 @@ function saveTask(){
   document.querySelectorAll('#eCheck .ci input[type=text]').forEach((inp,i)=>{ if(EDIT.checklist[i]) EDIT.checklist[i].text=inp.value; });
   EDIT.checklist=(EDIT.checklist||[]).filter(c=>c.text.trim());
   if(EDIT.id){ const idx=S.tasks.findIndex(x=>x.id===EDIT.id); S.tasks[idx]=EDIT; }
-  else { EDIT.id=uid(); EDIT.createdAt=Date.now(); S.tasks.push(EDIT); }
+  else { EDIT.id=uid(); EDIT.createdAt=Date.now(); S.tasks.push(EDIT); buzz(20); }
   closeSheet(); save(); render();
 }
 function deleteTask(){ if(!confirm('Delete this task?'))return; S.tasks=S.tasks.filter(x=>x.id!==EDIT.id); closeSheet(); save(); render(); }
@@ -2007,7 +2007,7 @@ function exportData(){
                      eventCount:(eventsArr||[]).length };
     const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob); const a=document.createElement('a');
-    const d=new Date(); const stamp=''+d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0');
+    const d=new Date(); const p=(n)=>String(n).padStart(2,'0'); const stamp=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
     a.href=url; a.download='questa-backup-'+stamp+'.json'; a.click();
     setTimeout(()=>URL.revokeObjectURL(url),1000);
     toast('Exported'+((eventsArr&&eventsArr.length)?(' ('+eventsArr.length+' events)'):''));

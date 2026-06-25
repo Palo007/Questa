@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.25-1723";
+const APP_VERSION = "v2026.06.25-1741";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -1494,6 +1494,27 @@ function enableDragReorder(){
 // other cards slide out of the way (FLIP animation).
 let _tDrag=null, _tTimer=null, _tStartY=0, _tStartX=0, _tGhost=null, _tGrabDY=0,
     _tAutoScroll=null, _tPointerY=0, _tActive=false;
+// ---- Inertial (momentum) scrolling for the manual card-scroll path --------
+// Cards are touch-action:none, so the browser's native fling/inertia never runs
+// when a swipe starts on a card. We replicate it: track finger velocity during
+// the manual scroll, then on release coast the page with exponential friction.
+let _inertiaRAF=null, _scrollVel=0;            // px/frame at 60fps, sign = scrollBy direction
+function stopInertia(){ if(_inertiaRAF){ cancelAnimationFrame(_inertiaRAF); _inertiaRAF=null; } _scrollVel=0; }
+function startInertia(v0){
+  stopInertia();
+  // v0 is px/ms (finger speed). Convert to px/frame and cap so a hard flick
+  // doesn't launch absurdly fast. Below threshold, don't bother coasting.
+  let v=Math.max(-40,Math.min(40, v0*16));
+  if(Math.abs(v)<0.6) return;
+  const FRICTION=0.94;                          // per-frame decay (~iOS feel)
+  const step=()=>{
+    window.scrollBy(0,-v);                       // same sign convention as manual scroll
+    v*=FRICTION;
+    if(Math.abs(v)<0.25){ _inertiaRAF=null; _scrollVel=0; return; }
+    _inertiaRAF=requestAnimationFrame(step);
+  };
+  _inertiaRAF=requestAnimationFrame(step);
+}
 function enableTouchDrag(card){
   // ONE non-passive touchmove listener on the card spans the ENTIRE gesture
   // (press window AND active drag). It calls preventDefault() from the very
@@ -1506,9 +1527,11 @@ function enableTouchDrag(card){
     if(e.touches.length!==1) return;
     if(e.target.closest('.check')) return;        // don't hijack +/-/check taps
     if(_tActive || _tGhost || _tDrag) resetDragState();   // clean slate every gesture
+    stopInertia();                                // a new touch always halts coasting
     const t=e.touches[0];
     _tStartX=t.clientX; _tStartY=t.clientY; _tPointerY=t.clientY;
     let _lastY=t.clientY, _decided=false, _isScroll=false;
+    let _vLastY=t.clientY, _vLastT=(e.timeStamp||performance.now()), _vel=0;
     clearTimeout(_tTimer);
     _tTimer=setTimeout(()=>{ if(!_isScroll){ _decided=true; beginTouchDrag(card,t); } },longPressMs());  // long-press (Settings: drag delay)
 
@@ -1528,7 +1551,12 @@ function enableTouchDrag(card){
       const totDy=Math.abs(tt.clientY-_tStartY), totDx=Math.abs(tt.clientX-_tStartX);
       // First clear movement before the press fires = a scroll: drive it manually.
       if(!_decided && (totDy>10 || totDx>10)){ _decided=true; _isScroll=true; clearTimeout(_tTimer); _tTimer=null; }
-      if(_isScroll){ window.scrollBy(0,-dy); }
+      if(_isScroll){
+        window.scrollBy(0,-dy);
+        // exponential-moving-average velocity in px/ms (sign matches finger dir)
+        const now=(ev.timeStamp||performance.now()), dt=now-_vLastT;
+        if(dt>0){ const v=(tt.clientY-_vLastY)/dt; _vel=_vel*0.7+v*0.3; _vLastY=tt.clientY; _vLastT=now; }
+      }
       _lastY=tt.clientY;
     };
     const onEnd=()=>{
@@ -1536,7 +1564,8 @@ function enableTouchDrag(card){
       card.removeEventListener('touchmove',onMove);
       card.removeEventListener('touchend',onEnd);
       card.removeEventListener('touchcancel',onEnd);
-      if(_tActive) endTouchDrag();                 // finish an active drag
+      if(_tActive){ endTouchDrag(); }              // finish an active drag (no fling)
+      else if(_isScroll){ startInertia(_vel); }    // coast after a manual scroll flick
     };
     card.addEventListener('touchmove',onMove,{passive:false});
     card.addEventListener('touchend',onEnd);

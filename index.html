@@ -252,7 +252,9 @@
     100%{opacity:0;transform:translate(-50%,-54px) scale(1)}}
   .empty{color:var(--muted);font-size:13px;text-align:center;padding:18px;font-style:italic}
   /* Yesterday's check-in (RYA) modal — blocking, shown before cron on a new day */
-  .yScrim{z-index:60;align-items:center}
+  .yScrim{position:fixed;inset:0;background:rgba(10,5,20,.72);display:none;z-index:60;
+    align-items:center;justify-content:center}
+  .yScrim.show{display:flex}
   .ySheet{background:var(--bg);width:100%;max-width:420px;margin:0 14px;border:1px solid var(--line);
     border-radius:16px;padding:18px 18px 16px;max-height:88vh;overflow:auto}
   .yHead{display:flex;align-items:center;gap:9px;margin-bottom:6px}
@@ -420,6 +422,7 @@
 </div>
 
 <div class="scrim" id="scrim"><div class="sheet" id="sheet"></div></div>
+<div class="yScrim" id="yScrim"></div>
 <div class="optScrim" id="optScrim"><div class="optMenu" id="optMenu"></div></div>
 <div id="toast"></div>
 <div id="lvlFlash"><b id="lvlFlashTxt"></b></div>

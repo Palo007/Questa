@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.06.25-2359";
+const APP_VERSION = "v2026.06.26-1200";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -396,40 +396,27 @@ function scoreHabit(id, dir, ev){
   }
   save(); render();
 }
-// Adjust the habit counter from the editor sheet AND reflect it in the economy.
-// step: +1 increments the count, -1 decrements. sign: +1 = positive (XP/gold)
-// tally, -1 = negative (HP) tally. Decrementing a + reverses its reward;
-// incrementing re-grants it. Mirrors a real tap so corrections stay honest.
+// Adjust the habit counter from the editor sheet. Reward/penalty application
+// is deferred to saveTask() which calculates the net delta from the original
+// counter values and applies/removes rewards on save, with visual feedback.
 function adjustCount(step, sign){
   const t=EDIT; if(!t) return;
   if(sign>0){
     if(step>0){
-      const r=completionReward(t);
-      gainXp(r.xp); S.char.gold=+(S.char.gold+r.gold).toFixed(2); S.char.mp+=r.mp;
-      t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
       t.cUp=(t.cUp||0)+1;
     } else {
       if(!(t.cUp>0)) { drawSheet(); return; }
-      const r=completionReward(t);
-      S.char.xp=Math.max(0,S.char.xp-r.xp);
-      S.char.gold=+Math.max(0,S.char.gold-r.gold).toFixed(2);
-      S.char.mp=Math.max(0,S.char.mp-r.mp);
-      t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
       t.cUp=Math.max(0,(t.cUp||0)-1);
     }
   } else {
     if(step>0){
-      takeDamage(missDamage(t));
-      t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
       t.cDown=(t.cDown||0)+1;
     } else {
       if(!(t.cDown>0)) { drawSheet(); return; }
-      S.char.hp=+Math.min(S.char.maxHp,(S.char.hp+missDamage(t))).toFixed(2);
-      t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
       t.cDown=Math.max(0,(t.cDown||0)-1);
     }
   }
-  renderStats(); drawSheet();
+  drawSheet();
 }
 function periodBoundaryCrossed(freq, lastStamp, now){
   // lastStamp is YYYYMMDD of the previous cron; now is a Date (today)
@@ -526,6 +513,7 @@ function commitYesterCheck(){
 // Startup gate: prompt if anything was missed yesterday, else run cron directly.
 function startDay(){
   const missed=missedYesterdayDailies();
+  render(); // paint the day's UI behind any blocking modal
   if(missed.length){ openYesterCheck(missed); }
   else { runCron(); render(); }
 }
@@ -1911,8 +1899,63 @@ function saveTask(){
   EDIT.notes=document.getElementById('eNotes').value;
   document.querySelectorAll('#eCheck .ci input[type=text]').forEach((inp,i)=>{ if(EDIT.checklist[i]) EDIT.checklist[i].text=inp.value; });
   EDIT.checklist=(EDIT.checklist||[]).filter(c=>c.text.trim());
-  if(EDIT.id){ const idx=S.tasks.findIndex(x=>x.id===EDIT.id); S.tasks[idx]=EDIT; }
-  else { EDIT.id=uid(); EDIT.createdAt=Date.now(); S.tasks.push(EDIT); buzz(20); }
+  if(EDIT.id){
+    const idx=S.tasks.findIndex(x=>x.id===EDIT.id);
+    const orig = S.tasks[idx];
+    const upDelta = (EDIT.cUp||0) - (orig.cUp||0);
+    const downDelta = (EDIT.cDown||0) - (orig.cDown||0);
+    S.tasks[idx]=EDIT;
+    const t = S.tasks[idx];
+    let gainParts=null, loseParts=null, doBump=false;
+    if(upDelta > 0){
+      let totalXp=0, totalGold=0;
+      for(let i=0; i<upDelta; i++){
+        const r=completionReward(t);
+        totalXp+=r.xp; totalGold=+(totalGold+r.gold).toFixed(2);
+        gainXp(r.xp); S.char.gold=+(S.char.gold+r.gold).toFixed(2); S.char.mp+=r.mp;
+        t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
+      }
+      gainParts=fxGain(totalXp,totalGold); doBump=true;
+    } else if(upDelta < 0){
+      let totalXp=0, totalGold=0;
+      for(let i=0; i>upDelta; i--){
+        const r=completionReward(t);
+        totalXp+=r.xp; totalGold=+(totalGold+r.gold).toFixed(2);
+        S.char.xp=Math.max(0,S.char.xp-r.xp);
+        S.char.gold=+Math.max(0,S.char.gold-r.gold).toFixed(2);
+        S.char.mp=Math.max(0,S.char.mp-r.mp);
+        t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
+      }
+      const coin='<svg class="fxCoin" viewBox="0 0 24 24" width="20" height="20"><circle cx="12" cy="12" r="10" fill="#ffbe5c" stroke="#c8862f" stroke-width="1.5"/><circle cx="12" cy="12" r="6.5" fill="none" stroke="#c8862f" stroke-width="1.2" opacity="0.7"/><text x="12" y="16" text-anchor="middle" font-size="9" font-weight="700" fill="#7a4d12" font-family="serif">$</text></svg>';
+      loseParts=(loseParts?loseParts+' ':'')+'-'+totalXp+' XP '+coin+'-'+(+totalGold).toFixed(1);
+    }
+    if(downDelta > 0){
+      let totalDmg=0;
+      for(let i=0; i<downDelta; i++){
+        const dmg=missDamage(t);
+        totalDmg=+(totalDmg+dmg).toFixed(2);
+        takeDamage(dmg);
+        t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
+      }
+      loseParts=(loseParts?loseParts+' ':'')+'-'+totalDmg.toFixed(1)+'HP';
+    } else if(downDelta < 0){
+      let totalHeal=0;
+      for(let i=0; i>downDelta; i--){
+        const heal=missDamage(t);
+        totalHeal=+(totalHeal+heal).toFixed(2);
+        S.char.hp=+Math.min(S.char.maxHp,(S.char.hp+heal)).toFixed(2);
+        t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
+      }
+      gainParts=(gainParts?gainParts+' ':'')+'+'+totalHeal.toFixed(1)+'HP';
+    }
+    if(gainParts){ floatFx(gainParts,'pos',null); if(doBump) bumpAvatar(); }
+    if(loseParts) floatFx(loseParts,'neg',null);
+    if(gainParts) buzz([12,40,18]);
+    else if(downDelta>0) buzz([28,30,28]);
+    else if(upDelta<0||downDelta<0) buzz([20]);
+  } else {
+    EDIT.id=uid(); EDIT.createdAt=Date.now(); S.tasks.push(EDIT); buzz(20);
+  }
   closeSheet(); save(); render();
 }
 function deleteTask(){ if(!confirm('Delete this task?'))return; S.tasks=S.tasks.filter(x=>x.id!==EDIT.id); closeSheet(); save(); render(); }
@@ -1991,12 +2034,6 @@ function openSettings(){
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
-  const _bd=getBuzzDiag();
-  h+='<div class="colTitle"><h2 style="font-size:13px">Vibration diagnostics</h2></div>';
-  h+='<div class="small">navigator.vibrate type: <b>'+esc(_bd.type)+'</b></div>';
-  h+='<div class="small">Last buzz result: <b>'+(_bd.lastResult===null?'(never called)':''+_bd.lastResult)+'</b></div>';
-  h+='<div class="small">Buzz call count: <b>'+_bd.count+'</b></div>';
-  h+='<div class="small" style="margin-top:2px;color:#888">If buzz() returns true but no vibration is felt: Android DND / Silent mode suppresses vibration silently. The API returns "accepted" even when blocked by the OS.</div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
   h+='<div class="resetRow"><button class="btn resetMini" onclick="if(confirm(\'Erase ALL progress on this device? This cannot be undone.\')){localStorage.removeItem(STORE_KEY);S=freshState();save();applyWidth();closeSheet();render();}">Reset everything</button></div>';
   sheet.innerHTML=h;
@@ -2054,6 +2091,9 @@ function openOpt(key){
     h+='<button type="button" class="'+(hv?'on':'')+'" onclick="setHaptics(1)">On</button>';
     h+='<button type="button" class="'+(hv?'':'on')+'" onclick="setHaptics(0)">Off</button>';
     h+='</div>';
+    h+='<p class="optHint" style="margin-top:8px">If buzz() returns "accepted" but no vibration is felt: Android DND / Silent mode suppresses vibration silently. The API has no way to detect this.</p>';
+    var _bd=getBuzzDiag();
+    h+='<div class="small" style="margin-top:6px">API: <b>'+_bd.type+'</b> &middot; Last: <b>'+( _bd.lastResult===null?'(none)':''+_bd.lastResult)+'</b> &middot; Count: <b>'+_bd.count+'</b></div>';
   }
   h+='<button class="btn ghost optClose" type="button" onclick="closeOpt()">Done</button>';
   document.getElementById('optMenu').innerHTML=h;

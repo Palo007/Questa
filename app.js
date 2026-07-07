@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-0039";
+const APP_VERSION = "v2026.07.08-0210";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -1218,14 +1218,22 @@ function initAnalytics(){
   const h0=document.getElementById('anH0'), h1=document.getElementById('anH1');
   const fill=document.getElementById('anFill');
   const totalDays=Math.max(1,Math.round((mx-mn)/DAY));
-  function offToFrac(off){ const t=Date.now()-off*DAY; return clamp((t-mn)/(mx-mn),0,1); }
-  function fracToOff(fr){ const t=mn+fr*(mx-mn); return Math.round((Date.now()-t)/DAY); }
+  const _span=Math.max(1,mx-mn);
+  function offToFrac(off){ const t=Date.now()-off*DAY; return clamp((t-mn)/_span,0,1); }
+  function fracToOff(fr){ const t=mn+fr*_span; return Math.round((Date.now()-t)/DAY); }
+  function normRange(){
+    p.fromOff=clamp(Math.round(p.fromOff==null?totalDays:p.fromOff),0,totalDays);
+    p.toOff=clamp(Math.round(p.toOff==null?0:p.toOff),0,totalDays);
+    if(p.fromOff<p.toOff){ const t=p.fromOff; p.fromOff=p.toOff; p.toOff=t; }
+  }
   function layout(){
     const w=slider.clientWidth||300;
+    normRange();
     let f0=offToFrac(p.fromOff), f1=offToFrac(p.toOff);
-    if(f0>f1){const t=f0;f0=f1;f1=t;}
-    h0.style.left=(f0*w)+'px'; h1.style.left=(f1*w)+'px';
-    fill.style.left=(f0*w)+'px'; fill.style.width=((f1-f0)*w)+'px';
+    if(f0>f1){ const t=f0; f0=f1; f1=t; }
+    const PAD=12, tw=Math.max(1,w-2*PAD);   // inset by handle radius so a handle at 0/1 stays fully on-track
+    h0.style.left=(PAD+f0*tw)+'px'; h1.style.left=(PAD+f1*tw)+'px';
+    fill.style.left=(PAD+f0*tw)+'px'; fill.style.width=(Math.max(0,f1-f0)*tw)+'px';
     const [from,to]=anWindow();
     const lbl=document.getElementById('anRangeLbl');
     if(lbl) lbl.textContent=fmtDate(from)+' → '+fmtDate(to);
@@ -1235,16 +1243,20 @@ function initAnalytics(){
   function drag(handle,which){
     const onMove=(clientX)=>{
       const r=slider.getBoundingClientRect();
-      const fr=clamp((clientX-r.left)/r.width,0,1);
-      const off=fracToOff(fr);
-      if(which===0) p.fromOff=off; else p.toOff=off;
+      const PAD=12; const fr=clamp((clientX-r.left-PAD)/Math.max(1,r.width-2*PAD),0,1);
+      let off=fracToOff(fr);
+      // constrain handles so they never cross
+      if(which===0) p.fromOff=Math.min(Math.max(off, p.toOff||0), totalDays);
+      else p.toOff=Math.max(Math.min(off, p.fromOff||totalDays), 0);
       p.snap=null;
       document.querySelectorAll('#anSnapChips .anChip').forEach(c=>c.classList.remove('on'));
-      layout(); refreshAnalytics(); save();
+      layout();   // cheap: reposition handles + live date label only
     };
     const mm=e=>{ e.preventDefault(); onMove(e.touches?e.touches[0].clientX:e.clientX); };
     const up=()=>{ document.removeEventListener('mousemove',mm); document.removeEventListener('mouseup',up);
-      document.removeEventListener('touchmove',mm); document.removeEventListener('touchend',up); };
+      document.removeEventListener('touchmove',mm); document.removeEventListener('touchend',up);
+      save(); refreshAnalytics();   // commit the heavier chart re-render once, on release
+    };
     const down=e=>{ e.preventDefault();
       document.addEventListener('mousemove',mm); document.addEventListener('mouseup',up);
       document.addEventListener('touchmove',mm,{passive:false}); document.addEventListener('touchend',up); };
@@ -1260,7 +1272,7 @@ function initAnalytics(){
     };
   });
   bindMetricChips();
-  layout(); refreshAnalytics();
+  layout(); save(); refreshAnalytics();
   if(!_anBound){ window.addEventListener('resize',()=>{ if(TAB==='analytics') layout(); }); _anBound=true; }
 }
 // bind metric selector chips + add/edit form

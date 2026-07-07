@@ -1,6 +1,6 @@
 /* Questa service worker - network-first for the app shell so updates appear
    on the next launch; cache fallback keeps it working fully offline. */
-const CACHE = "questa-v48";
+const CACHE = "questa-v50";
 const ASSETS = ["./", "./index.html", "./app.js", "./manifest.json", "./icon.svg",
                 "./icon-192.png", "./icon-512.png"];
 
@@ -37,7 +37,4 @@ self.addEventListener("fetch", e => {
         const copy = res.clone();
         caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
         return res;
-      }).catch(() => caches.match("./index.html")))
-    );
-  }
-});
+      }).catch(() => caches.

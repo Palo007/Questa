@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-0015";
+const APP_VERSION = "v2026.07.08-0039";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -1280,6 +1280,7 @@ function bindMetricChips(){
 }
 // working draft of the metric being edited (so the habit picker can mutate it live)
 let MEDIT=null;
+let MBUILD=false;   // true while the reps-metric editor is open INSIDE the view-builder sheet
 function openMetricEditor(mid){
   const p=anPrefs();
   const src = mid ? p.metrics.find(x=>x.id===mid) : {id:null,name:'',keyword:'',exact:false,habits:[]};
@@ -1289,7 +1290,7 @@ function openMetricEditor(mid){
   drawMetricEditor();
 }
 function drawMetricEditor(){
-  const box=document.getElementById('anMetricEdit'); if(!box)return;
+  const box=document.getElementById(MBUILD?'sheet':'anMetricEdit'); if(!box)return;
   const m=MEDIT;
   let h='<div class="anCard full mEditor">';
   h+='<div class="mEditTitle">'+(m._mid?'Edit metric':'New metric')+'</div>';
@@ -1339,14 +1340,15 @@ function drawMetricEditor(){
     renderHabitPicker('');
     renderSelectedHabits();
   }
-  document.getElementById('mSave').onclick=saveMetricEditor;
+  document.getElementById('mSave').onclick = MBUILD ? bSaveMetric : saveMetricEditor;
   if(m._mid){ document.getElementById('mDel').onclick=()=>{
     const p=anPrefs();
     p.metrics=p.metrics.filter(x=>x.id!==m._mid);
     if(p.activeMetric===m._mid) p.activeMetric=p.metrics[0]?p.metrics[0].id:null;
-    MEDIT=null; save(); render();
+    if(MBUILD){ if(VDRAFT && VDRAFT.metricId===m._mid) VDRAFT.metricId=(p.metrics[0]?p.metrics[0].id:null); MEDIT=null; MBUILD=false; save(); drawViewBuilder(); }
+    else { MEDIT=null; save(); render(); }
   };}
-  document.getElementById('mCancel').onclick=()=>{ MEDIT=null; document.getElementById('anMetricEdit').innerHTML=''; };
+  document.getElementById('mCancel').onclick=()=>{ if(MBUILD){ bCancelMetric(); } else { MEDIT=null; document.getElementById('anMetricEdit').innerHTML=''; } };
 }
 function renderHabitPicker(filter){
   const list=document.getElementById('mHabitList'); if(!list)return;
@@ -1389,6 +1391,36 @@ function renderSelectedHabits(){
       renderSelectedHabits(); renderHabitPicker(document.getElementById('mFilter').value);
     };
   });
+}
+// ---- reps-metric editor embedded in the view builder ------------------
+function bAddMetric(){ MEDIT={id:null,name:'',keyword:'',exact:false,habits:[],_mid:null}; MBUILD=true; drawMetricEditor(); }
+function bEditMetric(id){ const src=(anPrefs().metrics||[]).find(x=>x.id===id); if(!src) return;
+  MEDIT={ id:src.id, name:src.name||'', keyword:src.keyword||'', exact:!!src.exact,
+          habits:(src.habits||[]).map(h=>({id:h.id, reps:(h.reps==null?'':h.reps)})), _mid:id };
+  MBUILD=true; drawMetricEditor(); }
+function bCancelMetric(){ MEDIT=null; MBUILD=false; drawViewBuilder(); }
+function bSaveMetric(){
+  const p=anPrefs(); const m=MEDIT;
+  const name=(document.getElementById('mName').value||'').trim();
+  if(!name){ toast('Name required'); return; }
+  if(m.exact){ if(!m.habits.length){ toast('Pick at least one habit'); return; } }
+  else { m.keyword=(document.getElementById('mKw').value||'').trim(); if(!m.keyword){ toast('Keyword required'); return; } }
+  const habits=m.habits.map(h=>({id:h.id, reps:(h.reps===''||h.reps==null)?null:Number(h.reps)}));
+  let id;
+  if(m._mid){ const tgt=p.metrics.find(x=>x.id===m._mid); tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits; id=m._mid; }
+  else { const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits}; p.metrics.push(nm); id=nm.id; }
+  MEDIT=null; MBUILD=false;
+  if(VDRAFT){ VDRAFT.source='metric'; VDRAFT.metricId=id; }
+  save(); drawViewBuilder();
+}
+// clone the view currently open in the builder, inserting it just below
+function cloneView(){ if(!VDRAFT) return; const a=anPrefs(); a.views=a.views||[];
+  if(a.views.length>=20){ toast('Max 20 view sections'); return; }
+  const copy=JSON.parse(JSON.stringify(VDRAFT)); copy.id=uid(); copy.name='clone - '+(VDRAFT.name||'view');
+  let idx=VDRAFT.id? a.views.findIndex(x=>x.id===VDRAFT.id) : -1; if(idx<0) idx=a.views.length-1;
+  a.views.splice(idx+1,0,copy);
+  VDRAFT=null; MEDIT=null; MBUILD=false; document.getElementById('scrim').classList.remove('show'); save(); refreshAnalytics();
+  toast('Cloned view');
 }
 function saveMetricEditor(){
   const p=anPrefs(); const m=MEDIT;
@@ -1599,7 +1631,11 @@ function drawViewBuilder(){
   h+='<label>Data</label>'+seg('source',V_SOURCES);
   if(VDRAFT.source==='metric'){
     const ms=(anPrefs().metrics||[]);
-    h+='<label>Reps metric</label>'+(ms.length? '<div class="seg vSeg">'+ms.map(m=>'<button class="'+(VDRAFT.metricId===m.id?'on':'')+'" onclick="vSet(\'metricId\',\''+m.id+'\')">'+esc(m.name)+'</button>').join('')+'</div>' : '<div class="mHint">No reps metrics yet — create one in “Full activity detail”.</div>');
+    h+='<label>Reps metric</label><div class="seg vSeg">'+
+       ms.map(m=>'<button class="'+(VDRAFT.metricId===m.id?'on':'')+'" onclick="vSet(\'metricId\',\''+m.id+'\')">'+esc(m.name)+'</button>').join('')+
+       '<button onclick="bAddMetric()">+ new metric</button></div>';
+    if(VDRAFT.metricId){ h+='<div class="mMetricEditRow"><button class="anMini" onclick="bEditMetric(\''+VDRAFT.metricId+'\')">Edit this metric</button></div>'; }
+    else if(!ms.length){ h+='<div class="mHint">No reps metrics yet — tap “+ new metric” to create one.</div>'; }
   }
   if(V_SPECIAL.indexOf(VDRAFT.source)<0){
     h+='<label>Group by</label>'+seg('group',V_GROUPS);
@@ -1613,7 +1649,7 @@ function drawViewBuilder(){
   }
   const w=anWindow();
   h+='<label>Preview</label><div class="anViewBody vPreview">'+renderView(VDRAFT,w[0],w[1])+'</div>';
-  h+='<div class="rowBtns">'+(VDRAFT.id?'<button class="btn danger" onclick="delView()">Delete</button>':'')+'<button class="btn ghost" onclick="cancelView()">Cancel</button><button class="btn primary" onclick="saveView()">Save</button></div>';
+  h+='<div class="rowBtns">'+(VDRAFT.id?'<button class="btn danger" onclick="delView()">Delete</button>':'')+(VDRAFT.id?'<button class="btn ghost" onclick="cloneView()">Clone</button>':'')+'<button class="btn ghost" onclick="cancelView()">Cancel</button><button class="btn primary" onclick="saveView()">Save</button></div>';
   sheet.innerHTML=h;
   document.getElementById('scrim').classList.add('show');
   bindTips('.spkHit'); bindTips('.barHit'); bindHeatTooltips();
@@ -1674,9 +1710,9 @@ function refreshAnalytics(){
   body.innerHTML=h;
   bindHeatTooltips();
   bindTips('.spkPt'); bindTips('.spkHit'); bindTips('.barHit');
-  if(VDRAFT) drawViewBuilder();
+  if(VDRAFT){ if(MBUILD) drawMetricEditor(); else drawViewBuilder(); }
   bindMetricChips();
-  if(typeof MEDIT!=='undefined' && MEDIT) drawMetricEditor();
+  if(MEDIT && !MBUILD) drawMetricEditor();
   renderEventDetail(from,to);
 }
 function anDetailDashboard(from,to){
@@ -2374,7 +2410,7 @@ function saveTask(){
   closeSheet(); save(); render();
 }
 function deleteTask(){ if(!confirm('Delete this task?'))return; S.tasks=S.tasks.filter(x=>x.id!==EDIT.id); closeSheet(); save(); render(); }
-function closeSheet(){ document.getElementById('scrim').classList.remove('show'); EDIT=null; if(VDRAFT){ VDRAFT=null; if(TAB==='analytics') refreshAnalytics(); } }
+function closeSheet(){ document.getElementById('scrim').classList.remove('show'); EDIT=null; if(VDRAFT){ VDRAFT=null; MEDIT=null; MBUILD=false; if(TAB==='analytics') refreshAnalytics(); } }
 let REDIT=null;
 function openReward(id){
   REDIT = id? JSON.parse(JSON.stringify(S.rewards.find(r=>r.id===id))) : {id:null,title:'',cost:10,notes:''};

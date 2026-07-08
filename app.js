@@ -10,6 +10,67 @@ const APP_VERSION = "v2026.07.08-0430";
 // scrolls. A short window (~200) beats that commit; raising it (e.g. 1000) makes the
 // freeze MORE likely, not less. The setting exists so it can be tuned on a real device.
 const DRAG_DELAY_DEFAULT = 100;
+function confirmDialog(title, text) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('confirmOverlay');
+    const titleEl = document.getElementById('confirmTitle');
+    const textEl = document.getElementById('confirmText');
+    const yesBtn = document.getElementById('confirmYesBtn');
+    const noBtn = document.getElementById('confirmNoBtn');
+    if (!overlay || !titleEl || !textEl || !yesBtn || !noBtn) {
+      // Fallback if DOM not ready or elements missing
+      resolve(true);
+      return;
+    }
+
+    titleEl.textContent = title || 'Are you sure?';
+    textEl.textContent = text || '';
+    noBtn.style.display = ''; // Show cancel button
+    yesBtn.textContent = 'Yes';
+    overlay.classList.add('show');
+
+    const cleanUp = (result) => {
+      overlay.classList.remove('show');
+      yesBtn.onclick = null;
+      noBtn.onclick = null;
+      resolve(result);
+    };
+
+    yesBtn.onclick = () => cleanUp(true);
+    noBtn.onclick = () => cleanUp(false);
+  });
+}
+
+function alertDialog(title, text) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('confirmOverlay');
+    const titleEl = document.getElementById('confirmTitle');
+    const textEl = document.getElementById('confirmText');
+    const yesBtn = document.getElementById('confirmYesBtn');
+    const noBtn = document.getElementById('confirmNoBtn');
+    if (!overlay || !titleEl || !textEl || !yesBtn || !noBtn) {
+      // Fallback if DOM not ready or elements missing
+      resolve();
+      return;
+    }
+
+    titleEl.textContent = title || 'Info';
+    textEl.textContent = text || '';
+    noBtn.style.display = 'none'; // Hide cancel button
+    yesBtn.textContent = 'OK';
+    overlay.classList.add('show');
+
+    const cleanUp = () => {
+      overlay.classList.remove('show');
+      noBtn.style.display = ''; // Restore default display
+      yesBtn.textContent = 'Yes';
+      yesBtn.onclick = null;
+      resolve();
+    };
+
+    yesBtn.onclick = cleanUp;
+  });
+}
 function longPressMs(){
   const v = (S.prefs && S.prefs.dragDelay);
   const n = (v==null ? DRAG_DELAY_DEFAULT : +v);
@@ -203,16 +264,18 @@ function importEventsBackfill(ev){
   const rd=new FileReader();
   rd.onload=()=>{
     let blob;
-    try{ blob=JSON.parse(rd.result); }catch(e){ alert('That file is not valid JSON.'); return; }
+    try{ blob=JSON.parse(rd.result); }catch(e){ alertDialog('Error', 'That file is not valid JSON.'); return; }
     const list = Array.isArray(blob) ? blob : (blob && Array.isArray(blob.events) ? blob.events : null);
-    if(!list){ alert('That file does not look like a Questa event backfill (no events array).'); return; }
-    if(typeof indexedDB==="undefined"){ alert('IndexedDB is unavailable here (e.g. private browsing), so events cannot be loaded.'); return; }
-    if(!confirm('Load '+list.length+' synthesized events? This replaces any previously loaded backfill (your live taps are kept).')) return;
-    // mark everything from this load as synthetic so a re-load can replace it
-    list.forEach(e=>{ if(e && typeof e==="object" && e.synthetic===undefined) e.synthetic=true; });
-    clearSyntheticEvents().then(()=>bulkAddEvents(list)).then(added=>{
-      toast('Loaded '+added+' events');
-      if(TAB==='analytics') render();
+    if(!list){ alertDialog('Error', 'That file does not look like a Questa event backfill (no events array).'); return; }
+    if(typeof indexedDB==="undefined"){ alertDialog('Error', 'IndexedDB is unavailable here (e.g. private browsing), so events cannot be loaded.'); return; }
+    confirmDialog('Load Synthesized Events', 'Load '+list.length+' synthesized events? This replaces any previously loaded backfill (your live taps are kept).').then(ok => {
+      if(!ok) return;
+      // mark everything from this load as synthetic so a re-load can replace it
+      list.forEach(e=>{ if(e && typeof e==="object" && e.synthetic===undefined) e.synthetic=true; });
+      clearSyntheticEvents().then(()=>bulkAddEvents(list)).then(added=>{
+        toast('Loaded '+added+' events');
+        if(TAB==='analytics') render();
+      });
     });
   };
   rd.readAsText(f);
@@ -392,7 +455,7 @@ function scoreHabit(id, dir, ev){
     t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
     t.cDown=(t.cDown||0)+1;
     logHistory(t,{value:t.value,scoredDown:1});
-    logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, value:t.value});
+    logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, value:t.value, dmg:dmg});
     takeDamage(dmg); buzz([28,30,28]); floatFx('-'+dmg.toFixed(1)+' HP','neg',ev);
   }
   save(); render();
@@ -528,12 +591,14 @@ function runCron(){
     if(t.type!=='daily') return;
     const scheduledYesterday = !t.repeat || t.repeat[(dow+6)%7];
     if(scheduledYesterday && !t.done){
-      totalDmg += missDamage(t);
+      const dmg = missDamage(t);
+      totalDmg += dmg;
       t.value = clamp(t.value - valueDelta(t.value), -47.27, 99);
       t.streak = 0;
       logHistory(t,{value:t.value,completed:false,isDue:true,repeat:(t.repeat||[]).slice()});
       const cl=(t.checklist||[]);
       logEvent({kind:'miss', taskType:'daily', taskId:t.id, taskTitle:t.title,
+                dmg: dmg,
                 repeat:(t.repeat||[]).slice(),
                 checklist:cl.map(c=>({id:c.id||null,text:c.text,done:!!c.done}))});
     }
@@ -1198,20 +1263,38 @@ function svgBars(data,color){
 function viewAnalytics(){
   const p=anPrefs();
   let h='<div class="anWrap">';
-  h+='<div class="anHead"><h2>&#128202; Analytics</h2><span class="anRangeLbl" id="anRangeLbl"></span></div>';
-  const chips=[['7d','7d'],['30d','30d'],['90d','90d'],['1y','365d'],['All','all']];
+  h+='<div class="anStickyHeader">';
+  h+='<div class="anHeaderRow">';
+  h+='<h2>&#128202; Analytics</h2>';
+  const chips=[['7d','7d'],['30d','30d'],['90d','90d'],['180d','180d'],['1y','365d'],['All','all']];
   h+='<div class="anChips" id="anSnapChips">'+chips.map(c=>'<span class="anChip'+(p.snap===c[1]?' on':'')+'" data-snap="'+c[1]+'">'+c[0]+'</span>').join('')+'</div>';
+  h+='</div>';
+  h+='<div class="anSubRow">';
+  h+='<span class="anRangeLbl" id="anRangeLbl"></span>';
   h+='<div class="anSlider" id="anSlider">'+
        '<div class="anTrack"></div><div class="anFill" id="anFill"></div>'+
        '<div class="anHandle" id="anH0"></div><div class="anHandle" id="anH1"></div>'+
        '<div class="anTicks"><span id="anTickL"></span><span id="anTickR"></span></div>'+
      '</div>';
+  h+='</div>';
+  h+='</div>';
   h+='<div id="anBody"></div>';
   h+='</div>';
   return h;
 }
+function updateHeaderHeightVar() {
+  const headerEl = document.querySelector('header');
+  if (headerEl) {
+    document.documentElement.style.setProperty('--header-height', headerEl.offsetHeight + 'px');
+  }
+  const stickyHeaderEl = document.querySelector('.anStickyHeader');
+  if (stickyHeaderEl) {
+    document.documentElement.style.setProperty('--sticky-header-height', stickyHeaderEl.offsetHeight + 'px');
+  }
+}
 let _anBound=false;
 function initAnalytics(){
+  updateHeaderHeightVar();
   const p=anPrefs();
   const [mn,mx]=anSpan();
   const slider=document.getElementById('anSlider'); if(!slider)return;
@@ -1237,8 +1320,10 @@ function initAnalytics(){
     const [from,to]=anWindow();
     const lbl=document.getElementById('anRangeLbl');
     if(lbl) lbl.textContent=fmtDate(from)+' → '+fmtDate(to);
-    document.getElementById('anTickL').textContent=fmtDate(mn);
-    document.getElementById('anTickR').textContent='today';
+    const tickL=document.getElementById('anTickL');
+    if(tickL) tickL.textContent=fmtDate(mn);
+    const tickR=document.getElementById('anTickR');
+    if(tickR) tickR.textContent='today';
   }
   function drag(handle,which){
     const onMove=(clientX)=>{
@@ -1273,7 +1358,14 @@ function initAnalytics(){
   });
   bindMetricChips();
   layout(); save(); refreshAnalytics();
-  if(!_anBound){ window.addEventListener('resize',()=>{ if(TAB==='analytics') layout(); }); _anBound=true; }
+  const ro = new ResizeObserver(() => {
+    if (TAB === 'analytics') layout();
+  });
+  ro.observe(slider);
+  requestAnimationFrame(() => {
+    if (TAB === 'analytics') layout();
+  });
+  if(!_anBound){ window.addEventListener('resize',()=>{ if(TAB==='analytics') { updateHeaderHeightVar(); layout(); } }); _anBound=true; }
 }
 // bind metric selector chips + add/edit form
 function bindMetricChips(){
@@ -1674,7 +1766,13 @@ function viewMetaLabel(v){ if(V_SPECIAL.indexOf(v.source)>=0) return 'summary';
 // appears at the top when adding or editing.
 function anViewsUI(from,to){
   const a=anPrefs(); const views=a.views||[];
-  let h='<div class="anSection">📐 Custom views ('+views.length+'/20)</div>';
+  let h='<div class="anSectionHeader">'+
+        '  <span class="anSectionTitle">📐 Custom views ('+views.length+'/20)</span>'+
+        '  <div class="anViewToolsCompact">'+
+        '    <button class="anBtnCompact" onclick="exportViews()" title="Export views">📥 Export</button>'+
+        '    <label class="anBtnCompact" title="Import views">📤 Import <input type="file" accept="application/json" style="display:none" onchange="importViews(event)"></label>'+
+        '  </div>'+
+        '</div>';
   h+='<div id="anViewBuilder"></div>';
   if(!views.length && !VDRAFT) h+='<div class="anNote">No view sections yet. Tap “+ Add view section” to build one.</div>';
   views.forEach((v,i)=>{
@@ -1689,8 +1787,6 @@ function anViewsUI(from,to){
   });
   if(views.length<20) h+='<div class="anAddView"><button class="anMini anAddBtn" onclick="newView()">+ Add view section</button></div>';
   else h+='<div class="anNote">Maximum of 20 view sections reached.</div>';
-  h+='<div class="anViewTools"><button class="anMini" onclick="exportViews()">⬇️ Export views</button>'+
-     '<label class="anMini anMiniFile">⬆️ Import views<input type="file" accept="application/json" style="display:none" onchange="importViews(event)"></label></div>';
   return h;
 }
 function exportViews(){
@@ -1710,15 +1806,17 @@ function importViews(ev){
       arr.forEach(v=>{ if(!v||!v.source) return; a.views.push({id:uid(), name:v.name||'Imported view', source:v.source, group:v.group||'day', chart:v.chart||'line', tags:Array.isArray(v.tags)?v.tags:[], types:Array.isArray(v.types)?v.types:[], metricId:v.metricId||null}); n++; });
       if(n){ a.activeView=a.views[a.views.length-1].id; }
       save(); refreshAnalytics(); toast('Imported '+n+' view'+(n===1?'':'s'));
-    } catch(e){ alert('That file does not look like Questa views.'); } };
+    } catch(e){ alertDialog('Error', 'That file does not look like Questa views.'); } };
   rd.readAsText(f);
 }
 function refreshAnalytics(){
   const p=anPrefs(); const w=anWindow(); const from=w[0], to=w[1];
   const body=document.getElementById('anBody'); if(!body)return;
+  const oldDetails = document.querySelector('.anDetails');
+  const wasOpen = oldDetails ? oldDetails.hasAttribute('open') : false;
   let h='';
   h+=anViewsUI(from,to);
-  h+='<details class="anDetails"><summary>🔎 Full activity detail (reps, adherence, streaks, event log)</summary><div class="anDetailWrap">'+anDetailDashboard(from,to)+'</div></details>';
+  h+='<details class="anDetails"'+(wasOpen?' open':'')+'><summary>🔎 Full activity detail (reps, adherence, streaks, event log)</summary><div class="anDetailWrap">'+anDetailDashboard(from,to)+'</div></details>';
   body.innerHTML=h;
   bindHeatTooltips();
   bindTips('.spkPt'); bindTips('.spkHit'); bindTips('.barHit');
@@ -1840,18 +1938,45 @@ function findKlikyTask(){
 function timeOfDay(ts){ const d=new Date(ts); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
 function taskTitleById(id){ const t=(S.tasks||[]).find(x=>x.id===id); return t?t.title:'(deleted task)'; }
 // Event-detail view state (survives the async re-render).
-let _evTaskId=null;     // currently selected task id (null = auto-pick)
-let _evPage=0;          // current page of days
+let _evFilterType='all'; // 'all', 'habit', 'daily', 'todo', 'system'
+let _evSearchQuery='';   // search string
+let _evPage=0;          // current page
 let _evWin=null;        // [from,to] of the last render (to detect window change)
-const EV_PAGE_SIZE=14;  // days per page
-function evPickTask(id){ _evTaskId=id||null; _evPage=0; if(_evWin) renderEventDetail(_evWin[0],_evWin[1]); }
-function evGoPage(n){ _evPage=Math.max(0,n); if(_evWin) renderEventDetail(_evWin[0],_evWin[1]); }
-// Async, event-driven dashboard section. Lets you pick ANY task that has events
-// in the current window (defaults to Kliky), respects the date-window slider,
-// and pages the per-day breakdown. Shows per-day completion and, where subtask
-// events exist, which subtasks were checked and at what time of day. Degrades
-// gracefully on a fresh install (no events) or when IDB is unavailable. The
-// existing history-based charts above are untouched.
+const EV_PAGE_SIZE=25;  // events per page
+
+function evSetFilter(type){
+  _evFilterType=type||'all';
+  _evPage=0;
+  if(_evWin) renderEventDetail(_evWin[0],_evWin[1]);
+}
+function evSetSearch(query){
+  _evSearchQuery=query||'';
+  _evPage=0;
+  const input = document.querySelector('.evSearchInput');
+  if(input) input.value = _evSearchQuery;
+  if(_evWin) renderEventDetail(_evWin[0],_evWin[1]);
+}
+function evGoPage(n){
+  _evPage=Math.max(0,n);
+  if(_evWin) renderEventDetail(_evWin[0],_evWin[1]);
+}
+
+function getEventCategory(e) {
+  if (e.kind === 'habitTap' || e.taskType === 'habit') return 'habit';
+  if (e.kind === 'import' || e.kind === 'export') return 'system';
+  if (e.taskType === 'daily' || e.kind === 'miss') return 'daily';
+  if (e.taskType === 'todo') return 'todo';
+  if (e.kind === 'subtask') {
+    return e.taskType === 'todo' ? 'todo' : 'daily';
+  }
+  if (e.kind === 'complete') {
+    return e.taskType === 'todo' ? 'todo' : 'daily';
+  }
+  return 'system';
+}
+
+// Async, event-driven dashboard section. Redesigned to show a unified
+// Activity Feed where users can browse, search and filter ALL events.
 function renderEventDetail(from,to){
   const box=document.getElementById('anEventDetail'); if(!box) return;
   _evWin=[from,to];
@@ -1863,66 +1988,202 @@ function renderEventDetail(from,to){
         '(the event log starts empty by design and fills as you use the app). If you imported a backup or loaded the backfill, widen the date window above.</div>';
       return;
     }
-    const counts={};
-    all.forEach(e=>{ if(e.taskId) counts[e.taskId]=(counts[e.taskId]||0)+1; });
-    const taskIds=Object.keys(counts).sort((a,b)=>counts[b]-counts[a]);
-    let sel=_evTaskId;
-    if(!sel || taskIds.indexOf(sel)<0){
-      const kl=findKlikyTask(); sel=(kl && counts[kl.id])? kl.id : taskIds[0];
-      _evTaskId=sel;
+
+    // Sort events newest first
+    const sorted = all.slice().sort((a,b)=>b.ts - a.ts);
+
+    // Filter events
+    const filtered = sorted.filter(e=>{
+      const cat = getEventCategory(e);
+      if(_evFilterType!=='all' && cat!==_evFilterType) return false;
+      if(_evSearchQuery.trim()){
+        const q=_evSearchQuery.toLowerCase().trim();
+        const title=(e.taskTitle||e.taskType||e.kind||e.subText||'').toLowerCase();
+        const notes=(e.notes||'').toLowerCase();
+        if(!title.includes(q) && !notes.includes(q)) return false;
+      }
+      return true;
+    });
+
+    const synCount=all.filter(e=>e.synthetic).length;
+
+    // Check if controls structure is already rendered to avoid losing focus/destroying inputs
+    let feedContent = document.getElementById('evFeedContent');
+    if(!feedContent){
+      let h='<div class="k">Activity Feed</div>';
+      
+      // Category chips
+      const categories = [
+        ['all', 'All'],
+        ['habit', 'Habits ⚡'],
+        ['daily', 'Dailies 📅'],
+        ['todo', 'To-dos ☑️'],
+        ['system', 'System 💾']
+      ];
+      h+='<div class="evFilterRow">';
+      categories.forEach(c=>{
+        h+='<span class="evFilterChip'+(_evFilterType===c[0]?' active':'')+'" data-filter="'+c[0]+'" onclick="evSetFilter(\''+c[0]+'\')">'+c[1]+'</span>';
+      });
+      h+='</div>';
+
+      // Search bar
+      h+='<div class="evSearchRow">'+
+         '<input type="text" class="evSearchInput" placeholder="Search events or tasks..." value="'+esc(_evSearchQuery)+'" oninput="evSetSearch(this.value)">'+
+         '<button class="evSearchReset" style="display:'+(_evSearchQuery?'block':'none')+'" onclick="evSetSearch(\'\')">&times;</button>'+
+         '</div>';
+
+      h+='<div id="evFeedContent"></div>';
+      cur.innerHTML = h;
+      feedContent = document.getElementById('evFeedContent');
+    } else {
+      // Sync filter chips active class without re-rendering controls
+      const chips = cur.querySelectorAll('.evFilterChip');
+      chips.forEach(chip => {
+        if(chip.getAttribute('data-filter') === _evFilterType) {
+          chip.classList.add('active');
+        } else {
+          chip.classList.remove('active');
+        }
+      });
+      
+      // Sync search input safely without shifting focus or selection
+      const searchInput = cur.querySelector('.evSearchInput');
+      if(searchInput && searchInput.value !== _evSearchQuery) {
+        searchInput.value = _evSearchQuery;
+      }
+      
+      // Sync search reset button visibility
+      const searchReset = cur.querySelector('.evSearchReset');
+      if(searchReset) {
+        searchReset.style.display = _evSearchQuery ? 'block' : 'none';
+      }
     }
-    let h='<div class="k">Event log detail</div>';
-    h+='<div class="evPickRow"><label class="evPickLbl">Task</label>'+
-       '<select class="evSelect" onchange="evPickTask(this.value)">'+
-       taskIds.map(id=>'<option value="'+esc(id)+'"'+(id===sel?' selected':'')+'>'+esc(taskTitleById(id))+' ('+counts[id]+')</option>').join('')+
-       '</select></div>';
-    const evs=all.filter(e=>e.taskId===sel);
-    const completes=evs.filter(e=>e.kind==='complete');
-    const misses=evs.filter(e=>e.kind==='miss');
-    const subs=evs.filter(e=>e.kind==='subtask');
-    const taps=evs.filter(e=>e.kind==='habitTap');
-    const synCount=evs.filter(e=>e.synthetic).length;
-    h+='<div class="anNote">'+evs.length+' event(s) &middot; '+completes.length+' completion(s), '+misses.length+' miss(es), '+subs.length+' subtask tap(s)'+
-       (taps.length?(' , '+taps.length+' habit tap(s)'):'')+'.'+
-       (synCount? ' <b>'+synCount+'</b> backfilled (synthetic) &mdash; real days, reconstructed times.' : '')+'</div>';
-    function dayKey(ts){ const d=new Date(ts); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
-    const byDay={};
-    function dd(k){ return byDay[k]=byDay[k]||{completed:false,missed:false,subs:[],taps:0,synthetic:false,inferred:false}; }
-    completes.forEach(e=>{ const d=dd(dayKey(e.ts)); d.completed=true; d.reward=e.reward; if(e.synthetic)d.synthetic=true; if(e.inferred)d.inferred=true; });
-    misses.forEach(e=>{ const d=dd(dayKey(e.ts)); d.missed=true; if(e.synthetic)d.synthetic=true; });
-    subs.forEach(e=>{ const d=dd(dayKey(e.ts)); d.subs.push({text:e.subText,done:e.done,ts:e.ts}); if(e.synthetic)d.synthetic=true; });
-    taps.forEach(e=>{ const d=dd(dayKey(e.ts)); d.taps++; if(e.synthetic)d.synthetic=true; });
-    const days=Object.keys(byDay).sort().reverse();
-    const pages=Math.max(1,Math.ceil(days.length/EV_PAGE_SIZE));
+
+    if(!filtered.length){
+      feedContent.innerHTML='<div class="anNote" style="text-align:center;padding:16px 0;">No matching events found.</div>';
+      return;
+    }
+
+    const pages=Math.max(1,Math.ceil(filtered.length/EV_PAGE_SIZE));
     if(_evPage>=pages) _evPage=pages-1;
     const startI=_evPage*EV_PAGE_SIZE;
-    const pageDays=days.slice(startI,startI+EV_PAGE_SIZE);
-    h+='<div class="anEvDays">';
-    pageDays.forEach(k=>{
-      const d=byDay[k];
-      const status = d.completed ? '<span style="color:var(--green)">&#10003; done</span>'
-                   : d.missed   ? '<span style="color:var(--red)">&#10007; missed</span>'
-                   : '<span style="color:var(--muted)">&mdash;</span>';
-      const rew = (d.reward && d.reward.xp) ? ' &middot; +'+d.reward.xp+' XP' : '';
-      const tp = d.taps ? ' &middot; '+d.taps+' tap'+(d.taps>1?'s':'') : '';
-      const mark = d.synthetic ? ' <span class="anEvSyn" title="Backfilled from Habitica: real day, reconstructed time">~ backfill'+(d.inferred?' &middot; inferred':'')+'</span>' : '';
-      h+='<div class="anEvDay"><div class="anEvHead"><b>'+esc(k)+'</b> '+status+rew+tp+mark+'</div>';
-      if(d.subs.length){
-        const checked=d.subs.filter(s=>s.done), unchecked=d.subs.filter(s=>!s.done);
-        if(checked.length) h+='<div class="anEvSubs">'+checked.map(s=>'&#9745; '+esc(s.text)+' <span style="color:var(--muted)">@ '+timeOfDay(s.ts)+'</span>').join('<br>')+'</div>';
-        if(unchecked.length) h+='<div class="anEvSubs" style="color:var(--muted)">'+unchecked.map(s=>'&#9744; '+esc(s.text)+' (unchecked @ '+timeOfDay(s.ts)+')').join('<br>')+'</div>';
+    const pageEvents=filtered.slice(startI,startI+EV_PAGE_SIZE);
+
+    let listHtml='<div class="evFeed">';
+    pageEvents.forEach(e=>{
+      let icon = '📝';
+      let badgeClass = 'evBadge-default';
+      let badgeName = 'Event';
+      let desc = '';
+      let rightSide = '';
+
+      const cat = getEventCategory(e);
+      const titleHtml = e.taskTitle ? '<strong class="evTaskClick" onclick="evSetSearch(\'' + esc(e.taskTitle).replace(/'/g, "\\'") + '\')">' + esc(e.taskTitle) + '</strong>' : '';
+
+      if (cat === 'habit') {
+        icon = e.dir === -1 ? '➖' : '⚡';
+        badgeClass = e.dir === -1 ? 'evBadge-habit-down' : 'evBadge-habit';
+        badgeName = 'Habit';
+        const repText = e.reps && e.reps > 1 ? ' (' + e.reps + ' reps)' : '';
+        if (e.dir === -1) {
+          desc = 'Tapped negative on ' + titleHtml;
+        } else {
+          desc = 'Tapped ' + titleHtml + repText;
+        }
+      } else if (cat === 'daily') {
+        badgeName = 'Daily';
+        if (e.kind === 'miss') {
+          icon = '❌';
+          badgeClass = 'evBadge-daily-miss';
+          desc = 'Missed daily ' + titleHtml;
+        } else {
+          icon = '📅';
+          badgeClass = 'evBadge-daily';
+          const lateStr = e.late ? ' <span class="evLate">late</span>' : '';
+          desc = 'Completed daily ' + titleHtml + lateStr;
+        }
+      } else if (cat === 'todo') {
+        badgeName = 'To-do';
+        badgeClass = 'evBadge-todo';
+        icon = '☑️';
+        if (e.kind === 'subtask') {
+          icon = '↳';
+          desc = (e.done ? 'Checked' : 'Unchecked') + ' subtask <code>' + esc(e.subText || '') + '</code> on ' + titleHtml;
+        } else {
+          desc = 'Completed to-do ' + titleHtml;
+        }
+      } else if (cat === 'system') {
+        badgeName = 'System';
+        badgeClass = 'evBadge-system';
+        if (e.kind === 'import') {
+          icon = '📥';
+          desc = 'Imported backup data';
+          if (e.notes) desc += ' &middot; <span class="evNotes">' + esc(e.notes) + '</span>';
+        } else if (e.kind === 'export') {
+          icon = '📤';
+          desc = 'Exported progress data';
+          if (e.notes) desc += ' &middot; <span class="evNotes">' + esc(e.notes) + '</span>';
+        } else {
+          icon = '⚙️';
+          desc = esc(e.taskTitle || 'System action');
+        }
       }
-      h+='</div>';
+
+      if (e.reward) {
+        const parts = [];
+        if (e.reward.xp) parts.push('<span class="evGainXp">+' + Math.round(e.reward.xp) + ' XP</span>');
+        if (e.reward.gold) parts.push('<span class="evGainGold">+' + (+e.reward.gold).toFixed(1) + 'G</span>');
+        if (e.reward.mp) parts.push('<span class="evGainMp">+' + Math.round(e.reward.mp) + ' MP</span>');
+        if (parts.length) rightSide = '<div class="evRewardRow">' + parts.join(' ') + '</div>';
+      } else if ((cat === 'daily' && e.kind === 'miss') || (cat === 'habit' && e.dir === -1)) {
+        let lossVal = null;
+        if (e.dmg !== undefined) {
+          lossVal = e.dmg;
+        } else {
+          const t = S.tasks.find(x => x.id === e.taskId);
+          if (t) {
+            lossVal = missDamage(t);
+          }
+        }
+        const hpLossStr = lossVal !== null ? '-' + (+lossVal).toFixed(1) + ' HP' : 'HP Loss';
+        rightSide = '<div class="evRewardRow"><span class="evLossHp">' + hpLossStr + '</span></div>';
+      }
+
+      const date = new Date(e.ts);
+      const dateStr = date.toLocaleDateString(undefined, {month: 'short', day: 'numeric'});
+      const timeStr = String(date.getHours()).padStart(2,'0') + ':' + String(date.getMinutes()).padStart(2,'0');
+      const fullTime = dateStr + ' @ ' + timeStr;
+
+      const mark = e.synthetic ? ' <span class="anEvSyn" title="Backfilled from Habitica">~ backfill</span>' : '';
+
+      listHtml+='<div class="evRow">'+
+         '  <div class="evColIcon">'+icon+'</div>'+
+         '  <div class="evColMain">'+
+         '    <div class="evDesc">'+desc+'</div>'+
+         '    <div class="evMetaRow">'+
+         '      <span class="evBadge '+badgeClass+'">'+badgeName+'</span>'+
+         '      <span class="evTime">'+fullTime+'</span>'+
+         '      '+mark+
+         '    </div>'+
+         '  </div>'+
+         '  <div class="evColRight">'+rightSide+'</div>'+
+         '</div>';
     });
-    h+='</div>';
+    listHtml+='</div>';
+
     if(pages>1){
-      h+='<div class="evPager">'+
+      listHtml+='<div class="evPager">'+
          '<button class="evPg" '+(_evPage<=0?'disabled':'')+' onclick="evGoPage('+(_evPage-1)+')">&#8592; Newer</button>'+
-         '<span class="evPgLbl">Page '+(_evPage+1)+' / '+pages+' &middot; '+days.length+' days</span>'+
+         '<span class="evPgLbl">Page '+(_evPage+1)+' / '+pages+' &middot; '+filtered.length+' events</span>'+
          '<button class="evPg" '+(_evPage>=pages-1?'disabled':'')+' onclick="evGoPage('+(_evPage+1)+')">Older &#8594;</button>'+
          '</div>';
     }
-    cur.innerHTML=h;
+
+    if(synCount){
+      listHtml+='<div class="anNote"><b>'+synCount+'</b> event(s) in window backfilled from Habitica history.</div>';
+    }
+
+    feedContent.innerHTML=listHtml;
   }).catch(()=>{
     const cur=document.getElementById('anEventDetail'); if(!cur) return;
     cur.innerHTML='<div class="k">From IndexedDB event log</div>'+
@@ -1959,6 +2220,7 @@ function render(){
   const v=document.getElementById('view');
   v.innerHTML = TAB==='habits'?viewHabits() : TAB==='dailies'?viewDailies() : TAB==='todos'?viewTodos() : TAB==='analytics'?viewAnalytics() : viewRewards();
   if(TAB==='analytics') initAnalytics();
+  document.body.classList.toggle('tab-analytics', TAB==='analytics');
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===TAB));
   if(TAB!=='analytics') enableDragReorder();
   restoreScroll();
@@ -2421,7 +2683,12 @@ function saveTask(){
   }
   closeSheet(); save(); render();
 }
-function deleteTask(){ if(!confirm('Delete this task?'))return; S.tasks=S.tasks.filter(x=>x.id!==EDIT.id); closeSheet(); save(); render(); }
+function deleteTask(){
+  confirmDialog('Delete Task', 'Delete this task?').then(ok => {
+    if(!ok) return;
+    S.tasks=S.tasks.filter(x=>x.id!==EDIT.id); closeSheet(); save(); render();
+  });
+}
 function closeSheet(){ document.getElementById('scrim').classList.remove('show'); EDIT=null; if(VDRAFT){ VDRAFT=null; MEDIT=null; MBUILD=false; if(TAB==='analytics') refreshAnalytics(); } }
 let REDIT=null;
 function openReward(id){
@@ -2499,9 +2766,20 @@ function openSettings(){
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
-  h+='<div class="resetRow"><button class="btn resetMini" onclick="if(confirm(\'Erase ALL progress on this device? This cannot be undone.\')){localStorage.removeItem(STORE_KEY);S=freshState();save();applyWidth();closeSheet();render();}">Reset everything</button></div>';
+  h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button></div>';
   sheet.innerHTML=h;
   document.getElementById('scrim').classList.add('show');
+}
+function resetEverything() {
+  confirmDialog('Reset Everything', 'Erase ALL progress on this device? This cannot be undone.').then(ok => {
+    if(!ok) return;
+    localStorage.removeItem(STORE_KEY);
+    S=freshState();
+    save();
+    applyWidth();
+    closeSheet();
+    render();
+  });
 }
 // Tooltip delay is fixed at Instant (0); the user-facing control was removed.
 function setWidth(px){ S.prefs.width=px; applyWidth(); save(); closeOpt(); openSettings(); }
@@ -2582,6 +2860,7 @@ function saveSettings(){
 // into S — migrate() strips `events` on import). Falls back to S-only if IDB is
 // unavailable so export never fails outright.
 function exportData(){
+  logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file'});
   const finish=(eventsArr)=>{
     // Build the backup from S without mutating S; attach events for portability.
     const backup=Object.assign({}, S, {events: eventsArr||[]});
@@ -2611,27 +2890,31 @@ function importData(ev){
       // restore: replace the IDB event log entirely (clear then bulk-add) so a
       // re-import never duplicates. Done async; localStorage restore stays sync.
       const embeddedEvents = Array.isArray(data.events) ? data.events : null;
-      if(confirm('Replace current progress with the imported file?')){
+      confirmDialog('Import Progress', 'Replace current progress with the imported file?').then(ok => {
+        if(!ok) return;
         S=migrate(data); save(); applyWidth(); closeSheet(); render();
         if(embeddedEvents && typeof indexedDB!=="undefined"){
           clearAllEvents().then(()=>bulkAddEvents(embeddedEvents)).then(n=>{
+            logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Restored ' + n + ' events'});
             toast('Imported · '+n+' events restored');
             if(TAB==='analytics') render();
           });
         } else {
+          logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Imported from backup'});
           toast('Imported');
+          if(TAB==='analytics') render();
         }
-      }
-    }catch(e){ alert('That file does not look like a valid Questa backup.'); } };
+      });
+    }catch(e){ alertDialog('Error', 'That file does not look like a valid Questa backup.'); } };
   rd.readAsText(f); ev.target.value='';
 }
 function uploadFace(ev){
   const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
-  if(!/^image\/(jpeg|png|gif)$/.test(f.type)){ alert('Please choose a PNG, JPEG or GIF image.'); return; }
-  if(f.size>1048576){ alert('That image is '+(f.size/1048576).toFixed(1)+' MB. Please use one under 1 MB.'); return; }
+  if(!/^image\/(jpeg|png|gif)$/.test(f.type)){ alertDialog('Error', 'Please choose a PNG, JPEG or GIF image.'); return; }
+  if(f.size>1048576){ alertDialog('Error', 'That image is '+(f.size/1048576).toFixed(1)+' MB. Please use one under 1 MB.'); return; }
   const rd=new FileReader();
   rd.onload=()=>{ S.char.faceImg=rd.result; save(); renderStats(); openSettings(); toast('Avatar image set'); };
-  rd.onerror=()=>alert('Could not read that file.');
+  rd.onerror=()=>alertDialog('Error', 'Could not read that file.');
   rd.readAsDataURL(f);
 }
 function removeFace(){ delete S.char.faceImg; save(); renderStats(); openSettings(); toast('Image removed'); }

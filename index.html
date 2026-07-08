@@ -58,8 +58,8 @@
     background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);
     transform:translateX(-100%);animation:shine 3.2s ease-in-out infinite}
   @keyframes shine{0%,60%{transform:translateX(-100%)}100%{transform:translateX(220%)}}
-  .bar .lab{position:absolute;width:100%;text-align:center;font-size:10px;line-height:14px;
-    font-weight:700;color:#fff;text-shadow:0 1px 1px rgba(0,0,0,.5)}
+  .bar .lab{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:10px;
+    font-weight:700;color:#fff;text-shadow:-1px -1px 0 rgba(0,0,0,0.8), 1px -1px 0 rgba(0,0,0,0.8), -1px 1px 0 rgba(0,0,0,0.8), 1px 1px 0 rgba(0,0,0,0.8), 0 1px 2px rgba(0,0,0,0.9);pointer-events:none}
   body.lowhp header{animation:hpwarn 1.4s ease-in-out infinite}
   @keyframes hpwarn{0%,100%{box-shadow:none}50%{box-shadow:inset 0 0 0 2px var(--hp)}}
   main{padding:10px 10px 0;overflow-x:hidden}
@@ -189,6 +189,47 @@
     padding:5px 11px;font-size:12px;cursor:pointer}
   .anMiniFile{display:inline-flex;align-items:center;gap:2px}
   .anViewTools{display:flex;gap:8px;margin:12px 4px;justify-content:flex-end;flex-wrap:wrap}
+  .anSectionHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin: 16px 4px 8px;
+  }
+  .anSectionHeader .anSectionTitle {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .anViewToolsCompact {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .anBtnCompact {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    border-radius: 6px;
+    height: 24px;
+    padding: 0 8px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.1s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    user-select: none;
+    box-sizing: border-box;
+    line-height: 1;
+    margin: 0;
+  }
+  .anBtnCompact:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--ink);
+    border-color: var(--muted);
+  }
   .vBuilder .mLabel{margin-top:12px}
   .vSeg{margin-top:4px}
   .anDetails{margin-top:16px;border-top:1px solid var(--line);padding-top:6px}
@@ -350,21 +391,68 @@
   .deathOverlay h2{color:var(--red)}
 
   /* ---------- Analytics ---------- */
+  body.tab-analytics main {
+    overflow-x: visible;
+  }
+  .anStickyHeader {
+    position: sticky;
+    top: var(--header-height, 105px);
+    z-index: 60;
+    background: #1d1233;
+    padding: 6px 12px 6px;
+    margin: -10px -10px 6px;
+    border-bottom: 1px solid var(--line);
+    box-shadow: 0 4px 16px rgba(10,5,20,0.5);
+  }
+  body.tab-analytics .scrim {
+    padding-top: calc(var(--header-height, 105px) + var(--sticky-header-height, 60px) + 8px);
+    align-items: flex-start;
+  }
   .anWrap{padding:4px 2px 30px}
-  .anHead{display:flex;align-items:center;justify-content:space-between;margin:2px 4px 10px}
-  .anHead h2{margin:0;font-size:18px}
-  .anRangeLbl{font-size:12px;color:var(--muted)}
-  .anChips{display:flex;gap:6px;flex-wrap:wrap;margin:0 2px 10px}
+  .anHeaderRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 6px;
+  }
+  .anHeaderRow h2 {
+    margin: 0;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+  .anSubRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 4px;
+    margin-bottom: 0;
+  }
+  .anRangeLbl {
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    flex-shrink: 0;
+    background: rgba(255, 210, 0, 0.05);
+    border: 1px solid rgba(255, 210, 0, 0.15);
+    padding: 2px 8px;
+    border-radius: 6px;
+    line-height: 1.2;
+  }
+  .anChips{display:flex;gap:3px;flex-wrap:nowrap;margin:0;flex-shrink:0}
   .anChip{background:var(--panel2);border:1px solid var(--line);color:var(--muted);
-    border-radius:999px;padding:5px 12px;font-size:12px;cursor:pointer;user-select:none}
+    border-radius:5px;padding:2px 5px;font-size:10px;cursor:pointer;user-select:none;line-height:1.2}
   .anChip.on{background:var(--accent);border-color:var(--accent);color:#241043;font-weight:700}
-  .anSlider{position:relative;height:42px;margin:2px 12px 4px;touch-action:none}
-  .anTrack{position:absolute;top:18px;left:0;right:0;height:6px;border-radius:3px;background:var(--panel2);border:1px solid var(--line)}
-  .anFill{position:absolute;top:18px;height:6px;border-radius:3px;background:var(--accent)}
-  .anHandle{position:absolute;top:9px;width:24px;height:24px;margin-left:-12px;border-radius:50%;
-    background:var(--ink);border:2px solid var(--accent);cursor:grab;box-shadow:0 2px 6px rgba(0,0,0,.4);touch-action:none}
+  .anSlider{position:relative;height:12px;margin:0 4px;touch-action:none;flex-grow:1}
+  .anTrack{position:absolute;top:4px;left:0;right:0;height:4px;border-radius:2px;background:var(--panel2);border:1px solid var(--line)}
+  .anFill{position:absolute;top:4px;height:4px;border-radius:2px;background:var(--accent)}
+  .anHandle{position:absolute;top:-1px;width:12px;height:12px;margin-left:-6px;border-radius:50%;
+    background:var(--ink);border:2px solid var(--accent);cursor:grab;box-shadow:0 1px 4px rgba(0,0,0,.4);touch-action:none}
   .anHandle:active{cursor:grabbing;transform:scale(1.12)}
-  .anTicks{position:absolute;bottom:0;left:0;right:0;display:flex;justify-content:space-between;font-size:10px;color:var(--muted)}
+  .anTicks{display:none}
   .anCards{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 2px}
   .anCard{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px 12px}
   .anCard .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
@@ -401,14 +489,189 @@
   .anStreak .s{font-size:14px;color:var(--gold);font-weight:700;white-space:nowrap}
   .anNote{font-size:11px;color:var(--muted);margin:6px 4px;line-height:1.4}
   /* event-log detail (IndexedDB-driven) */
-  .anEvDays{display:flex;flex-direction:column;gap:8px;margin-top:8px}
-  .anEvDay{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
-  .anEvHead{font-size:13px;margin-bottom:2px}
-  .anEvSubs{font-size:12px;color:var(--ink);margin-top:4px;line-height:1.5}
+  .evFilterRow {
+    display: flex;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 3px;
+    gap: 3px;
+    margin-top: 10px;
+    margin-bottom: 10px;
+  }
+  .evFilterChip {
+    flex: 1;
+    color: var(--muted);
+    border-radius: 8px;
+    padding: 6px 2px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    transition: all 0.12s ease;
+    border: none;
+  }
+  .evFilterChip:hover {
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .evFilterChip.active {
+    background: var(--accent);
+    color: #241043;
+    font-weight: 700;
+  }
+  @media (max-width: 480px) {
+    .evFilterChip {
+      font-size: 10px;
+      gap: 2px;
+      padding: 5px 1px;
+    }
+  }
+  .evSearchRow {
+    position: relative;
+    margin: 4px 0 12px;
+    display: flex;
+    align-items: center;
+  }
+  .evSearchInput {
+    width: 100%;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    border-radius: 8px;
+    padding: 8px 30px 8px 10px;
+    font-size: 12px;
+    outline: none;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  }
+  .evSearchInput:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(255, 210, 0, 0.1);
+  }
+  .evSearchReset {
+    position: absolute;
+    right: 8px;
+    font-size: 14px;
+    color: var(--muted);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+  }
+  .evFeed {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .evRow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 8px 10px;
+    transition: background-color 0.1s ease;
+  }
+  .evRow:hover {
+    background: rgba(255,255,255,0.02);
+  }
+  .evColIcon {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--line);
+  }
+  .evColMain {
+    flex-grow: 1;
+    min-width: 0;
+  }
+  .evColRight {
+    flex-shrink: 0;
+    text-align: right;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+  }
+  .evMetaRow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .evDesc {
+    font-size: 12px;
+    color: var(--ink);
+    line-height: 1.35;
+    word-break: break-word;
+  }
+  .evDesc code {
+    background: rgba(255,255,255,0.05);
+    padding: 1px 3px;
+    border-radius: 3px;
+    font-family: monospace;
+  }
+  .evTaskClick {
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .evTaskClick:hover {
+    text-decoration: underline;
+  }
+  .evBadge {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .evBadge-habit { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
+  .evBadge-habit-down { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+  .evBadge-daily { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+  .evBadge-daily-miss { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+  .evBadge-todo { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+  .evBadge-system { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+  .evRewardRow {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .evGainXp { font-size: 10px; font-weight: 700; color: #ffd200; }
+  .evGainGold { font-size: 10px; font-weight: 700; color: #ffbe5c; }
+  .evGainMp { font-size: 10px; font-weight: 700; color: #50b5e9; }
+  .evLossHp { font-size: 10px; font-weight: 700; color: #f74e52; }
+  .evLate {
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
+    border-radius: 3px;
+    padding: 0px 3px;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .evNotes {
+    color: var(--muted);
+    font-style: italic;
+  }
   .anEvSyn{font-size:10px;color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:1px 5px;margin-left:4px;white-space:nowrap}
-  .evPickRow{display:flex;align-items:center;gap:8px;margin:8px 0 4px}
-  .evPickLbl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
-  .evSelect{flex:1;background:#2a1947;border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:7px 8px;font-size:13px}
   .evPager{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px}
   .evPg{background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer}
   .evPg:disabled{opacity:.4;cursor:default}
@@ -489,6 +752,17 @@
   <p class="small">You ran out of Health. You lost a level and some gold, and your HP was restored. Be careful out there.</p>
   <button class="btn primary" onclick="document.getElementById('deathOverlay').classList.remove('show')">Continue</button>
 </div></div>
+
+<div class="deathOverlay" id="confirmOverlay" style="background:rgba(10,5,20,.88);z-index:100">
+  <div class="card" style="background:var(--bg);border:1px solid var(--line);border-radius:16px;padding:24px;width:100%;max-width:340px;text-align:center;box-shadow:0 12px 36px rgba(0,0,0,.6)">
+    <h2 id="confirmTitle" style="margin-top:0;font-size:18px;color:var(--ink)">Confirm Action</h2>
+    <p class="small" id="confirmText" style="margin:14px 0 20px;font-size:13px;color:var(--muted);line-height:1.4"></p>
+    <div class="settingsRow" style="display:flex;gap:8px;margin-bottom:0">
+      <button class="btn primary" id="confirmYesBtn" style="flex:1">Yes</button>
+      <button class="btn ghost" id="confirmNoBtn" style="flex:1">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>

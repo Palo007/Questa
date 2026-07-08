@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-1817 CET";
+const APP_VERSION = "v2026.07.08-2131 CET";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -2461,14 +2461,14 @@ function enableTouchDrag(card){
     const onEnd=()=>{
       clearTimeout(_tTimer); _tTimer=null;
       card.removeEventListener('touchmove',onMove);
-      card.removeEventListener('touchend',onEnd);
-      card.removeEventListener('touchcancel',onEnd);
+      window.removeEventListener('touchend',onEnd);
+      window.removeEventListener('touchcancel',onEnd);
       if(_tActive){ endTouchDrag(); }              // finish an active drag (no fling)
       else if(_isScroll){ startInertia(_vel); }    // coast after a manual scroll flick
     };
     card.addEventListener('touchmove',onMove,{passive:false});
-    card.addEventListener('touchend',onEnd);
-    card.addEventListener('touchcancel',onEnd);
+    window.addEventListener('touchend',onEnd);
+    window.addEventListener('touchcancel',onEnd);
   },{passive:false});
 }
 
@@ -2498,7 +2498,7 @@ function moveTouchDrag(x,y){
   if(_tGhost) _tGhost.style.top=(y-_tGrabDY)+'px';
   const el=document.elementFromPoint(x,y);       // ghost is pointer-events:none
   const over=el && el.closest('.task[draggable="true"]');
-  if(over && over!==_tDrag && over.dataset.list===_dragList){
+  if(over && over!==_tDrag && over!==_tGhost && over.dataset.list===_dragList){
     const rr=over.getBoundingClientRect();
     const after=(y-rr.top)/rr.height > 0.5;
     flipReorder(()=>{ over.parentNode.insertBefore(_tDrag, after?over.nextSibling:over); });

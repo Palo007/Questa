@@ -87,7 +87,7 @@ function freshState(){
            lvl:1, xp:0, hp:50, maxHp:50, mp:0, gold:0 },
     tasks:[], rewards:[], tags:[],
     lastCron: dayStamp(new Date()),
-    history:[], charHistory:[], prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true }
+    history:[], charHistory:[],     prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardPad:5 }
   };
 }
 let S = load();
@@ -98,7 +98,7 @@ function load(){
 }
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
-  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true}, s.prefs||{});
+  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardPad:5}, s.prefs||{});
   // Tooltip delay is fixed at Instant; the control was removed, so normalize any saved value.
   out.prefs.tipDelay=0;
   // Card drag delay now lives on a 100-300 ms slider; clamp legacy values into range.
@@ -317,6 +317,7 @@ function logCharSnapshot(){
   S.charHistory.push({date:Date.now(), hp:c.hp, maxHp:c.maxHp, xp:c.xp, mp:c.mp, gold:c.gold, lvl:c.lvl});
 }
 function applyWidth(){ document.documentElement.style.setProperty('--appw',(S.prefs.width||480)+'px'); }
+function applyCardPad(){ document.documentElement.style.setProperty('--body-pad-y',(S.prefs.cardPad||5)+'px'); }
 
 const uid = ()=> Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 function dayStamp(d){ return d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate(); }
@@ -2885,6 +2886,7 @@ function openSettings(){
   h+=settingRow('notes','Note lines','Lines of a task\'s notes shown in the list preview.',(nl===0?'Off':(''+nl)));
   h+=settingRow('drag','Drag delay','Hold time before a card lifts for reordering on touch.',(ddv+' ms'));
   h+=settingRow('haptics','Haptics','Vibration on taps and completions.',(S.prefs.haptics===false?'Off':'On'));
+  h+=settingRow('cardPad','Card padding','Vertical space above and below each habit, daily and to-do card.',(S.prefs.cardPad||5)+' px');
   h+='</div>';
   h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
@@ -2904,6 +2906,7 @@ function resetEverything() {
     S=freshState();
     save();
     applyWidth();
+    applyCardPad();
     closeSheet();
     render();
   });
@@ -2912,6 +2915,7 @@ function resetEverything() {
 function setWidth(px){ S.prefs.width=px; applyWidth(); save(); closeOpt(); openSettings(); }
 function setNotesLines(n){ S.prefs.notesLines=n; save(); closeOpt(); openSettings(); }
 function setHaptics(n){ S.prefs.haptics=!!n; save(); closeOpt(); openSettings(); }
+function setCardPad(px){ let n=parseInt(px,10); if(!isFinite(n)) n=5; n=Math.min(80,Math.max(3,n)); S.prefs.cardPad=n; applyCardPad(); save(); openSettings(); }
 // --- Settings rows + foreground options menu -------------------------------
 // Build one tappable row: a label + short description on the left, current
 // value + chevron on the right. Tapping opens the matching options menu.
@@ -2951,6 +2955,18 @@ function openOpt(key){
         'onchange="setDragDelay(this.value)">'+
       '<div class="sEnds"><span>100</span><span>300</span></div>'+
       '</div>';
+  } else if(key==='cardPad'){
+    const cp=(S.prefs.cardPad==null?5:Math.min(80,Math.max(3,S.prefs.cardPad)));
+    h+='<h4>Card padding</h4>';
+    h+='<p class="optHint">Vertical space above and below each habit, daily and to-do card (3–80\u00a0px). Doesn\u2019t affect width.</p>';
+    h+='<div class="optSlide">'+
+      '<div class="sVal"><span id="cpVal">'+cp+'</span> px</div>'+
+      '<input type="range" id="cpRange" min="3" max="80" step="1" value="'+cp+'" '+
+        'oninput="S.prefs.cardPad=+this.value;applyCardPad();document.getElementById(\'cpVal\').textContent=this.value" '+
+        'onchange="setCardPad(+this.value)">'+
+      '<div class="sEnds"><span>3</span><span>80</span></div>'+
+      '</div>';
+    h+='<button type="button" class="btn ghost" style="margin-top:10px" onclick="setCardPad(5)">Reset to default</button>';
   }
   if(key==='haptics'){
     const hv=S.prefs.haptics!==false;
@@ -3019,7 +3035,7 @@ function importData(ev){
       const embeddedEvents = Array.isArray(data.events) ? data.events : null;
       confirmDialog('Import Progress', 'Replace current progress with the imported file?').then(ok => {
         if(!ok) return;
-        S=migrate(data); save(); applyWidth(); closeSheet(); render();
+        S=migrate(data); save(); applyWidth(); applyCardPad(); closeSheet(); render();
         if(embeddedEvents && typeof indexedDB!=="undefined"){
           clearAllEvents().then(()=>bulkAddEvents(embeddedEvents)).then(n=>{
             logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Restored ' + n + ' events'});
@@ -3116,6 +3132,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
 document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };
 window.addEventListener('resize', updateHeaderHeightVar);
 applyWidth();
+applyCardPad();
 startDay();
 updateHeaderHeightVar();
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }

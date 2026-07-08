@@ -78,6 +78,12 @@
   .filterIcon.open{background:var(--accent);color:#1a0f2e;border-color:var(--accent)}
   .filterIcon.active{color:var(--accent);border-color:var(--accent)}
   .filterIcon.active.open{color:#1a0f2e}
+  .searchBox{display:flex;align-items:center;position:relative;margin-right:4px}
+  .searchBox svg{color:var(--muted);cursor:pointer;flex:none;transition:color .15s}
+  .searchBox svg:hover{color:var(--ink)}
+  .searchBox input[type="text"]{background:transparent;border:none;color:var(--ink);width:110px;padding:2px 6px;margin-left:4px;font-size:14px;
+    outline:none;box-shadow:none;}
+  .searchBox input[type="text"]::placeholder{color:var(--muted)}
   .addBtn{background:var(--accent);border:none;color:#1a0f2e;
     border-radius:10px;font-size:24px;font-weight:300;width:52px;height:34px;cursor:pointer;
     display:flex;align-items:center;justify-content:center;padding:0;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,0.3);transition:transform .15s}

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-1627 CET";
+const APP_VERSION = "v2026.07.08-1704 CET";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -659,6 +659,29 @@ let FILTER=S.prefs.filter;
 let SORT=S.prefs.sort;
 let TAGFILTER=S.prefs.tagFilter;
 let FILTEROPEN=S.prefs.filterOpen; let SORTOPEN=S.prefs.sortOpen;
+let SEARCH_TERM = {};
+let FOCUS_ID = null, FOCUS_SEL_START = 0, FOCUS_SEL_END = 0;
+function saveFocus() {
+  if (document.activeElement && document.activeElement.tagName === 'INPUT') {
+    FOCUS_ID = document.activeElement.id;
+    FOCUS_SEL_START = document.activeElement.selectionStart;
+    FOCUS_SEL_END = document.activeElement.selectionEnd;
+  } else { FOCUS_ID = null; }
+}
+function restoreFocus() {
+  if (FOCUS_ID) {
+    const el = document.getElementById(FOCUS_ID);
+    if (el) {
+      el.focus();
+      try { el.setSelectionRange(FOCUS_SEL_START, FOCUS_SEL_END); } catch(e){}
+    }
+  }
+}
+function applySearch(list, tabKey) {
+  const q = SEARCH_TERM[tabKey];
+  if (!q) return list;
+  return list.filter(t => (t.title||'').toLowerCase().includes(q) || (t.notes||'').toLowerCase().includes(q));
+}
 function toggleFilter(){ FILTEROPEN=!FILTEROPEN; S.prefs.filterOpen=FILTEROPEN; save(); render(); }
 function toggleSort(){ SORTOPEN=!SORTOPEN; S.prefs.sortOpen=SORTOPEN; save(); render(); }
 const EXPANDED={}; // taskId -> bool (checklist expanded on card)
@@ -752,15 +775,38 @@ function habitCard(t){
     (down?'<div class="check hbtn down" onclick="scoreHabit(\''+t.id+'\',-1,event)">−</div>':'<div class="check hbtn off">−</div>')+'</div>';
 }
 function sortActiveFunc(tab){ return (SORT&&SORT[tab]&&SORT[tab]!=="manual"); }
-function colTitle(title, addType){
-  const tabKey = addType==='habit'?'habits':addType==='daily'?'dailies':'todos';
-  const defaultVal = tabKey==='todos'?'active':'all';
-  const filterActive = FILTER[tabKey]!==defaultVal || (S.tags && S.tags.length > 0 && S.prefs.tagFilter && S.prefs.tagFilter[tabKey] && S.prefs.tagFilter[tabKey].length > 0);
-  const sortActive = sortActiveFunc(tabKey);
-  return '<div class="colTitle"><h2>'+title+'</h2>'+
-    '<button class="filterIcon'+(FILTEROPEN?' open':'')+(filterActive?' active':'')+'" title="Filter" onclick="toggleFilter()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg></button>'+
-    '<button class="filterIcon'+(SORTOPEN?' open':'')+(sortActive?' active':'')+'" title="Sort" onclick="toggleSort()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg></button>'+
-    '<button class="addBtn" onclick="openEdit(null,\''+addType+'\')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button></div>';
+function colTitle(title, addType, customTabKey){
+  const tabKey = addType==='habit'?'habits':addType==='daily'?'dailies':addType==='todo'?'todos':customTabKey;
+  let filterActive = false, sortActive = false;
+  if(tabKey && FILTER[tabKey]){
+    const defaultVal = tabKey==='todos'?'active':'all';
+    filterActive = FILTER[tabKey]!==defaultVal || (S.tags && S.tags.length > 0 && S.prefs.tagFilter && S.prefs.tagFilter[tabKey] && S.prefs.tagFilter[tabKey].length > 0);
+    sortActive = sortActiveFunc(tabKey);
+  }
+  let h = '<div class="colTitle"><h2>'+title+'</h2>';
+  if(tabKey) {
+    const q = SEARCH_TERM[tabKey] || '';
+    h += '<div class="searchBox"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="this.nextElementSibling.focus()"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>'+
+      '<input type="text" id="searchInput_'+tabKey+'" placeholder="Search..." value="'+esc(q)+'" oninput="SEARCH_TERM[\''+tabKey+'\']=this.value.toLowerCase(); render();">';
+    if (q) {
+      h += '<svg class="clearSearch" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" onclick="SEARCH_TERM[\''+tabKey+'\']=\'\'; render();"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+    }
+    h += '</div>';
+  }
+  if (addType || customTabKey === 'rewards') {
+    if (addType) {
+      h += '<button class="filterIcon'+(FILTEROPEN?' open':'')+(filterActive?' active':'')+'" title="Filter" onclick="toggleFilter()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg></button>';
+    }
+    h += '<button class="filterIcon'+(SORTOPEN?' open':'')+(sortActive?' active':'')+'" title="Sort" onclick="toggleSort()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg></button>';
+    
+    if (addType) {
+      h += '<button class="addBtn" onclick="openEdit(null,\''+addType+'\')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button>';
+    } else {
+      h += '<button class="addBtn" onclick="openReward(null)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button>';
+    }
+  }
+  h += '</div>';
+  return h;
 }
 function filterBar(tab, opts){
   if(!FILTEROPEN) return '';
@@ -865,6 +911,7 @@ function viewHabits(){
   const bar=filterBar('habits',[['All','all'],['Weak','weak'],['Strong','strong']]);
   habits=applyTagFilter(habits,'habits');
   habits=sortList(habits,'habits');
+  habits=applySearch(habits,'habits');
   return colTitle('Habits','habit')+bar+sortBar('habits')+tagFilterBar('habits')+
     (habits.length?habits.map(habitCard).join(''):'<div class="empty">Nothing matches this filter.</div>');
 }
@@ -877,6 +924,7 @@ function viewDailies(){
   const bar=filterBar('dailies',[['All','all'],['Due','due'],['Not Due','notdue']]);
   dailies=applyTagFilter(dailies,'dailies');
   dailies=sortList(dailies,'dailies');
+  dailies=applySearch(dailies,'dailies');
   return colTitle('Dailies','daily')+bar+sortBar('dailies')+tagFilterBar('dailies')+
     (dailies.length?dailies.map(taskCard).join(''):'<div class="empty">Nothing matches this filter.</div>');
 }
@@ -889,6 +937,7 @@ function viewTodos(){
   else list=S.tasks.filter(t=>t.type==='todo' && !t.done);
   list=applyTagFilter(list,'todos');
   list=sortList(list,'todos');
+  list=applySearch(list,'todos');
   return colTitle('To-Dos','todo')+bar+sortBar('todos')+tagFilterBar('todos')+
     (list.length?list.map(taskCard).join(''):'<div class="empty">Nothing matches this filter.</div>');
 }
@@ -899,12 +948,11 @@ function viewRewards(){
     '<div class="check" onclick="buyShopItem(\''+i.id+'\')" title="Buy">'+i.icon+'</div>'+
     '<div class="body" onclick="buyShopItem(\''+i.id+'\')"><div class="ttl">'+i.title+'</div>'+
     '<div class="meta"><span class="pill">'+i.cost+' gold</span><span>'+i.desc+'</span></div></div></div>').join('');
-  h+='<div class="colTitle"><h2>Your Rewards</h2>'+
-    '<button class="filterIcon'+(SORTOPEN?' open':'')+(sortActiveFunc('rewards')?' active':'')+'" title="Sort" onclick="toggleSort()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg></button>'+
-    '<button class="addBtn" onclick="openReward(null)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button></div>'+
+  h+= colTitle('Your Rewards', null, 'rewards') +
     '<div class="small" style="margin:0 4px 10px">Spend gold on real-life rewards you define yourself.</div>'+sortBar('rewards');
   const _rw=sortList(S.rewards,'rewards');
-  h+= _rw.length ? _rw.map(r=>'<div class="task" draggable="'+(dragOK('reward')?'true':'false')+'" data-id="'+r.id+'" data-list="rewards"><div class="valdot" style="background:var(--gold)"></div>'+
+  const searchRw = applySearch(_rw, 'rewards');
+  h+= searchRw.length ? searchRw.map(r=>'<div class="task" draggable="'+(dragOK('reward')?'true':'false')+'" data-id="'+r.id+'" data-list="rewards"><div class="valdot" style="background:var(--gold)"></div>'+
     '<div class="check coin" onclick="buyReward(\''+r.id+'\')" title="Buy">'+COIN_SVG+'</div>'+
     '<div class="body" onclick="openReward(\''+r.id+'\')"><div class="ttl">'+esc(r.title)+'</div>'+
     '<div class="meta"><span class="pill">'+r.cost+' gold</span>'+(r.notes?'<span>📝</span>':'')+'</div></div></div>').join('')
@@ -2218,6 +2266,7 @@ function restoreScroll(){
   requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo(0,y)));
 }
 function render(){
+  saveFocus();
   // tearing down #view orphans any in-flight drag node; clear all drag state
   // first so a lingering ghost/listeners can't freeze the next screen.
   if(typeof resetDragState==='function') resetDragState();
@@ -2229,6 +2278,7 @@ function render(){
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===TAB));
   if(TAB!=='analytics') enableDragReorder();
   restoreScroll();
+  restoreFocus();
 }
 // persist scroll continuously (lightweight, debounced)
 let _scrollT=null;

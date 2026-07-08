@@ -1,70 +1,100 @@
-# Installing Questa fullscreen on Android
+# Questa Synchronization & Integration Guide
 
-Goal: tap the home-screen icon and Questa opens **maximized — no address bar, no
-browser buttons, no Android status bar.** The manifest is set to `fullscreen`, so the
-only thing you need to do is install it as an app over a real (HTTPS) link.
-
-> Why a link and not the file: Android only offers "Install app" — the thing that
-> strips all browser UI — when the page is served over **HTTPS or localhost**.
-> Opening `index.html` as a file gives you a browser tab with chrome, not an app.
-> The host is used **once** for install; afterwards Questa runs fully offline and all
-> data stays on your phone.
+This guide documents **Option B: The Git Remote Pull Method (Semi-Automated)** to seamlessly sync your updates from Google AI Studio into your existing GitHub repository using VS Code, including instructions for resolving initial merge conflicts.
 
 ---
 
-## Step by step (≈3 minutes)
+## 1. Quick Setup in VS Code
 
-### 1. Put the files online (on your computer)
+You can run these commands directly inside the **VS Code Terminal** (``Ctrl + ` `` or ``Cmd + ` ``).
 
-The four files must stay together: `index.html`, `manifest.json`, `sw.js`, `icon.svg`.
+### Step 1: Add the AI Studio Shared Build as a Remote
+Add a new git remote pointing to the git repository of your AI Studio applet:
+```bash
+git remote add questa-temp-sync https://github.com/aistudio-build/2d556de8-722e-4215-9905-a9ba6fd886f0.git
+```
 
-1. Go to **https://app.netlify.com/drop** in any browser. (No account needed.)
-2. Select all four files (or the folder) and **drag them onto the page**.
-3. Netlify gives you a link like `https://questa-abc123.netlify.app`. Leave the tab open.
+### Step 2: Fetch the Latest Changes
+```bash
+git fetch questa-temp-sync
+```
 
-(Alternatives that work the same way: **tiiny.host**, or **GitHub Pages**.)
-
-### 2. Install on the phone (Chrome on Android)
-
-1. Open that `https://…` link in **Chrome** on your phone.
-2. Tap the **⋮ menu** (top-right).
-3. Tap **"Add to Home screen"**, then choose **"Install"** when it appears.
-   - If you see "Add to Home screen" but not "Install", tap it anyway — on a valid
-     PWA it still creates the app launcher. Make sure you're in Chrome, not a
-     reader/incognito mode.
-4. A Questa icon appears on your home screen.
-
-### 3. Launch it
-
-Tap the home-screen icon. Questa opens **edge-to-edge and maximized** — no browser
-elements, no status bar. The first launch caches everything; after that it works
-with no internet.
+### Step 3: Trigger the Merge (Allowing Unrelated Histories)
+Since the local and remote repositories don't share a common commit history initially, you must allow unrelated histories on the first merge:
+```bash
+git merge questa-temp-sync/main --allow-unrelated-histories -m "Sync updates from AI Studio"
+```
 
 ---
 
-## If it doesn't go fullscreen
+## 2. Resolving the Initial Merge Conflicts
 
-- **Address bar still shows** → you opened the link as a bookmark/tab, not via
-  "Install". Delete the icon, reinstall using the ⋮ → Install step.
-- **Status bar (clock/battery) still visible** → some Android skins ignore
-  `fullscreen` and fall back to `standalone` (no browser bar, but status bar stays).
-  That's a device limitation, not a bug; the app is still chrome-free.
-- **Only Samsung Internet available** → it supports install too: **≡ menu → Add page
-  to → Home screen**. Chrome gives the most reliable fullscreen result.
-- **Changed the files and want the update** → re-drag to Netlify (or your host),
-  open the link once in Chrome to let the service worker update, then relaunch.
+During the first sync, Git will detect conflicts because the same files (`app.js`, `index.html`, `.gitignore`, `sw.js`, and icons) exist in both trees but don't share history. Here is how to clean them up cleanly:
+
+### A. Binary Files (Icons)
+Git cannot automatically merge binary files (`icon-192.png` and `icon-512.png`). You should resolve these conflicts by choosing the latest assets from the AI Studio workspace:
+
+To accept the AI Studio version (incoming changes):
+```bash
+git checkout --theirs icon-192.png icon-512.png
+git add icon-192.png icon-512.png
+```
+
+### B. Text Files (`.gitignore`, `app.js`, `index.html`, `sw.js`)
+Open each conflicting file in VS Code. VS Code's **Source Control Tab** will list these under "Merge Changes". Clicking on any of these files will open the interactive merge conflict editor.
+
+1. **`.gitignore`**:
+   - You want to keep the custom whitelisting rules that ignore unnecessary workspace cruft but track the core files.
+   - Choose **Accept Incoming Change** (from AI Studio) or keep the version with the whitelist rule.
+   - Stage the file once resolved: `git add .gitignore`
+
+2. **`app.js`, `index.html`, `sw.js`**:
+   - The AI Studio builds contain all the new features (e.g. customized scrollable layouts, optimized buttons, and XP/Gold/MP/HP indicators).
+   - In almost all cases, you should **Accept Incoming Change** (the version from `questa-temp-sync/main`) so that you get the latest polished application state.
+   - If you have any custom configurations in your local main branch, you can copy-paste them in or choose "Accept Both Changes" and adjust manually.
+   - Stage the files:
+     ```bash
+     git add app.js index.html sw.js
+     ```
+
+### C. Commit the Resolved Merge
+Once all conflicts are resolved and staged (which you can verify via `git status` showing all green/staged files), complete the merge commit:
+```bash
+git commit -m "Merge and resolve conflicts with AI Studio"
+```
 
 ---
 
-## Moving progress between devices
+## 3. Seamless Future Syncs (Zero Conflicts)
 
-1. In Questa: **gear icon (top-right) → Export** → save `questa-backup-YYYYMMDD.json`.
-2. On the other phone, install Questa, open **gear → Import**, pick the file, confirm.
+For all future updates, syncing will be extremely simple and conflict-free because Git now understands the shared history:
 
-Export regularly — uninstalling the app or clearing its data erases the on-device
-save, and the export file is your only backup.
+1. Fetch changes:
+   ```bash
+   git fetch questa-temp-sync
+   ```
+2. Merge changes:
+   ```bash
+   git merge questa-temp-sync/main -m "Sync updates from AI Studio"
+   ```
+3. Push to your main GitHub repository:
+   ```bash
+   git push origin main
+   ```
 
 ---
 
-100% local. No account, no server holds your data. Styled after Habitica with original
-assets; not affiliated with Habitica.
+## 4. One-Line PowerShell Command (For Automated & Smooth Syncs)
+
+If you are using PowerShell on Windows (or inside the VS Code Terminal), you can run this robust **single-line command** to fetch, automatically merge (resolving any line conflicts in favor of the incoming AI Studio build), and push directly to your public repository:
+
+```powershell
+git checkout main; git fetch questa-temp-sync; git merge -X theirs --allow-unrelated-histories questa-temp-sync/main -m "Sync updates from AI Studio"; git push origin main
+```
+
+### Why this is completely safe & error-free:
+- **`git checkout main`**: Ensures you are on your primary branch before running the sync.
+- **`git fetch questa-temp-sync`**: Safely retrieves the latest commits from the AI Studio workspace.
+- **`-X theirs`**: This is the magic flag! In the event of any line-by-line conflict, Git will **automatically choose the incoming AI Studio changes** as the winner, bypassing manual merge reviews.
+- **`--allow-unrelated-histories`**: Ensures that even on the very first sync, the command will not error out with an "unrelated histories" warning.
+- **`;`**: Powershell's command chainer, ensuring each command runs sequentially.

@@ -1,20 +1,53 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# ⚔️ Questa — Gamified Habit Tracker RPG
 
-# Run and deploy your AI Studio app
+**Questa** is a highly polished, offline-first gamified habit and productivity tracker styled after classic fantasy RPGs. It transforms your daily routine, self-discipline, and to-do lists into an immersive role-playing experience. Form positive habits, complete your daily quests, and vanquish your real-life tasks to gain experience, earn gold, and level up your warrior wizard avatar!
 
-This contains everything you need to run your app locally.
+---
 
-View your app in AI Studio: https://ai.studio/apps/2d556de8-722e-4215-9905-a9ba6fd886f0
+## 🎮 Immersive RPG Mechanics
 
-## Run Locally
+- **Level & Classes**: Start your journey as a humble level 1 adventurer and advance. Rise to power and watch your level, health, and mana grow.
+- **Dynamic Stats Canvas**:
+  - ❤️ **HP (Health Points)**: Failing to complete your scheduled Dailies deals damage! Drink potions from the Shop to recover before a tragic death wipes your gold and levels.
+  - 💛 **XP (Experience Points)**: Gain XP by checking off Habits, completing Dailies, and conquering To-Dos.
+  - 🪙 **Gold / Coin Economy**: Earn gold for your hard work and spend it in the built-in Shop on survival potions or customizable rewards.
+- **Customizable Avatar**: Match your playstyle with beautifully styled, customizable wizard avatars and real-time visual face updates.
+- **Daily Upkeep checks**: Wake up to a morning resolution page summarizing yesterday's missed dailies, checking off your active streaks, and deducting health seamlessly.
 
-**Prerequisites:**  Node.js
+---
 
+## 📊 Advanced Analytics & Custom Views Builder
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+Questa includes a powerhouse analytics suite allowing you to build, customize, and configure bespoke visualization dashboards:
+
+- **Bento-Style Dashboards**: Beautiful, responsive layout featuring multiple data grids and visual metrics.
+- **Sparklines & Charts**: Uses custom responsive SVG visualizations for sparklines, trends, and progress paths.
+- **Heatmaps**: Includes an interactive activity heatmap detailing your completion intensity over custom ranges (7d, 30d, 90d, 180d, 1y, All).
+- **Custom View Creator**:
+  - Filter by specific tasks, habits, dailies, or to-dos.
+  - Group by **Day, Week, Month, Tag, or Type**.
+  - Choose layouts: **List, Bar, Line, or Heatmap**.
+  - Completely customizable with full clone, edit, cancel, and delete controls.
+
+---
+
+## 📱 Mobile-First Responsive Design
+
+Crafted with desktop-first precision and mobile-first touch fluidity:
+- **Scroll-Lock Modals**: Beautiful overlay sheets that perfectly fit all screens. Long forms adapt, scroll independently, and respect touch limits.
+- **Optimized Controls**: High-contrast, beautifully padded tap targets, rounded segments, and micro-animations designed to feel fast, native, and premium.
+- **Fluid Drag-and-Drop**: Reorder your daily list easily with high-performance grab-and-drag interactions.
+
+---
+
+## ⚙️ Offline Architecture & Portability
+
+- **100% Client-Side & Local**: No logins, no tracking, and no external server overhead.
+- **Durable Local Storage**: Fully cached state engine handles updates and page reloads instantly.
+- **Data Portability**: Full support for raw JSON export and import to keep your data completely safe, private, and transferable.
+
+---
+
+## 🛠️ Syncing and Contributing
+
+For a detailed step-by-step guide on how to safely sync updates from the Google AI Studio builder into your existing public GitHub repository, check out the [INSTALL.md](./INSTALL.md) file.

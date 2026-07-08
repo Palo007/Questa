@@ -86,15 +86,25 @@ For all future updates, syncing will be extremely simple and conflict-free becau
 
 ## 4. One-Line PowerShell Command (For Automated & Smooth Syncs)
 
-If you are using PowerShell on Windows (or inside the VS Code Terminal), you can run this robust **single-line command** to fetch, automatically merge (resolving any line conflicts in favor of the incoming AI Studio build), and push directly to your public repository:
+If you have uncommitted local changes on your computer (e.g., a modified `.gitignore`), Git will abort the merge to protect your files. Choose one of the two PowerShell one-liners below to run the sync smoothly depending on your needs:
 
+### Option A: The "Clean Slate" Sync (Recommended)
+This discards any local uncommitted files/changes and guarantees a 100% clean, error-free overwrite using the polished AI Studio builds:
 ```powershell
-git checkout main; git fetch questa-temp-sync; git merge -X theirs --allow-unrelated-histories questa-temp-sync/main -m "Sync updates from AI Studio"; git push origin main
+git reset --hard HEAD; git checkout main; git fetch questa-temp-sync; git merge -X theirs --allow-unrelated-histories questa-temp-sync/main -m "Sync updates from AI Studio"; git push origin main
 ```
 
-### Why this is completely safe & error-free:
-- **`git checkout main`**: Ensures you are on your primary branch before running the sync.
-- **`git fetch questa-temp-sync`**: Safely retrieves the latest commits from the AI Studio workspace.
-- **`-X theirs`**: This is the magic flag! In the event of any line-by-line conflict, Git will **automatically choose the incoming AI Studio changes** as the winner, bypassing manual merge reviews.
-- **`--allow-unrelated-histories`**: Ensures that even on the very first sync, the command will not error out with an "unrelated histories" warning.
-- **`;`**: Powershell's command chainer, ensuring each command runs sequentially.
+### Option B: The "Keep My Local Edits" Sync
+This temporarily stashes your uncommitted local edits, fetches and merges the AI Studio updates, and then restores your local modifications back on top:
+```powershell
+git stash; git checkout main; git fetch questa-temp-sync; git merge -X theirs --allow-unrelated-histories questa-temp-sync/main -m "Sync updates from AI Studio"; git stash pop; git push origin main
+```
+
+---
+
+### Why these commands are completely robust:
+- **`git reset --hard HEAD`**: Clears any uncommitted local noise that blocks the merge (Option A).
+- **`git stash` / `git stash pop`**: Safely bookmarks your local code before merging and reapplies it after (Option B).
+- **`git checkout main`**: Confirms you are on your primary branch.
+- **`-X theirs`**: This is the magic Git merge strategy! In the event of any line-by-line conflict, Git will **automatically choose the incoming AI Studio changes** as the winner, eliminating manual merge screens.
+- **`--allow-unrelated-histories`**: Guarantees Git won't fail if this is your very first sync.

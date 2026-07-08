@@ -62,20 +62,23 @@
     font-weight:700;color:#fff;text-shadow:-1px -1px 0 rgba(0,0,0,0.8), 1px -1px 0 rgba(0,0,0,0.8), -1px 1px 0 rgba(0,0,0,0.8), 1px 1px 0 rgba(0,0,0,0.8), 0 1px 2px rgba(0,0,0,0.9);pointer-events:none}
   body.lowhp header{animation:hpwarn 1.4s ease-in-out infinite}
   @keyframes hpwarn{0%,100%{box-shadow:none}50%{box-shadow:inset 0 0 0 2px var(--hp)}}
-  main{padding:4px 10px 0;overflow-x:hidden}
+  main{padding:0 10px;overflow-x:hidden}
   /* slide-in animation when switching screens via swipe */
   @keyframes slideInR{from{opacity:.4;transform:translateX(26px)}to{opacity:1;transform:none}}
   @keyframes slideInL{from{opacity:.4;transform:translateX(-26px)}to{opacity:1;transform:none}}
   main.slideInR{animation:slideInR .22s ease-out}
   main.slideInL{animation:slideInL .22s ease-out}
-  .colTitle{display:flex;align-items:center;gap:8px;margin:8px 4px 6px}
+  .colTitle{display:flex;align-items:center;gap:8px;margin:16px 4px 8px}
+  main .colTitle:first-child{margin-top:8px}
   .colTitle h2{margin:0;font-size:15px;letter-spacing:.3px;flex:1}
   .filterIcon{background:var(--panel);border:1px solid var(--line);color:var(--muted);
-    border-radius:8px;width:32px;height:32px;font-size:13px;line-height:1;cursor:pointer;flex:none}
+    border-radius:8px;width:32px;height:32px;font-size:14px;cursor:pointer;flex:none;
+    display:flex;align-items:center;justify-content:center;padding:0;line-height:1}
   .filterIcon.open{background:var(--panel2);border-color:var(--accent);color:var(--ink)}
   .filterIcon.active{color:var(--accent);border-color:var(--accent)}
   .addBtn{background:var(--panel2);border:1px solid var(--line);color:var(--ink);
-    border-radius:8px;font-size:20px;width:32px;height:32px;line-height:1;cursor:pointer}
+    border-radius:8px;font-size:22px;width:32px;height:32px;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;padding:0;line-height:1}
   .task{background:var(--panel);border:1px solid var(--line);border-radius:10px;
     margin-bottom:6px;overflow:hidden;display:flex;align-items:stretch;
     transition:transform .12s, opacity .2s}

@@ -725,7 +725,7 @@ function rail(t){
   if(cl.length){
     const doneCl=cl.filter(c=>c.done).length;
     items.push('<span class="subFrac'+(doneCl===cl.length?' full':'')+'" onclick="event.stopPropagation();toggleExpand(\''+t.id+'\')">'+
-        '📋 '+doneCl+'/'+cl.length+'</span>');
+        '<b>'+doneCl+'</b><i></i><b>'+cl.length+'</b></span>');
   }
   return '<div class="rail">'+items.join('')+'</div>';
 }

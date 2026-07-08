@@ -2700,7 +2700,9 @@ function openEdit(id,type){
 function drawSheet(){
   const t=EDIT; const dayLabels=['S','M','T','W','T','F','S'];
   const sheet=document.getElementById('sheet');
-  let h='<h3>'+(t.id?'Edit':'New')+' '+(t.type==='daily'?'Daily':t.type==='habit'?'Habit':'To-Do')+'</h3>';
+  let h='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">'+
+     '<h3 style="margin:0">'+(t.id?'Edit':'New')+' '+(t.type==='daily'?'Daily':t.type==='habit'?'Habit':'To-Do')+'</h3>'+
+     '<button type="button" onclick="copyEditTask()" title="Copy title, checklist & notes" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.3;padding:0 4px;line-height:1;color:inherit">⧉</button></div>';
   h+='<label>Title</label><input type="text" id="eTitle" value="'+esc(t.title)+'" placeholder="What needs doing?">';
   h+='<label>Difficulty</label><div class="seg" id="eDiff">'+
     ['trivial','easy','medium','hard'].map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
@@ -2810,6 +2812,31 @@ function saveTask(){
     setTimeout(() => window.scrollTo({top:0, behavior:'smooth'}), 50);
   }
   closeSheet(); save(); render();
+}
+function copyEditTask(){
+  const title = (document.getElementById('eTitle')||{}).value ?? EDIT.title ?? '';
+  const notes = (document.getElementById('eNotes')||{}).value ?? EDIT.notes ?? '';
+  const cl = (EDIT.checklist||[]).filter(c=>c && (c.text||'').trim());
+  let text = title;
+  if(cl.length > 0){
+    text += '\n\nChecklist:\n' + cl.map(c => '- [' + (c.done ? 'x' : ' ') + '] ' + c.text).join('\n');
+  }
+  if(notes.trim()){
+    text += '\n\nNotes:\n' + notes;
+  }
+  function copyToClipboard(t){
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(t).then(() => toast('Copied')).catch(() => fallbackCopy(t));
+    } else { fallbackCopy(t); }
+  }
+  function fallbackCopy(t){
+    const ta = document.createElement('textarea');
+    ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); toast('Copied'); } catch(e) { toast('Copy failed'); }
+    document.body.removeChild(ta);
+  }
+  copyToClipboard(text);
 }
 function deleteTask(){
   confirmDialog('Delete Task', 'Delete this task?').then(ok => {

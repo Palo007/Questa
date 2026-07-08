@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-2205 CET";
+const APP_VERSION = "v2026.07.08-2214 CET";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -9,7 +9,7 @@ const APP_VERSION = "v2026.07.08-2205 CET";
 // committed, touchmove is non-cancelable and the card freezes lifted while the page
 // scrolls. A short window (~200) beats that commit; raising it (e.g. 1000) makes the
 // freeze MORE likely, not less. The setting exists so it can be tuned on a real device.
-const DRAG_DELAY_DEFAULT = 100;
+const DRAG_DELAY_DEFAULT = 200;
 function confirmDialog(title, text) {
   return new Promise((resolve) => {
     const overlay = document.getElementById('confirmOverlay');
@@ -72,9 +72,7 @@ function alertDialog(title, text) {
   });
 }
 function longPressMs(){
-  const v = (S.prefs && S.prefs.dragDelay);
-  const n = (v==null ? DRAG_DELAY_DEFAULT : +v);
-  return (isFinite(n) && n>=0) ? n : DRAG_DELAY_DEFAULT;
+  return 200;
 }
 let _buzzLastResult = null;
 let _buzzCount = 0;
@@ -2912,11 +2910,9 @@ function openSettings(){
   const widthLabels={430:'Slim',560:'Medium',720:'Wide',3000:'Full'};
   const wv=(S.prefs.width||480);
   const nl=(S.prefs.notesLines==null?3:S.prefs.notesLines);
-  const ddv=(S.prefs.dragDelay==null?DRAG_DELAY_DEFAULT:S.prefs.dragDelay);
   h+='<div class="setList">';
   h+=settingRow('width','Width','Caps the width on a monitor and keeps it centered.',(widthLabels[wv]||'Custom'));
   h+=settingRow('notes','Note lines','Lines of a task\'s notes shown in the list preview.',(nl===0?'Off':(''+nl)));
-  h+=settingRow('drag','Drag delay','Hold time before a card lifts for reordering on touch.',(ddv+' ms'));
   h+=settingRow('haptics','Haptics','Vibration on taps and completions.',(S.prefs.haptics===false?'Off':'On'));
   h+=settingRow('cardPad','Card padding','Vertical space above and below each habit, daily and to-do card.',(S.prefs.cardPad||5)+' px');
   h+='</div>';

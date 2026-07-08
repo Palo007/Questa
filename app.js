@@ -701,32 +701,33 @@ function renderStats(){
   document.body.classList.toggle('lowhp', c.hp/c.maxHp <= 0.3);
 }
 function metaRow(t){
+  const tagsHtml = tagChips(t);
   const notesPreview = (t.notes && S.prefs.notesLines>0)
     ? '<div class="notes" style="-webkit-line-clamp:'+S.prefs.notesLines+';line-clamp:'+S.prefs.notesLines+'">'+esc(t.notes)+'</div>' : '';
-  return '<div class="meta"><span class="pill">'+t.difficulty+'</span>'+tagChips(t)+'</div>'+notesPreview+checklistBlock(t);
+  const chk = checklistBlock(t);
+  if(!tagsHtml && !notesPreview && !chk) return '';
+  const metaHtml = tagsHtml ? '<div class="meta">'+tagsHtml+'</div>' : '';
+  return metaHtml+notesPreview+chk;
 }
 // the right-side rail: counter/streak + subtask toggle, pinned to top of card
 function rail(t){
-  let counter='';
-  if(t.type==='daily'){ counter='<span class="railItem streak" title="Day streak">🔥 '+(t.streak||0)+'</span>'; }
-  else if(t.type==='habit'){
+  let items = [];
+  items.push('<span class="railItem diff-'+t.difficulty+'">'+t.difficulty+'</span>');
+  if(t.type==='daily'){
+    items.push('<span class="railItem streak" title="Day streak">🔥 '+(t.streak||0)+'</span>');
+  } else if(t.type==='habit'){
     const up=t.up!==false, down=t.down!==false;
-    if(up&&down) counter='<span class="railItem cnt" title="Today + / −">+'+(t.cUp||0)+'|−'+(t.cDown||0)+'</span>';
-    else if(up)  counter='<span class="railItem cnt" title="Today +">+'+(t.cUp||0)+'</span>';
-    else if(down)counter='<span class="railItem cnt" title="Today −">−'+(t.cDown||0)+'</span>';
+    if(up&&down) items.push('<span class="railItem cnt" title="Today + / −">+'+(t.cUp||0)+'|−'+(t.cDown||0)+'</span>');
+    else if(up)  items.push('<span class="railItem cnt" title="Today +">+'+(t.cUp||0)+'</span>');
+    else if(down)items.push('<span class="railItem cnt" title="Today −">−'+(t.cDown||0)+'</span>');
   }
   const cl=(t.checklist||[]);
-  let sub='';
   if(cl.length){
     const doneCl=cl.filter(c=>c.done).length;
-    sub='<span class="subFrac'+(doneCl===cl.length?' full':'')+'" onclick="event.stopPropagation();toggleExpand(\''+t.id+'\')">'+
-        '<b>'+doneCl+'</b><i></i><b>'+cl.length+'</b></span>';
-  } else if(t.type==='daily'){
-    // dailies: reserve the subtask-button slot so the streak stays left-aligned
-    sub='<span class="subFrac placeholder" aria-hidden="true"></span>';
+    items.push('<span class="subFrac'+(doneCl===cl.length?' full':'')+'" onclick="event.stopPropagation();toggleExpand(\''+t.id+'\')">'+
+        '📋 '+doneCl+'/'+cl.length+'</span>');
   }
-  if(!counter && !sub) return '';
-  return '<div class="rail">'+counter+sub+'</div>';
+  return '<div class="rail">'+items.join('')+'</div>';
 }
 // Inline SVG coin — renders identically on every platform (no emoji-font dependency)
 const COIN_SVG='<svg viewBox="0 0 24 24" width="22" height="22" aria-label="coin" role="img">'+

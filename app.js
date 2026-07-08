@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-0210";
+const APP_VERSION = "v2026.07.08-0430";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -2668,8 +2668,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
   const SWIPE_MIN=60;       // min horizontal travel (px) to count as a swipe
   const SWIPE_RATIO=1.7;    // |dx| must exceed |dy| by this factor
   let sx=0, sy=0, tracking=false, multi=false;
-  const view=document.getElementById('view');
-  if(!view) return;
+  const view=document;   // bind to the whole document so swipes on empty area work regardless of content height
   // Elements that own their own horizontal touch gestures — never swipe-nav from them.
   function inHGesture(t){ return !!(t && t.closest && t.closest('#anSlider, input[type=range], .anSlider, .seg')); }
 
@@ -2677,6 +2676,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
     if(e.touches.length!==1){ multi=true; tracking=false; return; }
     multi=false;
     if(inHGesture(e.target)){ tracking=false; return; }
+    if(document.querySelector('.scrim.show, .optScrim.show, .yScrim.show')){ tracking=false; return; }
     sx=e.touches[0].clientX; sy=e.touches[0].clientY; tracking=true;
   },{passive:true});
 

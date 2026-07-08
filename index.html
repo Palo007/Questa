@@ -118,6 +118,7 @@
      see enableTouchDrag / LONGPRESS_MS in app.js. */
   .task[draggable="true"]{cursor:grab;touch-action:none;transition:transform .18s ease,opacity .15s ease;
     -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+  .task[draggable="true"] * {touch-action:none}
   /* the original card becomes a dim placeholder gap while its ghost is dragged */
   .task.dragging{opacity:.25;outline:2px dashed var(--accent);transform:scale(.98)}
   /* floating clone that follows the finger while reordering on touch */

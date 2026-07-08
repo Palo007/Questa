@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-2131 CET";
+const APP_VERSION = "v2026.07.08-2142 CET";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -392,6 +392,7 @@ function completeTask(t, ev){
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
+  buzz(20);
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };  // remember exactly what was granted
   if(t.type==='daily'){ t.streak = (t.streak||0) + 1;
     const cl=(t.checklist||[]); const snap = cl.length? {checklist:cl.map(c=>({text:c.text,done:!!c.done}))} : {};
@@ -403,7 +404,7 @@ function completeTask(t, ev){
     logHistory(t,{value:t.value,completed:true,reward:Object.assign({},t._gr)});
     logEvent({kind:'complete', taskType:'todo', taskId:t.id, taskTitle:t.title,
               reward:Object.assign({},t._gr), createdAt:t.createdAt||null, completedAt:t.completedAt}); }
-  bumpAvatar(); buzz([12,40,18]); floatFx(fxGain(r.xp,r.gold),'pos',ev);
+  bumpAvatar(); floatFx(fxGain(r.xp,r.gold),'pos',ev);
   save(); render();
 }
 function reverseGrant(t){
@@ -450,14 +451,14 @@ function scoreHabit(id, dir, ev){
     const _rpt = t.repsPerTap || repsPerTap(t.title);
     logHistory(t,{value:t.value,scoredUp:1,reps:_rpt,repCounted:true,scored:true});
     logEvent({kind:'habitTap', dir:1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value});
-    bumpAvatar(); buzz([12,40,18]); floatFx(fxGain(r.xp,r.gold),'pos',ev);
+    bumpAvatar(); buzz(20); floatFx(fxGain(r.xp,r.gold),'pos',ev);
   } else {
     const dmg=missDamage(t);
     t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
     t.cDown=(t.cDown||0)+1;
     logHistory(t,{value:t.value,scoredDown:1});
     logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, value:t.value, dmg:dmg});
-    takeDamage(dmg); buzz([28,30,28]); floatFx('-'+dmg.toFixed(1)+' HP','neg',ev);
+    takeDamage(dmg); buzz(45); floatFx('-'+dmg.toFixed(1)+' HP','neg',ev);
   }
   save(); render();
 }
@@ -691,7 +692,7 @@ function toggleSub(taskId, idx){
   const t=S.tasks.find(x=>x.id===taskId); if(!t||!t.checklist||!t.checklist[idx])return;
   const c=t.checklist[idx];
   c.done=!c.done;
-  if(c.done) buzz([12,40,18]);
+  if(c.done) buzz(20);
   logEvent({kind:'subtask', taskId:t.id, taskTitle:t.title, taskType:t.type,
             subId:c.id||null, subText:c.text, done:c.done});
   save(); render();
@@ -2545,7 +2546,7 @@ function endTouchDrag(){
   // detach listeners + clear globals FIRST so the next gesture is never blocked,
   // even though we still animate the ghost snap below using local references.
   _tGhost=null;                                   // hand the ghost to the animation
-  if(dropTarget) commitOrder();                   // persist order before clearing _tDrag
+  if(dropTarget) { try{ commitOrder(); }catch(e){ console.error(e); } }
   resetDragState();                               // clears _tActive/_tDrag/classes/listeners
   // animate the (now-detached) ghost snapping into the card's final slot
   if(ghost && dropTarget){
@@ -2804,9 +2805,9 @@ function saveTask(){
     }
     if(gainParts){ floatFx(gainParts,'pos',null); if(doBump) bumpAvatar(); }
     if(loseParts) floatFx(loseParts,'neg',null);
-    if(gainParts) buzz([12,40,18]);
-    else if(downDelta>0) buzz([28,30,28]);
-    else if(upDelta<0||downDelta<0) buzz([20]);
+    if(gainParts) buzz(20);
+    else if(downDelta>0) buzz(45);
+    else if(upDelta<0||downDelta<0) buzz(20);
   } else {
     EDIT.id=uid(); EDIT.createdAt=Date.now(); EDIT.updatedAt=Date.now(); S.tasks.unshift(EDIT); buzz(20);
     setTimeout(() => window.scrollTo({top:0, behavior:'smooth'}), 50);
@@ -3158,6 +3159,8 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
 
 document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };
 window.addEventListener('resize', updateHeaderHeightVar);
+window.addEventListener('touchend', () => { if (typeof _tActive !== 'undefined' && _tActive) endTouchDrag(); }, { passive: true });
+window.addEventListener('touchcancel', () => { if (typeof _tActive !== 'undefined' && _tActive) endTouchDrag(); }, { passive: true });
 applyWidth();
 applyCardPad();
 startDay();

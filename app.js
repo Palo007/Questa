@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-2153 CET";
+const APP_VERSION = "v2026.07.08-2205 CET";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -2441,6 +2441,10 @@ function enableTouchDrag(card){
       // start its own scroll/callout and flip subsequent moves non-cancelable.
       if(ev.cancelable) ev.preventDefault();
       const tt=ev.touches[0]; if(!tt) return;
+      // ABORT: if Chrome committed to a native scroll, moves become non-cancelable.
+      // If we're in an active drag and can't cancel, the gesture is lost — clean up
+      // immediately so the app doesn't freeze with a stuck ghost card.
+      if(_tActive && !ev.cancelable){ endTouchDrag(); return; }
       if(_tActive){                                // ACTIVE DRAG phase
         _tPointerY=tt.clientY;
         moveTouchDrag(tt.clientX,tt.clientY);

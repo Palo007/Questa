@@ -1,19 +1,45 @@
-# Dependency and build directories
-node_modules/
-dist/
-build/
-coverage/
+# =============================================================================
+# Questa - Whitelist .gitignore
+# Only files from the reference repo (https://github.com/Palo007/Questa)
+# are tracked. Everything else is ignored.
+# =============================================================================
 
-# OS/Logs
+# Ignore everything at the root level
+/*
+!/.gitignore
+
+# === Questa reference repo files (only these should ever be tracked) ===
+!/INSTALL.md
+!/app.js
+!/habitica_to_questa.py
+!/icon-192.png
+!/icon-512.png
+!/icon.svg
+!/index.html
+!/manifest.json
+!/sw.js
+!/README.md
+
+# === OS cruft ===
 .DS_Store
-*.log
-.env*
+Thumbs.db
+desktop.ini
 
-# Vite / React / TypeScript scaffolding to be ignored for GitHub static pages
-src/
-assets/
-package.json
-package-lock.json
-tsconfig.json
-vite.config.ts
-metadata.json
+# === Editor / IDE ===
+.vscode/
+.idea/
+*.swp
+
+# === Logs / temp ===
+*.log
+*.tmp
+
+# === Python cache ===
+__pycache__/
+*.pyc
+
+# === Archives and backups ===
+*.bak
+*.bak-*
+*.7z
+*.zip

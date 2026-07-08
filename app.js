@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-1616 CET";
+const APP_VERSION = "v2026.07.08-1627 CET";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -658,8 +658,9 @@ ensureUiPrefs();
 let FILTER=S.prefs.filter;
 let SORT=S.prefs.sort;
 let TAGFILTER=S.prefs.tagFilter;
-let FILTEROPEN=S.prefs.filterOpen;
+let FILTEROPEN=S.prefs.filterOpen; let SORTOPEN=S.prefs.sortOpen;
 function toggleFilter(){ FILTEROPEN=!FILTEROPEN; S.prefs.filterOpen=FILTEROPEN; save(); render(); }
+function toggleSort(){ SORTOPEN=!SORTOPEN; S.prefs.sortOpen=SORTOPEN; save(); render(); }
 const EXPANDED={}; // taskId -> bool (checklist expanded on card)
 function toggleExpand(id){ EXPANDED[id]=!EXPANDED[id]; render(); }
 function toggleSub(taskId, idx){
@@ -750,13 +751,16 @@ function habitCard(t){
     '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+rail(t)+
     (down?'<div class="check hbtn down" onclick="scoreHabit(\''+t.id+'\',-1,event)">−</div>':'<div class="check hbtn off">−</div>')+'</div>';
 }
+function sortActiveFunc(tab){ return (SORT&&SORT[tab]&&SORT[tab]!=="manual"); }
 function colTitle(title, addType){
   const tabKey = addType==='habit'?'habits':addType==='daily'?'dailies':'todos';
   const defaultVal = tabKey==='todos'?'active':'all';
-  const active = FILTER[tabKey]!==defaultVal;
+  const filterActive = FILTER[tabKey]!==defaultVal || (S.tags && S.tags.length > 0 && S.prefs.tagFilter && S.prefs.tagFilter[tabKey] && S.prefs.tagFilter[tabKey].length > 0);
+  const sortActive = sortActiveFunc(tabKey);
   return '<div class="colTitle"><h2>'+title+'</h2>'+
-    '<button class="filterIcon'+(FILTEROPEN?' open':'')+(active?' active':'')+'" title="Filter" onclick="toggleFilter()">🔽</button>'+
-    '<button class="addBtn" onclick="openEdit(null,\''+addType+'\')">+</button></div>';
+    '<button class="filterIcon'+(FILTEROPEN?' open':'')+(filterActive?' active':'')+'" title="Filter" onclick="toggleFilter()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg></button>'+
+    '<button class="filterIcon'+(SORTOPEN?' open':'')+(sortActive?' active':'')+'" title="Sort" onclick="toggleSort()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg></button>'+
+    '<button class="addBtn" onclick="openEdit(null,\''+addType+'\')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button></div>';
 }
 function filterBar(tab, opts){
   if(!FILTEROPEN) return '';
@@ -844,7 +848,7 @@ function cycleSort(tab,base){
   setSort(tab,next);
 }
 function sortBar(tab){
-  if(!FILTEROPEN) return '';
+  if(!SORTOPEN) return '';
   const cur=(SORT&&SORT[tab])||'manual';
   const tog=(base,label)=>{ const active=cur.indexOf(base+'-')===0;
     const arrow=active?(cur===base+'-asc'?' \u2191':' \u2193'):'';
@@ -896,8 +900,8 @@ function viewRewards(){
     '<div class="body" onclick="buyShopItem(\''+i.id+'\')"><div class="ttl">'+i.title+'</div>'+
     '<div class="meta"><span class="pill">'+i.cost+' gold</span><span>'+i.desc+'</span></div></div></div>').join('');
   h+='<div class="colTitle"><h2>Your Rewards</h2>'+
-    '<button class="filterIcon'+(FILTEROPEN?' open':'')+(sortActive('rewards')?' active':'')+'" title="Sort" onclick="toggleFilter()">\uD83D\uDD3D</button>'+
-    '<button class="addBtn" onclick="openReward(null)">+</button></div>'+
+    '<button class="filterIcon'+(SORTOPEN?' open':'')+(sortActiveFunc('rewards')?' active':'')+'" title="Sort" onclick="toggleSort()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg></button>'+
+    '<button class="addBtn" onclick="openReward(null)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button></div>'+
     '<div class="small" style="margin:0 4px 10px">Spend gold on real-life rewards you define yourself.</div>'+sortBar('rewards');
   const _rw=sortList(S.rewards,'rewards');
   h+= _rw.length ? _rw.map(r=>'<div class="task" draggable="'+(dragOK('reward')?'true':'false')+'" data-id="'+r.id+'" data-list="rewards"><div class="valdot" style="background:var(--gold)"></div>'+

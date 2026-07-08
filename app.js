@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-1704 CET";
+const APP_VERSION = "v2026.07.08-1817 CET";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -1679,6 +1679,76 @@ function anSnapshotRows(v){
   vals.forEach(x=>{ const ids=taskTags(x.item); if(!ids.length){ b['__none']=(b['__none']||0)+x.w; } else ids.forEach(id=>{ b[id]=(b[id]||0)+x.w; }); });
   return anTagRows(b);
 }
+function anSnapshotHistoryBucket(v, from, to){
+  const items = anViewItems(v);
+  const src = v.source;
+  const group = v.group;
+  if (group === 'tag' || group === 'type') {
+    return {kind: 'cat', rows: anSnapshotRows(v)};
+  }
+  const midnightFrom = Math.floor(from / DAY) * DAY;
+  const midnightTo = Math.floor(to / DAY) * DAY;
+  const dayMap = {};
+  const series = [];
+  for (let d = midnightFrom; d <= midnightTo; d += DAY) dayMap[d] = 0;
+  items.forEach(t => {
+    if (src === 'streaks' && t.type !== 'daily') return;
+    const cMs = createdMs(t) || 0;
+    if (cMs > to) return;
+    let compMap = null;
+    if (t.type === 'daily') {
+       compMap = {};
+       (t.history || []).forEach(p => {
+         if (p.completed && typeof p.date === 'number') {
+           compMap[Math.floor(p.date/DAY)*DAY] = true;
+         }
+       });
+    }
+    let curStreak = 0;
+    let walkD = Math.floor(cMs/DAY)*DAY;
+    for (let d = walkD; d <= midnightTo; d += DAY) {
+       if (t.type === 'daily') {
+          const due = !t.repeat || t.repeat[new Date(d).getDay()];
+          if (due) {
+             if (compMap[d]) curStreak++;
+             else curStreak = 0;
+          }
+       }
+       if (d >= midnightFrom && d <= midnightTo) {
+          if (src === 'streaks') {
+             dayMap[d] += curStreak;
+          } else if (src === 'incomplete') {
+             if (t.type === 'todo') {
+                if (!t.completedAt || Math.floor(t.completedAt/DAY)*DAY > d) dayMap[d]++;
+             } else if (t.type === 'daily') {
+                const due = !t.repeat || t.repeat[new Date(d).getDay()];
+                if (due && !compMap[d]) dayMap[d]++;
+             }
+          } else if (src === 'tagcount') {
+             dayMap[d]++;
+          }
+       }
+    }
+  });
+  for (let d = midnightFrom; d <= midnightTo; d += DAY) {
+    series.push({d: d, v: dayMap[d]});
+  }
+  if (group === 'day') {
+    return {kind: 'day', series: series, dayMap: dayMap};
+  }
+  const b = {};
+  const counts = {};
+  series.forEach(pt => {
+    const d = new Date(pt.d);
+    let key;
+    if (group === 'month') key = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+    else { const dd=new Date(d); dd.setHours(0,0,0,0); dd.setDate(dd.getDate()-((dd.getDay()+6)%7)); key=fmtDate(dd.getTime()); }
+    b[key] = (b[key]||0) + pt.v;
+    counts[key] = (counts[key]||0) + 1;
+  });
+  const rows = Object.keys(b).sort().map(k => ({label: k, v: Math.round(b[k]/counts[k])}));
+  return {kind: 'cat', rows: rows};
+}
 function anListHTML(rows){
   if(!rows.length) return '<div class="anNote">No data in this window.</div>';
   return '<div class="anList">'+rows.map(r=>'<div class="anListRow">'+
@@ -1698,17 +1768,18 @@ function renderView(v,from,to){
   if(v.source==='overview') return anOverviewBody(from,to);
   if(v.source==='tagsummary') return anTagSummaryBody(from,to);
   let chart=v.chart;
+  let bucket;
   if(V_SNAPSHOT.indexOf(v.source)>=0){
-    if(chart==='line'||chart==='heatmap') chart='bar';
-    if(chart==='list' && v.source==='streaks'){
+    bucket = anSnapshotHistoryBucket(v, from, to);
+    if(chart==='list' && v.source==='streaks' && bucket.kind==='cat'){
       const rows=anViewItems(v).filter(t=>t.type==='daily').map(t=>({label:t.title,v:t.streak||0})).sort((a,b)=>b.v-a.v);
       return anListHTML(rows);
     }
-    const rows=anSnapshotRows(v);
-    return chart==='list'? anListHTML(rows) : barsCard(rows);
+  } else {
+    bucket = anBucket(anSourceEvents(v),v.group,from,to);
   }
-  const bucket=anBucket(anSourceEvents(v),v.group,from,to);
   if(bucket.kind==='cat'){
+    if(chart==='line'||chart==='heatmap') chart='bar';
     return chart==='list'? anListHTML(bucket.rows) : barsCard(bucket.rows);
   }
   // day series

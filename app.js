@@ -912,7 +912,7 @@ function viewHabits(){
   habits=applyTagFilter(habits,'habits');
   habits=sortList(habits,'habits');
   habits=applySearch(habits,'habits');
-  return colTitle('Habits','habit')+bar+sortBar('habits')+tagFilterBar('habits')+
+  return '<div class="stickyControls">' + colTitle('Habits','habit')+bar+sortBar('habits')+tagFilterBar('habits') + '</div>' +
     (habits.length?habits.map(habitCard).join(''):'<div class="empty">Nothing matches this filter.</div>');
 }
 function viewDailies(){
@@ -925,7 +925,7 @@ function viewDailies(){
   dailies=applyTagFilter(dailies,'dailies');
   dailies=sortList(dailies,'dailies');
   dailies=applySearch(dailies,'dailies');
-  return colTitle('Dailies','daily')+bar+sortBar('dailies')+tagFilterBar('dailies')+
+  return '<div class="stickyControls">' + colTitle('Dailies','daily')+bar+sortBar('dailies')+tagFilterBar('dailies') + '</div>' +
     (dailies.length?dailies.map(taskCard).join(''):'<div class="empty">Nothing matches this filter.</div>');
 }
 function viewTodos(){
@@ -938,7 +938,7 @@ function viewTodos(){
   list=applyTagFilter(list,'todos');
   list=sortList(list,'todos');
   list=applySearch(list,'todos');
-  return colTitle('To-Dos','todo')+bar+sortBar('todos')+tagFilterBar('todos')+
+  return '<div class="stickyControls">' + colTitle('To-Dos','todo')+bar+sortBar('todos')+tagFilterBar('todos') + '</div>' +
     (list.length?list.map(taskCard).join(''):'<div class="empty">Nothing matches this filter.</div>');
 }
 function viewRewards(){
@@ -1338,16 +1338,15 @@ function viewAnalytics(){
 function updateHeaderHeightVar() {
   const headerEl = document.querySelector('header');
   if (headerEl) {
-    document.documentElement.style.setProperty('--header-height', headerEl.offsetHeight + 'px');
+    document.documentElement.style.setProperty('--header-height', headerEl.getBoundingClientRect().height + 'px');
   }
   const stickyHeaderEl = document.querySelector('.anStickyHeader');
   if (stickyHeaderEl) {
-    document.documentElement.style.setProperty('--sticky-header-height', stickyHeaderEl.offsetHeight + 'px');
+    document.documentElement.style.setProperty('--sticky-header-height', stickyHeaderEl.getBoundingClientRect().height + 'px');
   }
 }
 let _anBound=false;
 function initAnalytics(){
-  updateHeaderHeightVar();
   const p=anPrefs();
   const [mn,mx]=anSpan();
   const slider=document.getElementById('anSlider'); if(!slider)return;
@@ -1418,7 +1417,7 @@ function initAnalytics(){
   requestAnimationFrame(() => {
     if (TAB === 'analytics') layout();
   });
-  if(!_anBound){ window.addEventListener('resize',()=>{ if(TAB==='analytics') { updateHeaderHeightVar(); layout(); } }); _anBound=true; }
+  if(!_anBound){ window.addEventListener('resize',()=>{ if(TAB==='analytics') { layout(); } }); _anBound=true; }
 }
 // bind metric selector chips + add/edit form
 function bindMetricChips(){
@@ -2271,6 +2270,7 @@ function render(){
   // first so a lingering ghost/listeners can't freeze the next screen.
   if(typeof resetDragState==='function') resetDragState();
   renderStats();
+  updateHeaderHeightVar();
   const v=document.getElementById('view');
   v.innerHTML = TAB==='habits'?viewHabits() : TAB==='dailies'?viewDailies() : TAB==='todos'?viewTodos() : TAB==='analytics'?viewAnalytics() : viewRewards();
   if(TAB==='analytics') initAnalytics();
@@ -2734,7 +2734,8 @@ function saveTask(){
     else if(downDelta>0) buzz([28,30,28]);
     else if(upDelta<0||downDelta<0) buzz([20]);
   } else {
-    EDIT.id=uid(); EDIT.createdAt=Date.now(); EDIT.updatedAt=Date.now(); S.tasks.push(EDIT); buzz(20);
+    EDIT.id=uid(); EDIT.createdAt=Date.now(); EDIT.updatedAt=Date.now(); S.tasks.unshift(EDIT); buzz(20);
+    setTimeout(() => window.scrollTo({top:0, behavior:'smooth'}), 50);
   }
   closeSheet(); save(); render();
 }
@@ -3042,6 +3043,8 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
 })();
 
 document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };
+window.addEventListener('resize', updateHeaderHeightVar);
 applyWidth();
 startDay();
+updateHeaderHeightVar();
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }

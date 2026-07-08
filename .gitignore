@@ -1,0 +1,19 @@
+# Dependency and build directories
+node_modules/
+dist/
+build/
+coverage/
+
+# OS/Logs
+.DS_Store
+*.log
+.env*
+
+# Vite / React / TypeScript scaffolding to be ignored for GitHub static pages
+src/
+assets/
+package.json
+package-lock.json
+tsconfig.json
+vite.config.ts
+metadata.json

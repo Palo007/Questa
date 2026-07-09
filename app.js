@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.09-0925 CET";
+const APP_VERSION = "v2026.07.09-1035 CET";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -3086,36 +3086,28 @@ function openSettings(){
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button>'+
     '<button class="btn ghost" onclick="openRestorePicker()">Restore from local snapshot</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
-  h+='<div id="backupStaleness" class="small" style="margin-top:6px"></div>';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
   h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button></div>';
+  if(IS_DIRTY){
+    listSnapshots().then(snapshots => {
+      const hasBaseline = snapshots.some(s => s.type === "full");
+      writeSnapshot(hasBaseline ? "delta" : "full").catch(()=>{}).then(()=>{ IS_DIRTY=false; });
+    }).catch(() => { writeSnapshot("full").catch(()=>{}).then(()=>{ IS_DIRTY=false; }); });
+  }
   sheet.innerHTML=h;
-  updateBackupStaleness();
+  checkExportStaleness();
   document.getElementById('scrim').classList.add('show');
 }
-function updateBackupStaleness(){
-  const el = document.getElementById('backupStaleness');
-  if(!el) return;
-  listSnapshots().then(snapshots => {
-    if(!snapshots || snapshots.length === 0){
-      el.textContent = 'No backups yet';
-      return;
-    }
-    const newest = snapshots[0];
-    const days = Math.round((Date.now() - newest.ts) / 86400000);
-    if(days === 0){
-      el.textContent = 'Last backup: today';
-    } else if(days === 1){
-      el.textContent = 'Last backup: yesterday';
-    } else {
-      el.textContent = 'Last backup: ' + days + ' days ago';
-    }
-    if(days > 7){
-      const exportBtn = document.querySelector('.settingsRow button[onclick="exportData()"]');
-      if(exportBtn) exportBtn.style.borderColor = 'var(--hp)';
-    }
-  }).catch(() => {});
+function checkExportStaleness(){
+  const btn = document.getElementById('gearBtn');
+  if(!btn) return;
+  const lastExport = S.prefs.lastExportTs;
+  if(!lastExport || (Date.now() - lastExport) > 7*86400000){
+    btn.classList.add('stale');
+  } else {
+    btn.classList.remove('stale');
+  }
 }
 function resetEverything() {
   confirmDialog('Reset Everything', 'Erase ALL progress on this device? This cannot be undone.').then(ok => {
@@ -3260,6 +3252,9 @@ function exportData(){
       setTimeout(()=>URL.revokeObjectURL(url),1000);
     }
     toast('Exported'+((eventsArr&&eventsArr.length)?(' ('+eventsArr.length+' events)'):''));
+    S.prefs.lastExportTs = Date.now();
+    save();
+    checkExportStaleness();
   };
   getEvents({}).then(finish).catch(()=>finish([]));
 }
@@ -3490,6 +3485,7 @@ updateHeaderHeightVar();
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }
 
 rotateSnapshots().catch(()=>{});
+checkExportStaleness();
 
 setTimeout(() => {
   listSnapshots().then(snapshots => {

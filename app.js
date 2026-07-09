@@ -3083,7 +3083,8 @@ function openSettings(){
   h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
-    '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button></div>';
+    '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button>'+
+    '<button class="btn ghost" onclick="openRestorePicker()">Restore from local snapshot</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
   h+='<div id="backupStaleness" class="small" style="margin-top:6px"></div>';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
@@ -3302,6 +3303,88 @@ function importData(ev){
       }
     }catch(e){ alertDialog('Error', 'That file does not look like a valid Questa backup.'); } };
   rd.readAsText(f); ev.target.value='';
+}
+// --- Snapshot restore picker & logic ----------------------------------------
+function openRestorePicker(){
+  listSnapshots().then(snapshots => {
+    const verified = snapshots.filter(s => s.verified);
+    if(verified.length === 0){
+      alertDialog('Restore', 'No verified local snapshots found. Save your progress first (it auto-saves), then snapshots are created when you close the app.');
+      return;
+    }
+    const sheet = document.getElementById('sheet');
+    let h = '<div class="colTitle"><h2>Select a snapshot to restore</h2></div>';
+    h += '<div style="max-height:300px;overflow-y:auto">';
+    verified.forEach(s => {
+      const d = new Date(s.ts);
+      const dateStr = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      const sizeKB = (s.payload ? (s.payload.length / 1024).toFixed(1) : '?');
+      const typeLabel = s.type === 'full' ? 'Full' : 'Delta';
+      const items = s.counts ? ' &middot; ' + (s.counts.events||0) + ' events' : '';
+      h += '<div style="padding:8px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px">' +
+        '<span>&#x2705;</span>' +
+        '<span style="flex:1"><strong>' + dateStr + '</strong> &middot; ' + typeLabel + items + ' &middot; ' + sizeKB + 'KB</span>' +
+        '<button class="btn ghost" onclick="confirmRestore(' + s.id + ')">Restore</button>' +
+        '</div>';
+    });
+    h += '</div>';
+    h += '<div class="small" style="margin-top:8px">Select a snapshot to restore. Your current progress will be replaced.</div>';
+    h += '<button class="btn ghost" onclick="closeSheet()" style="margin-top:8px">Cancel</button>';
+    sheet.innerHTML = h;
+    document.getElementById('scrim').classList.add('show');
+  }).catch(() => alertDialog('Restore', 'Could not read backup store.'));
+}
+async function confirmRestore(id){
+  try{
+    const snap = await readSnapshot(id);
+    if(!snap || !snap.verified){
+      alertDialog('Restore Error', 'Snapshot not found or not verified.');
+      return;
+    }
+    const ok = await confirmDialog('Confirm Restore', 'This will replace ALL current progress with the snapshot from ' + new Date(snap.ts).toLocaleString() + '. Continue?');
+    if(!ok) return;
+
+    let data;
+    try{ data = JSON.parse(snap.payload); } catch(e){ alertDialog('Restore Error', 'Snapshot data is corrupted.'); return; }
+
+    const stateSnapshot = data.stateSnapshot;
+    const events = data.events || [];
+
+    if(!stateSnapshot || !stateSnapshot.char || !Array.isArray(stateSnapshot.tasks)){
+      alertDialog('Restore Error', 'Snapshot does not contain valid state.');
+      return;
+    }
+
+    // Chain continuity check for delta snapshots
+    if(snap.type === 'delta'){
+      const allSnapshots = await listSnapshots();
+      const hasBaseline = allSnapshots.some(s => s.type === 'full' && s.ts < snap.ts);
+      if(!hasBaseline){
+        const proceed = await confirmDialog('Warning', 'This delta snapshot has no corresponding baseline. Only partial data may be restored. Continue?');
+        if(!proceed) return;
+      }
+    }
+
+    // Apply state
+    S = migrate(stateSnapshot);
+    save();
+    applyWidth();
+    applyCardThick();
+
+    // Restore events
+    if(events.length > 0 && typeof indexedDB !== "undefined"){
+      await clearAllEvents();
+      const n = await bulkAddEvents(events);
+      logEvent({kind: 'restore', taskTitle: 'Restore from snapshot', notes: 'Restored ' + n + ' events'});
+    }
+
+    closeSheet();
+    render();
+    toast('Restored snapshot from ' + new Date(snap.ts).toLocaleString());
+  } catch(e){
+    console.error('Restore failed:', e);
+    alertDialog('Restore Error', 'Restore failed: ' + e.message);
+  }
 }
 function uploadFace(ev){
   const f=ev.target.files[0]; ev.target.value=''; if(!f) return;

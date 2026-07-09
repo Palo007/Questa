@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.09-1035 CET";
+const APP_VERSION = "v2026.07.09-1230 CET";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -116,6 +116,7 @@ function migrate(s){ const f=freshState();
   delete out.events;
   return out; }
 let IS_DIRTY = false;
+let _flushPromise = null;
 function save(){ IS_DIRTY = true; localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
 // --- append-only event log (IndexedDB-backed) ------------------------
 // Unlike history (one merged point/day), events are NEVER merged: each tap,
@@ -3084,18 +3085,22 @@ function openSettings(){
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button>'+
-    '<button class="btn ghost" onclick="openRestorePicker()">Restore from local snapshot</button></div>';
+    '<button class="btn ghost" onclick="openRestorePicker()">Restore Local Snapshot</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
+  h+='<div id="lastFullBackupDate" class="small" style="margin-top:8px"></div>';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
   h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button></div>';
   if(IS_DIRTY){
-    listSnapshots().then(snapshots => {
+    _flushPromise = listSnapshots().then(snapshots => {
       const hasBaseline = snapshots.some(s => s.type === "full");
-      writeSnapshot(hasBaseline ? "delta" : "full").catch(()=>{}).then(()=>{ IS_DIRTY=false; });
-    }).catch(() => { writeSnapshot("full").catch(()=>{}).then(()=>{ IS_DIRTY=false; }); });
+      return writeSnapshot(hasBaseline ? "delta" : "full");
+    }).catch(() => writeSnapshot("full")).then(id => {
+      if(id) IS_DIRTY = false;
+    }).finally(() => { _flushPromise = null; });
   }
   sheet.innerHTML=h;
+  setTimeout(() => updateLastFullBackupText(), 100);
   checkExportStaleness();
   document.getElementById('scrim').classList.add('show');
 }
@@ -3300,34 +3305,57 @@ function importData(ev){
   rd.readAsText(f); ev.target.value='';
 }
 // --- Snapshot restore picker & logic ----------------------------------------
-function openRestorePicker(){
-  listSnapshots().then(snapshots => {
-    const verified = snapshots.filter(s => s.verified);
-    if(verified.length === 0){
-      alertDialog('Restore', 'No verified local snapshots found. Save your progress first (it auto-saves), then snapshots are created when you close the app.');
-      return;
+async function updateLastFullBackupText(){
+  const el = document.getElementById('lastFullBackupDate');
+  if(!el) return;
+  try {
+    const snapshots = await listSnapshots();
+    const last = snapshots.find(s => s.type === "full" && s.verified);
+    if(last){
+      const d = new Date(last.ts);
+      el.textContent = 'Last full backup: ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    } else {
+      el.textContent = 'Last full backup: None';
     }
-    const sheet = document.getElementById('sheet');
-    let h = '<div class="colTitle"><h2>Select a snapshot to restore</h2></div>';
-    h += '<div style="max-height:300px;overflow-y:auto">';
-    verified.forEach(s => {
-      const d = new Date(s.ts);
-      const dateStr = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-      const sizeKB = (s.payload ? (s.payload.length / 1024).toFixed(1) : '?');
-      const typeLabel = s.type === 'full' ? 'Full' : 'Delta';
-      const items = s.counts ? ' &middot; ' + (s.counts.events||0) + ' events' : '';
-      h += '<div style="padding:8px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px">' +
-        '<span>&#x2705;</span>' +
-        '<span style="flex:1"><strong>' + dateStr + '</strong> &middot; ' + typeLabel + items + ' &middot; ' + sizeKB + 'KB</span>' +
-        '<button class="btn ghost" onclick="confirmRestore(' + s.id + ')">Restore</button>' +
-        '</div>';
-    });
-    h += '</div>';
-    h += '<div class="small" style="margin-top:8px">Select a snapshot to restore. Your current progress will be replaced.</div>';
-    h += '<button class="btn ghost" onclick="closeSheet()" style="margin-top:8px">Cancel</button>';
-    sheet.innerHTML = h;
-    document.getElementById('scrim').classList.add('show');
-  }).catch(() => alertDialog('Restore', 'Could not read backup store.'));
+  } catch(e) {
+    el.textContent = 'Last full backup: (unavailable)';
+  }
+}
+
+function openRestorePicker(){
+  (async () => {
+    if(_flushPromise) await _flushPromise;
+    try {
+      const snapshots = await listSnapshots();
+      const verified = snapshots.filter(s => s.verified);
+      if(verified.length === 0){
+        alertDialog('Restore', 'No verified local snapshots found. Save your progress first (it auto-saves), then snapshots are created when you close the app.');
+        return;
+      }
+      const sheet = document.getElementById('sheet');
+      let h = '<div class="colTitle"><h2>Select a snapshot to restore</h2></div>';
+      h += '<div style="max-height:300px;overflow-y:auto">';
+      verified.forEach(s => {
+        const d = new Date(s.ts);
+        const dateStr = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+        const sizeKB = (s.payload ? (s.payload.length / 1024).toFixed(1) : '?');
+        const typeLabel = s.type === 'full' ? 'Full' : 'Delta';
+        const items = s.counts ? ' &middot; ' + (s.counts.events||0) + ' events' : '';
+        h += '<div style="padding:8px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px">' +
+          '<span>&#x2705;</span>' +
+          '<span style="flex:1"><strong>' + dateStr + '</strong> &middot; ' + typeLabel + items + ' &middot; ' + sizeKB + 'KB</span>' +
+          '<button class="btn ghost" onclick="confirmRestore(' + s.id + ')">Restore</button>' +
+          '</div>';
+      });
+      h += '</div>';
+      h += '<div class="small" style="margin-top:8px">Select a snapshot to restore. Your current progress will be replaced.</div>';
+      h += '<button class="btn ghost" onclick="closeSheet()" style="margin-top:8px">Cancel</button>';
+      sheet.innerHTML = h;
+      document.getElementById('scrim').classList.add('show');
+    } catch(e) {
+      alertDialog('Restore', 'Could not read backup store.');
+    }
+  })();
 }
 async function confirmRestore(id){
   try{

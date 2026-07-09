@@ -278,6 +278,98 @@ async function computeHash(str){
   return 'fallback-' + Math.abs(h).toString(16).padStart(8,'0');
 }
 
+// --- Backup snapshot read/list (Tier-1 core write/verify) --------------------
+async function listSnapshots(){
+  try{
+    const db = await idbOpen();
+    const tx = db.transaction("backups","readonly");
+    const store = tx.objectStore("backups");
+    return await new Promise((resolve,reject)=>{
+      const out=[];
+      const req = store.openCursor();
+      req.onsuccess = ()=>{ const c=req.result;
+        if(!c){ resolve(out.sort((a,b)=>b.ts-a.ts)); return; }
+        out.push(c.value); c.continue(); };
+      req.onerror = ()=>reject(req.error);
+    });
+  }catch(e){ console.error("listSnapshots failed:",e); return []; }
+}
+async function readSnapshot(id){
+  try{
+    const db = await idbOpen();
+    return await new Promise((resolve,reject)=>{
+      const req = db.transaction("backups","readonly").objectStore("backups").get(id);
+      req.onsuccess = ()=>resolve(req.result||null);
+      req.onerror = ()=>reject(req.error);
+    });
+  }catch(e){ console.error("readSnapshot failed:",e); return null; }
+}
+async function writeSnapshot(type){
+  try{
+    const db = await idbOpen();
+    const tx = db.transaction("backups","readwrite");
+    const store = tx.objectStore("backups");
+    let events = [];
+    if(type === "full"){
+      const all = await getEvents({});
+      events = all || [];
+    } else {
+      try{
+        const snapshots = await listSnapshots();
+        const lastBaseline = snapshots.find(s => s.type === "full");
+        const since = lastBaseline ? lastBaseline.ts : 0;
+        const recent = await getEvents({from: since});
+        events = recent || [];
+      }catch(e){
+        console.warn("Delta snapshot fallback to full", e);
+        const all = await getEvents({});
+        events = all || [];
+        type = "full";
+      }
+    }
+    const payload = JSON.stringify({stateSnapshot: S, events});
+    const hash = await computeHash(payload);
+    const rec = {
+      payload, hash, type,
+      appVersion: typeof APP_VERSION!=="undefined"?APP_VERSION:"unknown",
+      ts: Date.now(),
+      counts: {
+        tasks: (S.tasks||[]).length, rewards: (S.rewards||[]).length,
+        tags: (S.tags||[]).length,
+        views: ((S.prefs&&S.prefs.an&&S.prefs.an.views)||[]).length,
+        events: events.length
+      },
+      verified: false
+    };
+    const id = await new Promise((resolve,reject)=>{
+      const req = store.add(rec);
+      req.onsuccess = ()=>resolve(req.result);
+      req.onerror = ()=>reject(req.error);
+    });
+    await new Promise(r=>{ tx.oncomplete=r; tx.onerror=r; tx.onabort=r; });
+    // Write-then-verify: read back, recompute hash, mark verified or delete
+    try{
+      const tx2 = db.transaction("backups","readwrite");
+      const store2 = tx2.objectStore("backups");
+      const saved = await new Promise((resolve,reject)=>{
+        const req = store2.get(id);
+        req.onsuccess = ()=>resolve(req.result);
+        req.onerror = ()=>reject(req.error);
+      });
+      if(saved){
+        const check = await computeHash(saved.payload);
+        if(check === saved.hash){
+          saved.verified = true; store2.put(saved);
+        } else {
+          store2.delete(id);
+          console.error("Snapshot verification failed - hash mismatch, deleted record", id);
+        }
+      }
+    }catch(e){ console.error("Snapshot verification error:",e); }
+    return id;
+  }catch(e){ console.error("writeSnapshot failed:",e); return null; }
+}
+
 // (Retained, no longer wired to a Settings button.) Loads a standalone events
 // JSON into IndexedDB, replacing prior synthetic events. The importer now embeds
 // events directly in the import file, so normal Settings -> Import handles them;
@@ -2946,11 +3038,36 @@ function openSettings(){
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
+  h+='<div id="backupStaleness" class="small" style="margin-top:6px"></div>';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
   h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button></div>';
   sheet.innerHTML=h;
+  updateBackupStaleness();
   document.getElementById('scrim').classList.add('show');
+}
+function updateBackupStaleness(){
+  const el = document.getElementById('backupStaleness');
+  if(!el) return;
+  listSnapshots().then(snapshots => {
+    if(!snapshots || snapshots.length === 0){
+      el.textContent = 'No backups yet';
+      return;
+    }
+    const newest = snapshots[0];
+    const days = Math.round((Date.now() - newest.ts) / 86400000);
+    if(days === 0){
+      el.textContent = 'Last backup: today';
+    } else if(days === 1){
+      el.textContent = 'Last backup: yesterday';
+    } else {
+      el.textContent = 'Last backup: ' + days + ' days ago';
+    }
+    if(days > 7){
+      const exportBtn = document.querySelector('.settingsRow button[onclick="exportData()"]');
+      if(exportBtn) exportBtn.style.borderColor = 'var(--hp)';
+    }
+  }).catch(() => {});
 }
 function resetEverything() {
   confirmDialog('Reset Everything', 'Erase ALL progress on this device? This cannot be undone.').then(ok => {
@@ -3058,8 +3175,7 @@ function saveSettings(){
 // unavailable so export never fails outright.
 function exportData(){
   logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file'});
-  const finish=(eventsArr)=>{
-    // Build the backup from S without mutating S; attach events for portability.
+  const finish=async (eventsArr)=>{
     const backup=Object.assign({}, S, {events: eventsArr||[]});
     const _lastMs=function(arr){let mx=0;(arr||[]).forEach(x=>{const c=(x.createdAt||0),u=(x.updatedAt||0);if(c>mx)mx=c;if(u>mx)mx=u;});return mx;};
     backup._backup={ exportedAt:new Date().toISOString(), appVersion:APP_VERSION,
@@ -3068,11 +3184,33 @@ function exportData(){
                              tags:(S.tags||[]).length,
                              views:((S.prefs&&S.prefs.an&&S.prefs.an.views)||[]).length,
                              lastActivityAt:new Date(Math.max(_lastMs(S.tasks),_lastMs(S.rewards))||Date.now()).toISOString() } };
-    const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
-    const url=URL.createObjectURL(blob); const a=document.createElement('a');
-    const d=new Date(); const p=(n)=>String(n).padStart(2,'0'); const stamp=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
-    a.href=url; a.download='questa-backup-'+stamp+'.json'; a.click();
-    setTimeout(()=>URL.revokeObjectURL(url),1000);
+    // Compute hash over the backup string (without hash field), then inject it
+    let hash = null;
+    try{
+      const preJson = JSON.stringify(backup);
+      hash = await computeHash(preJson);
+      backup._backup.hash = hash;
+    }catch(e){ /* hash optional; export proceeds without it */ }
+    const finalJson = JSON.stringify(backup, null, 2);
+    const blob = new Blob([finalJson], {type:'application/json'});
+    const d=new Date(); const p=(n)=>String(n).padStart(2,'0');
+    const stamp=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
+    const filename = 'questa-backup-'+stamp+'.json';
+    // Share via navigator.share when available (mobile), fallback to download
+    if(navigator.canShare && navigator.canShare({files: [new File([blob], filename, {type:'application/json'})]})){
+      try{
+        await navigator.share({files: [new File([blob], filename, {type:'application/json'})]});
+      }catch(e){
+        // If user cancels share or it fails, fall through to download
+        const url=URL.createObjectURL(blob); const a=document.createElement('a');
+        a.href=url; a.download=filename; a.click();
+        setTimeout(()=>URL.revokeObjectURL(url),1000);
+      }
+    } else {
+      const url=URL.createObjectURL(blob); const a=document.createElement('a');
+      a.href=url; a.download=filename; a.click();
+      setTimeout(()=>URL.revokeObjectURL(url),1000);
+    }
     toast('Exported'+((eventsArr&&eventsArr.length)?(' ('+eventsArr.length+' events)'):''));
   };
   getEvents({}).then(finish).catch(()=>finish([]));
@@ -3082,26 +3220,39 @@ function importData(ev){
   const rd=new FileReader();
   rd.onload=()=>{ try{ const data=JSON.parse(rd.result);
       if(!data.char||!Array.isArray(data.tasks)) throw 0;
-      // Capture any embedded event log BEFORE migrate() (which strips `events`
-      // from S so it never re-enters localStorage). A full backup is a full
-      // restore: replace the IDB event log entirely (clear then bulk-add) so a
-      // re-import never duplicates. Done async; localStorage restore stays sync.
-      const embeddedEvents = Array.isArray(data.events) ? data.events : null;
-      confirmDialog('Import Progress', 'Replace current progress with the imported file?').then(ok => {
-        if(!ok) return;
-        S=migrate(data); save(); applyWidth(); applyCardThick(); closeSheet(); render();
-        if(embeddedEvents && typeof indexedDB!=="undefined"){
-          clearAllEvents().then(()=>bulkAddEvents(embeddedEvents)).then(n=>{
-            logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Restored ' + n + ' events'});
-            toast('Imported · '+n+' events restored');
+      const doImport = () => {
+        const embeddedEvents = Array.isArray(data.events) ? data.events : null;
+        confirmDialog('Import Progress', 'Replace current progress with the imported file?').then(ok => {
+          if(!ok) return;
+          S=migrate(data); save(); applyWidth(); applyCardThick(); closeSheet(); render();
+          if(embeddedEvents && typeof indexedDB!=="undefined"){
+            clearAllEvents().then(()=>bulkAddEvents(embeddedEvents)).then(n=>{
+              logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Restored ' + n + ' events'});
+              toast('Imported · '+n+' events restored');
+              if(TAB==='analytics') render();
+            });
+          } else {
+            logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Imported from backup'});
+            toast('Imported');
             if(TAB==='analytics') render();
-          });
-        } else {
-          logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Imported from backup'});
-          toast('Imported');
-          if(TAB==='analytics') render();
-        }
-      });
+          }
+        });
+      };
+      if(data._backup && data._backup.hash){
+        const expectedHash = data._backup.hash;
+        delete data._backup.hash;
+        const cleanStr = JSON.stringify(data);
+        data._backup.hash = expectedHash;
+        computeHash(cleanStr).then(check => {
+          if(check !== expectedHash){
+            alertDialog('Import Error', 'This file appears to be corrupted or tampered with (hash mismatch). Import cancelled.');
+            return;
+          }
+          doImport();
+        }).catch(() => doImport());
+      } else {
+        doImport();
+      }
     }catch(e){ alertDialog('Error', 'That file does not look like a valid Questa backup.'); } };
   rd.readAsText(f); ev.target.value='';
 }

@@ -1,6 +1,6 @@
 /* Questa service worker - network-first for the app shell so updates appear
    on the next launch; cache fallback keeps it working fully offline. */
-const CACHE = "questa-v59";
+const CACHE = "questa-v60";
 const ASSETS = ["./", "./index.html", "./app.js", "./manifest.json", "./icon.svg",
                 "./icon-192.png", "./icon-512.png"];
 
@@ -40,4 +40,36 @@ self.addEventListener("fetch", e => {
       }).catch(() => {}))
     );
   }
+});
+self.addEventListener("message", e => {
+  if (e.data && e.data.type === "SHOW_NOTIFICATION") {
+    const { title, body, tag, data } = e.data;
+    e.waitUntil(
+      self.registration.showNotification(title, {
+        body: body,
+        icon: "./icon-192.png",
+        badge: "./icon-192.png",
+        tag: tag || "questa-reminder",
+        data: data || {},
+        vibrate: [100, 50, 100],
+        renotify: true
+      })
+    );
+  }
+});
+
+self.addEventListener("notificationclick", e => {
+  e.notification.close();
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(clients => {
+      for (const client of clients) {
+        if (client.url && "focus" in client) {
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow("./");
+      }
+    })
+  );
 });

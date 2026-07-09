@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.09-1856";
+const APP_VERSION = "v2026.07.09-2224";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -106,7 +106,7 @@ function load(){
 }
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
-  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardThick:0}, s.prefs||{});
+  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardThick:0, notificationsEnabled:false}, s.prefs||{});
   if(out.prefs.cardPad !== undefined){
     let cp = parseInt(out.prefs.cardPad, 10);
     if(isFinite(cp)){
@@ -124,6 +124,7 @@ function migrate(s){ const f=freshState();
   // localStorage blob or be mistaken for a live source.
   if(!Array.isArray(out.tags)) out.tags=[];
   delete out.events;
+  if(Array.isArray(out.tasks)){ out.tasks.forEach(normalizeTaskReminders); }
   return out; }
 let IS_DIRTY = false;
 let _flushPromise = null;
@@ -498,6 +499,101 @@ function applyCardThick(){ document.documentElement.style.setProperty('--card-mi
 
 const uid = ()=> Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 function dayStamp(d){ return d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate(); }
+/* BEGIN_REMINDER_HELPERS */
+function normalizeTaskReminders(t) {
+  if (!t.reminders || !Array.isArray(t.reminders)) {
+    t.reminders = [];
+  }
+}
+
+function isReminderDue(t, r, now) {
+  if (!r.enabled) return false;
+  if (t.type === 'todo' && t.done) return false;
+  
+  const currentHour = String(now.getHours()).padStart(2, '0');
+  const currentMin = String(now.getMinutes()).padStart(2, '0');
+  const currentTimeStr = `${currentHour}:${currentMin}`;
+  if (r.time !== currentTimeStr) return false;
+  
+  if (r.kind === 'once') {
+    const currentYear = now.getFullYear();
+    const currentMonth = String(now.getMonth() + 1).padStart(2, '0');
+    const currentDateVal = String(now.getDate()).padStart(2, '0');
+    const currentDateStr = `${currentYear}-${currentMonth}-${currentDateVal}`;
+    if (r.date !== currentDateStr) return false;
+  } else {
+    const currentDay = now.getDay();
+    if (t.type === 'daily') {
+      if (t.repeat && !t.repeat[currentDay]) return false;
+    } else {
+      if (r.days && !r.days[currentDay]) return false;
+    }
+  }
+  
+  const fireKey = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${r.time}`;
+  if (r.lastFiredKey === fireKey) return false;
+  
+  return true;
+}
+
+function getReminderNotificationPayload(t, r) {
+  let title = t.title || 'Questa Reminder';
+  let body = '';
+  if (t.type === 'habit') {
+    body = t.notes ? `Nudge: ${t.notes}` : 'Time to score your habit!';
+  } else if (t.type === 'daily') {
+    body = t.notes ? `Daily reminder: ${t.notes}` : 'Check off your daily task!';
+  } else {
+    body = t.notes ? `To-Do due: ${t.notes}` : 'Complete your to-do!';
+  }
+  return {
+    title: title,
+    body: body,
+    tag: `questa-${t.id}`
+  };
+}
+/* END_REMINDER_HELPERS */
+let _schedulerInterval = null;
+function startReminderScheduler() {
+  if (_schedulerInterval) clearInterval(_schedulerInterval);
+  checkReminders();
+  _schedulerInterval = setInterval(checkReminders, 60000);
+}
+
+function checkReminders() {
+  if (!S.prefs || !S.prefs.notificationsEnabled) return;
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  
+  const now = new Date();
+  let tasksChanged = false;
+  
+  S.tasks.forEach(t => {
+    if (!t.reminders) return;
+    t.reminders.forEach(r => {
+      if (isReminderDue(t, r, now)) {
+        const payload = getReminderNotificationPayload(t, r);
+        if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+          navigator.serviceWorker.controller.postMessage({
+            type: 'SHOW_NOTIFICATION',
+            title: payload.title,
+            body: payload.body,
+            tag: payload.tag
+          });
+        } else {
+          new Notification(payload.title, { body: payload.body, tag: payload.tag });
+        }
+        
+        const fireKey = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${r.time}`;
+        r.lastFiredKey = fireKey;
+        tasksChanged = true;
+      }
+    });
+  });
+  
+  if (tasksChanged) {
+    save();
+  }
+}
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
 const DIFF = { trivial:0.1, easy:1, medium:1.5, hard:2 };
@@ -919,6 +1015,10 @@ function metaRow(t){
 function rail(t){
   let items = [];
   items.push('<span class="railItem diff-'+t.difficulty+'">'+t.difficulty+'</span>');
+  const hasRem = t.reminders && t.reminders[0] && t.reminders[0].enabled;
+  if(hasRem){
+    items.push('<span class="railItem bell" title="Reminder set" style="color:var(--accent);border-color:transparent;background:transparent;padding:0 2px;font-size:11px">🔔</span>');
+  }
   if(t.type==='daily'){
     items.push('<span class="railItem streak" title="Day streak">🔥 '+(t.streak||0)+'</span>');
     if(!t.done && !isDailyDueToday(t)){
@@ -2888,9 +2988,64 @@ function openEdit(id,type){
     : {id:null,type:type||'todo',title:'',notes:'',difficulty:'easy',value:0,done:false,
        checklist:[],repeat:[true,true,true,true,true,true,true],up:true,down:true,resetFreq:'daily',tags:[]};
   EDIT = JSON.parse(JSON.stringify(t));
+  const hasRem = EDIT.reminders && EDIT.reminders[0] && EDIT.reminders[0].enabled;
+  EDIT._reminderEnabled = hasRem;
+  if (hasRem) {
+    EDIT._tempReminderTime = EDIT.reminders[0].time;
+    EDIT._tempReminderDate = EDIT.reminders[0].date || new Date().getFullYear() + '-' + String(new Date().getMonth()+1).padStart(2,'0') + '-' + String(new Date().getDate()).padStart(2,'0');
+    EDIT._tempReminderDays = EDIT.reminders[0].days || [true,true,true,true,true,true,true];
+  } else {
+    EDIT._tempReminderTime = "09:00";
+    EDIT._tempReminderDate = new Date().getFullYear() + '-' + String(new Date().getMonth()+1).padStart(2,'0') + '-' + String(new Date().getDate()).padStart(2,'0');
+    EDIT._tempReminderDays = [true,true,true,true,true,true,true];
+  }
   drawSheet();
   document.getElementById('scrim').classList.add('show');
 }
+function drawReminderEditor(t) {
+  const dayLabels = ['S','M','T','W','T','F','S'];
+  const hasRem = t._reminderEnabled;
+  let h = '<label>Reminder</label>';
+  h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
+  h += '<input type="checkbox" id="eReminderEnabled" ' + (hasRem ? 'checked' : '') + ' onclick="EDIT._reminderEnabled=this.checked;drawSheet()" style="width:auto;margin:0;cursor:pointer">';
+  h += '<label for="eReminderEnabled" style="margin:0;cursor:pointer;font-weight:normal">Enable notification reminder</label>';
+  h += '</div>';
+  
+  if (hasRem) {
+    h += '<div id="eReminderControls" style="border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--panel);margin-bottom:12px">';
+    
+    // Time picker
+    h += '<div style="display:flex;gap:12px;align-items:center;margin-bottom:8px">';
+    h += '<label style="margin:0;white-space:nowrap;font-size:12px;width:60px">Time</label>';
+    h += '<input type="time" id="eReminderTime" value="' + (t._tempReminderTime || '09:00') + '" onchange="EDIT._tempReminderTime=this.value" style="margin:0;flex:1">';
+    h += '</div>';
+    
+    if (t.type === 'todo') {
+      // Date picker for to-dos
+      h += '<div style="display:flex;gap:12px;align-items:center">';
+      h += '<label style="margin:0;white-space:nowrap;font-size:12px;width:60px">Date</label>';
+      h += '<input type="date" id="eReminderDate" value="' + (t._tempReminderDate || '') + '" onchange="EDIT._tempReminderDate=this.value" style="margin:0;flex:1">';
+      h += '</div>';
+    } else if (t.type === 'habit') {
+      // Day selector for habits
+      h += '<label style="margin:0 0 6px 0;font-size:12px">Repeat reminder on</label>';
+      h += '<div class="days" id="eReminderDays" style="margin-top:4px">';
+      h += dayLabels.map((d, i) => {
+        const active = t._tempReminderDays && t._tempReminderDays[i];
+        return '<button type="button" style="border:1px solid var(--line);border-radius:8px;background:' + (active ? 'var(--panel2)' : 'var(--panel)') + ';color:var(--ink);cursor:pointer;padding:6px;font-size:11px" onclick="EDIT._tempReminderDays[' + i + ']=!EDIT._tempReminderDays[' + i + '];drawSheet()">' + d + '</button>';
+      }).join('');
+      h += '</div>';
+    } else if (t.type === 'daily') {
+      // Display info for dailies
+      const activeDays = t.repeat.map((r, i) => r ? dayLabels[i] : '').filter(Boolean).join(', ');
+      h += '<div class="small" style="margin-top:6px;color:var(--muted)">Reminder repeats on daily\'s repeat schedule: <b>' + (activeDays || 'Never') + '</b></div>';
+    }
+    
+    h += '</div>';
+  }
+  return h;
+}
+
 function drawSheet(){
   const t=EDIT; const dayLabels=['S','M','T','W','T','F','S'];
   const sheet=document.getElementById('sheet');
@@ -2934,6 +3089,7 @@ function drawSheet(){
         '<button class="del" onclick="EDIT.checklist.splice('+i+',1);drawSheet()">✕</button></div>').join('')+
       '<button class="btn ghost" style="padding:8px" onclick="EDIT.checklist.push({id:uid(),text:\'\',done:false});drawSheet()">+ Add subtask</button></div>';
   }
+  h+=drawReminderEditor(t);
   h+='<label>Notes / comments</label><textarea id="eNotes" placeholder="Notes, thoughts, log...">'+esc(t.notes)+'</textarea>';
   h+=tagEditorBlock(t);
   h+='<div class="rowBtns">'+(t.id?'<button class="btn danger" onclick="deleteTask()">Delete</button>':'')+
@@ -2946,6 +3102,30 @@ function saveTask(){
   EDIT.notes=document.getElementById('eNotes').value;
   document.querySelectorAll('#eCheck .ci input[type=text]').forEach((inp,i)=>{ if(EDIT.checklist[i]) EDIT.checklist[i].text=inp.value; });
   EDIT.checklist=(EDIT.checklist||[]).filter(c=>c.text.trim());
+  if (EDIT._reminderEnabled) {
+    const kind = EDIT.type === 'todo' ? 'once' : (EDIT.type === 'daily' ? 'daily' : 'weekly');
+    const r = {
+      id: EDIT.reminders && EDIT.reminders[0] ? EDIT.reminders[0].id : uid(),
+      enabled: true,
+      kind: kind,
+      time: EDIT._tempReminderTime || '09:00',
+      lastFiredKey: EDIT.reminders && EDIT.reminders[0] ? EDIT.reminders[0].lastFiredKey : ""
+    };
+    if (kind === 'once') {
+      r.date = EDIT._tempReminderDate || new Date().getFullYear() + '-' + String(new Date().getMonth()+1).padStart(2,'0') + '-' + String(new Date().getDate()).padStart(2,'0');
+    } else if (kind === 'weekly') {
+      r.days = EDIT._tempReminderDays || [true,true,true,true,true,true,true];
+    } else if (kind === 'daily') {
+      r.days = EDIT.repeat || [true,true,true,true,true,true,true];
+    }
+    EDIT.reminders = [r];
+  } else {
+    EDIT.reminders = [];
+  }
+  delete EDIT._reminderEnabled;
+  delete EDIT._tempReminderTime;
+  delete EDIT._tempReminderDate;
+  delete EDIT._tempReminderDays;
   if(EDIT.id){
     const idx=S.tasks.findIndex(x=>x.id===EDIT.id);
     const orig = S.tasks[idx];
@@ -3106,6 +3286,7 @@ function openSettings(){
   h+=settingRow('notes','Note lines','Lines of a task\'s notes shown in the list preview.',(nl===0?'Off':(''+nl)));
   h+=settingRow('haptics','Haptics','Vibration on taps and completions.',(S.prefs.haptics===false?'Off':'On'));
   h+=settingRow('cardThick','Card thickness','Minimum height of each card. Short cards grow first; taller cards are only affected at higher values.',(S.prefs.cardThick||0)===0?'Default':('+'+(S.prefs.cardThick||0)+' px'));
+  h+=settingRow('notifications','Notifications','Browser-based notification permission and status.',(S.prefs.notificationsEnabled?'On':'Off'));
   h+='</div>';
   h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
@@ -3168,6 +3349,46 @@ function settingRow(key,label,desc,val){
     '<span class="setVal">'+esc(val)+'<span class="chev">\u203a</span></span></button>';
 }
 function closeOpt(){ document.getElementById('optScrim').classList.remove('show'); document.getElementById('optMenu').innerHTML=''; }
+function setNotificationsPref(enabled){
+  S.prefs.notificationsEnabled = !!enabled;
+  save();
+  openSettings();
+  openOpt('notifications');
+}
+function requestNotificationPermission(){
+  if(!('Notification' in window)){
+    toast('Notifications not supported by this browser');
+    return;
+  }
+  Notification.requestPermission().then(perm=>{
+    if(perm==='granted'){
+      toast('Permission granted!');
+      setNotificationsPref(true);
+    } else {
+      toast('Permission: '+perm);
+      setNotificationsPref(false);
+    }
+  }).catch(()=>{
+    toast('Permission request failed');
+  });
+}
+function testNotification(){
+  if(typeof Notification==='undefined' || Notification.permission!=='granted'){
+    toast('Notification permission not granted');
+    return;
+  }
+  if(navigator.serviceWorker && navigator.serviceWorker.controller){
+    navigator.serviceWorker.controller.postMessage({
+      type: 'SHOW_NOTIFICATION',
+      title: 'Questa Test',
+      body: 'Notifications are working! ⚔️',
+      tag: 'questa-test'
+    });
+  } else {
+    new Notification('Questa Test', { body: 'Notifications are working! ⚔️' });
+  }
+  toast('Test notification sent');
+}
 // Render the foreground menu for a given setting key over a dim backdrop.
 function openOpt(key){
   let h='';
@@ -3187,6 +3408,21 @@ function openOpt(key){
       [['Off',0],['1 line',1],['2 lines',2],['3 lines',3],['5 lines',5]].map(o=>
         '<button type="button" class="'+(nl===o[1]?'on':'')+'" onclick="setNotesLines('+o[1]+')"><span>'+o[0]+'</span></button>').join('')+
       '</div>';
+  } else if(key==='notifications'){
+    const ne=S.prefs.notificationsEnabled;
+    const perm=typeof Notification!=='undefined'?Notification.permission:'default';
+    h+='<h4>Notifications</h4>';
+    h+='<p class="optHint">Browser-based persistent local reminders for habits, dailies, and to-dos. On Android, requires Chrome/Firefox to be installed as a PWA.</p>';
+    h+='<div class="optChoices">';
+    h+='<button type="button" class="'+(ne?'on':'')+'" onclick="setNotificationsPref(true)">On</button>';
+    h+='<button type="button" class="'+(ne?'':'on')+'" onclick="setNotificationsPref(false)">Off</button>';
+    h+='</div>';
+    h+='<p class="optHint" style="margin-top:8px">System Permission: <b>'+perm+'</b></p>';
+    if(perm!=='granted'){
+      h+='<button type="button" class="btn primary" style="margin-top:10px;width:100%" onclick="requestNotificationPermission()">Request Permission</button>';
+    } else {
+      h+='<button type="button" class="btn ghost" style="margin-top:10px;width:100%" onclick="testNotification()">Send Test Notification</button>';
+    }
   } else if(key==='drag'){
     const ddv=(S.prefs.dragDelay==null?DRAG_DELAY_DEFAULT:Math.min(300,Math.max(100,S.prefs.dragDelay)));
     h+='<h4>Card drag delay</h4>';
@@ -3609,7 +3845,18 @@ applyWidth();
 applyCardThick();
 startDay();
 updateHeaderHeightVar();
-if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js')
+    .then(() => { startReminderScheduler(); })
+    .catch(()=>{ startReminderScheduler(); });
+} else {
+  startReminderScheduler();
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    checkReminders();
+  }
+});
 
 rotateSnapshots().catch(()=>{});
 checkExportStaleness();

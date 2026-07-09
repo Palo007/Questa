@@ -309,8 +309,6 @@ async function readSnapshot(id){
 async function writeSnapshot(type){
   try{
     const db = await idbOpen();
-    const tx = db.transaction("backups","readwrite");
-    const store = tx.objectStore("backups");
     let events = [];
     if(type === "full"){
       const all = await getEvents({});
@@ -343,6 +341,8 @@ async function writeSnapshot(type){
       },
       verified: false
     };
+    const tx = db.transaction("backups","readwrite");
+    const store = tx.objectStore("backups");
     const id = await new Promise((resolve,reject)=>{
       const req = store.add(rec);
       req.onsuccess = ()=>resolve(req.result);
@@ -351,7 +351,7 @@ async function writeSnapshot(type){
     await new Promise(r=>{ tx.oncomplete=r; tx.onerror=r; tx.onabort=r; });
     // Write-then-verify: read back, recompute hash, mark verified or delete
     try{
-      const tx2 = db.transaction("backups","readwrite");
+      const tx2 = db.transaction("backups","readonly");
       const store2 = tx2.objectStore("backups");
       const saved = await new Promise((resolve,reject)=>{
         const req = store2.get(id);
@@ -361,9 +361,13 @@ async function writeSnapshot(type){
       if(saved){
         const check = await computeHash(saved.payload);
         if(check === saved.hash){
-          saved.verified = true; store2.put(saved);
+          const tx3 = db.transaction("backups","readwrite");
+          const store3 = tx3.objectStore("backups");
+          saved.verified = true; store3.put(saved);
         } else {
-          store2.delete(id);
+          const tx3 = db.transaction("backups","readwrite");
+          const store3 = tx3.objectStore("backups");
+          store3.delete(id);
           console.error("Snapshot verification failed - hash mismatch, deleted record", id);
         }
       }
@@ -3088,6 +3092,7 @@ function openSettings(){
     '<button class="btn ghost" onclick="openRestorePicker()">Restore Local Snapshot</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
   h+='<div id="lastFullBackupDate" class="small" style="margin-top:8px"></div>';
+  h+='<div id="lastExportDate" class="small" style="margin-top:8px"></div>';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
   h+='<div class="appVersion">'+APP_VERSION+'</div>';
   h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button></div>';
@@ -3101,6 +3106,7 @@ function openSettings(){
   }
   sheet.innerHTML=h;
   setTimeout(() => updateLastFullBackupText(), 100);
+  setTimeout(() => updateLastExportText(), 100);
   checkExportStaleness();
   document.getElementById('scrim').classList.add('show');
 }
@@ -3322,6 +3328,18 @@ async function updateLastFullBackupText(){
   }
 }
 
+async function updateLastExportText(){
+  const el = document.getElementById('lastExportDate');
+  if(!el) return;
+  const ts = S.prefs && S.prefs.lastExportTs;
+  if(ts){
+    const d = new Date(ts);
+    el.textContent = 'Last export: ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  } else {
+    el.textContent = 'Last export: None';
+  }
+}
+
 function openRestorePicker(){
   (async () => {
     if(_flushPromise) await _flushPromise;
@@ -3490,15 +3508,22 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
 // Tier 1 backup: snapshot on visibility change if dirty
 document.addEventListener('visibilitychange', () => {
   if(document.hidden && IS_DIRTY){
-    listSnapshots().then(snapshots => {
+    _flushPromise = listSnapshots().then(snapshots => {
       const hasBaseline = snapshots.some(s => s.type === "full");
-      writeSnapshot(hasBaseline ? "delta" : "full").catch(()=>{}).then(()=>{ IS_DIRTY=false; });
-    }).catch(() => { writeSnapshot("full").catch(()=>{}).then(()=>{ IS_DIRTY=false; }); });
+      return writeSnapshot(hasBaseline ? "delta" : "full");
+    }).catch(() => writeSnapshot("full")).then(id => {
+      if(id) IS_DIRTY = false;
+    }).finally(() => { _flushPromise = null; });
   }
 });
 window.addEventListener('pagehide', () => {
   if(IS_DIRTY){
-    writeSnapshot("delta").catch(()=>{}).then(()=>{ IS_DIRTY=false; });
+    _flushPromise = listSnapshots().then(snapshots => {
+      const hasBaseline = snapshots.some(s => s.type === "full");
+      return writeSnapshot(hasBaseline ? "delta" : "full");
+    }).catch(() => writeSnapshot("full")).then(id => {
+      if(id) IS_DIRTY = false;
+    }).finally(() => { _flushPromise = null; });
   }
 });
 

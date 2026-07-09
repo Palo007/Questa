@@ -77,6 +77,16 @@ function longPressMs(){
 let _buzzLastResult = null;
 let _buzzCount = 0;
 function getBuzzDiag(){ return { type: typeof navigator.vibrate, lastResult: _buzzLastResult, count: _buzzCount }; }
+// repeat index 0=Sun..6=Sat (matches JS getDay() AND the [Su,M,T,W,Th,F,Sa] array)
+function isDailyDueOn(t, dow){ return !t.repeat || !!t.repeat[dow]; }
+function isDailyDueToday(t){ return isDailyDueOn(t, new Date().getDay()); }
+const DOW_LABELS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+function nextDueWeekday(t){
+  if(!t.repeat) return null;              // legacy daily: due every day, no pill
+  const today=new Date().getDay();
+  for(let i=1;i<7;i++){ const d=(today+i)%7; if(t.repeat[d]) return DOW_LABELS[d]; }
+  return 'Never';                         // repeat all-false -> never due
+}
 const STORE_KEY = "questa.save.v1";
 function freshState(){
   return {
@@ -554,6 +564,7 @@ function logHistory(t, patch){
 }
 function completeTask(t, ev){
   if(t.done) return;
+  if(t.type==='daily' && !isDailyDueToday(t)) return; // non-due dailies must never complete (blocks streak/reward/isDue inflation)
   const r = completionReward(t);
   const delta = valueDelta(t.value);
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
@@ -564,6 +575,7 @@ function completeTask(t, ev){
   if(t.type==='daily'){ t.streak = (t.streak||0) + 1;
     const cl=(t.checklist||[]); const snap = cl.length? {checklist:cl.map(c=>({text:c.text,done:!!c.done}))} : {};
     logHistory(t,Object.assign({value:t.value,completed:true,isDue:true,reward:Object.assign({},t._gr),repeat:(t.repeat||[]).slice()},snap));
+    // isDue:true is safe here: non-due dailies are gated above
     logEvent({kind:'complete', taskType:'daily', taskId:t.id, taskTitle:t.title,
               streak:t.streak, reward:Object.assign({},t._gr), repeat:(t.repeat||[]).slice(),
               checklist:cl.map(c=>({id:c.id||null,text:c.text,done:!!c.done}))}); }
@@ -682,6 +694,7 @@ function missedYesterdayDailies(){
 // stays silent (no per-task toast, no render) for batch use by the modal.
 function creditYesterday(t){
   if(t.done) return;
+  if(t.type==='daily' && !isDailyDueOn(t, (new Date().getDay()+6)%7)) return; // only credit dailies actually due yesterday; missedYesterdayDailies already filters, this is defense-in-depth
   const r = completionReward(t);
   const delta = valueDelta(t.value);
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
@@ -758,7 +771,7 @@ function runCron(){
   S.tasks.forEach(t=>{
     if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; } return; }
     if(t.type!=='daily') return;
-    const scheduledYesterday = !t.repeat || t.repeat[(dow+6)%7];
+    const scheduledYesterday = isDailyDueOn(t, (dow+6)%7);  // intentional YESTERDAY test — do NOT use isDailyDueToday
     if(scheduledYesterday && !t.done){
       const dmg = missDamage(t);
       totalDmg += dmg;
@@ -908,6 +921,10 @@ function rail(t){
   items.push('<span class="railItem diff-'+t.difficulty+'">'+t.difficulty+'</span>');
   if(t.type==='daily'){
     items.push('<span class="railItem streak" title="Day streak">🔥 '+(t.streak||0)+'</span>');
+    if(!t.done && !isDailyDueToday(t)){
+      const nd=nextDueWeekday(t);
+      if(nd) items.push('<span class="railItem notdue" title="Not due yet">⏳ '+nd+'</span>');
+    }
   } else if(t.type==='habit'){
     const up=t.up!==false, down=t.down!==false;
     if(up&&down) items.push('<span class="railItem cnt" title="Today + / −">+'+(t.cUp||0)+'|−'+(t.cDown||0)+'</span>');
@@ -930,7 +947,8 @@ const COIN_SVG='<svg viewBox="0 0 24 24" width="22" height="22" aria-label="coin
 function taskCard(t){
   const ccol=valColor(t.value)[1];
   const inner = t.done ? '<span class="ckmark">✓</span>' : '<span class="ckbox"></span>';
-  return '<div class="task '+t.type+' '+(t.done?'done':'')+'" draggable="'+(dragOK(t.type)?'true':'false')+'" data-id="'+t.id+'" data-list="tasks">'+
+  const notDue = t.type==='daily' && !t.done && !isDailyDueToday(t);
+  return '<div class="task '+t.type+' '+(t.done?'done':'')+(notDue?' notdue':'')+'" draggable="'+(dragOK(t.type)?'true':'false')+'" data-id="'+t.id+'" data-list="tasks">'+
     '<div class="valdot" style="background:'+ccol+'"></div>'+
     '<div class="check" onclick="toggle(\''+t.id+'\',event)">'+inner+'</div>'+
     '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+rail(t)+'</div>';
@@ -1087,7 +1105,7 @@ function viewHabits(){
 function viewDailies(){
   let dailies=S.tasks.filter(t=>t.type==='daily');
   const fl=FILTER.dailies; const dow=new Date().getDay();
-  const isScheduledToday=t=> !t.repeat || t.repeat[new Date().getDay()];
+  const isScheduledToday=t=> isDailyDueToday(t);
   if(fl==='due') dailies=dailies.filter(t=> isScheduledToday(t) && !t.done);
   else if(fl==='notdue') dailies=dailies.filter(t=> t.done || !isScheduledToday(t));
   const bar=filterBar('dailies',[['All','all'],['Due','due'],['Not Due','notdue']]);
@@ -1838,7 +1856,7 @@ function anSnapshotRows(v){
   let vals=[];
   if(src==='incomplete'){
     vals=items.filter(t=>{ if(t.type==='todo') return !t.done;
-      if(t.type==='daily'){ const due=!t.repeat||t.repeat[new Date().getDay()]; return due&&!t.done; }
+      if(t.type==='daily'){ const due=isDailyDueToday(t); return due&&!t.done; }
       return false; }).map(t=>({item:t,w:1}));
   } else if(src==='streaks'){ vals=items.filter(t=>t.type==='daily').map(t=>({item:t,w:(t.streak||0)})); }
   else if(src==='tagcount'){ vals=items.map(t=>({item:t,w:1})); }
@@ -1967,7 +1985,7 @@ function anOverviewBody(from,to){
   const updated=tasks.filter(t=>{ const u=updatedMs(t); return u!==createdMs(t)&&inWin(u); }).length;
   let completed=0; tasks.forEach(t=>{ (t.history||[]).forEach(p=>{ if(p&&p.completed&&inWin(p.date)) completed++; }); });
   const openTodos=tasks.filter(t=>t.type==='todo'&&!t.done).length;
-  const dueDailies=tasks.filter(t=>t.type==='daily'&&(!t.repeat||t.repeat[new Date().getDay()])&&!t.done).length;
+  const dueDailies=tasks.filter(t=>t.type==='daily'&&isDailyDueToday(t)&&!t.done).length;
   let h='<div class="anCards">';
   h+='<div class="anCard"><div class="k">Habits</div><div class="v">'+tasks.filter(t=>t.type==='habit').length+'</div><div class="sub">total</div></div>';
   h+='<div class="anCard"><div class="k">Dailies</div><div class="v">'+tasks.filter(t=>t.type==='daily').length+'</div><div class="sub">'+dueDailies+' due now</div></div>';
@@ -2857,7 +2875,11 @@ function bindTips(selector){
 function bindHeatTooltips(){ bindTips('.anHeatCell'); }
 function toggle(id, ev){
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
-  if(t.type==='daily'){ t.done? uncompleteDaily(t) : completeTask(t, ev); }
+  if(t.type==='daily'){
+    if(t.done){ uncompleteDaily(t); return; }
+    if(!isDailyDueToday(t)){ toast('Not due until '+nextDueWeekday(t)); return; }
+    completeTask(t, ev);
+  }
   else if(t.type==='todo'){ t.done? uncompleteTodo(t) : completeTask(t, ev); }
   else { completeTask(t, ev); }
 }

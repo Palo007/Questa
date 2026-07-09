@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.09-1401 CET";
+const APP_VERSION = "v2026.07.09-1856";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -3246,50 +3246,102 @@ function saveSettings(){
 // localStorage stays lean (events are only added to the export blob, never back
 // into S — migrate() strips `events` on import). Falls back to S-only if IDB is
 // unavailable so export never fails outright.
-function exportData(){
-  logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file'});
-  const finish=async (eventsArr)=>{
-    const backup=Object.assign({}, S, {events: eventsArr||[]});
-    const _lastMs=function(arr){let mx=0;(arr||[]).forEach(x=>{const c=(x.createdAt||0),u=(x.updatedAt||0);if(c>mx)mx=c;if(u>mx)mx=u;});return mx;};
-    backup._backup={ exportedAt:new Date().toISOString(), appVersion:APP_VERSION,
-                     eventCount:(eventsArr||[]).length,
-                     items:{ tasks:(S.tasks||[]).length, rewards:(S.rewards||[]).length,
-                             tags:(S.tags||[]).length,
-                             views:((S.prefs&&S.prefs.an&&S.prefs.an.views)||[]).length,
-                             lastActivityAt:new Date(Math.max(_lastMs(S.tasks),_lastMs(S.rewards))||Date.now()).toISOString() } };
-    // Compute hash over the backup string (without hash field), then inject it
-    let hash = null;
-    try{
-      const preJson = JSON.stringify(backup);
-      hash = await computeHash(preJson);
-      backup._backup.hash = hash;
-    }catch(e){ /* hash optional; export proceeds without it */ }
-    const finalJson = JSON.stringify(backup, null, 2);
-    const blob = new Blob([finalJson], {type:'application/json'});
-    const d=new Date(); const p=(n)=>String(n).padStart(2,'0');
-    const stamp=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
-    const filename = 'questa-backup-'+stamp+'.json';
-    // Share via navigator.share when available (mobile), fallback to download
-    if(navigator.canShare && navigator.canShare({files: [new File([blob], filename, {type:'application/json'})]})){
-      try{
-        await navigator.share({files: [new File([blob], filename, {type:'application/json'})]});
-      }catch(e){
-        // If user cancels share or it fails, fall through to download
-        const url=URL.createObjectURL(blob); const a=document.createElement('a');
-        a.href=url; a.download=filename; a.click();
-        setTimeout(()=>URL.revokeObjectURL(url),1000);
-      }
-    } else {
-      const url=URL.createObjectURL(blob); const a=document.createElement('a');
-      a.href=url; a.download=filename; a.click();
-      setTimeout(()=>URL.revokeObjectURL(url),1000);
-    }
-    toast('Exported'+((eventsArr&&eventsArr.length)?(' ('+eventsArr.length+' events)'):''));
+async function buildBackupFile(eventsArr){
+  const backup=Object.assign({}, S, {events: eventsArr||[]});
+  const _lastMs=function(arr){let mx=0;(arr||[]).forEach(x=>{const c=(x.createdAt||0),u=(x.updatedAt||0);if(c>mx)mx=c;if(u>mx)mx=u;});return mx;};
+  backup._backup={ exportedAt:new Date().toISOString(), appVersion:APP_VERSION,
+                   eventCount:(eventsArr||[]).length,
+                   items:{ tasks:(S.tasks||[]).length, rewards:(S.rewards||[]).length,
+                           tags:(S.tags||[]).length,
+                           views:((S.prefs&&S.prefs.an&&S.prefs.an.views)||[]).length,
+                           lastActivityAt:new Date(Math.max(_lastMs(S.tasks),_lastMs(S.rewards))||Date.now()).toISOString() } };
+  // Compute hash over the backup string (without hash field), then inject it
+  let hash = null;
+  try{
+    const preJson = JSON.stringify(backup);
+    hash = await computeHash(preJson);
+    backup._backup.hash = hash;
+  }catch(e){ /* hash optional; export proceeds without it */ }
+  const finalJson = JSON.stringify(backup, null, 2);
+  const blob = new Blob([finalJson], {type:'application/json'});
+  const d=new Date(); const p=(n)=>String(n).padStart(2,'0');
+  const stamp=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
+  const filename = 'questa-backup-'+stamp+'.json';
+  return {blob, filename, eventCount: (eventsArr||[]).length};
+}
+
+function showExportChooser(blob, filename, eventCount) {
+  const sheet = document.getElementById('sheet');
+  const file = new File([blob], filename, {type: 'application/json'});
+  const canShareFiles = !!(navigator.canShare && navigator.canShare({files: [file]}));
+
+  let h = '<h3>Export backup</h3>';
+  h += '<div class="small" style="margin-bottom:12px">Choose where to save your backup.</div>';
+  h += '<div class="settingsRow">';
+  h += '<button class="btn ghost" id="exportShareBtn"' + (canShareFiles ? '' : ' disabled') + '>Share to another app</button>';
+  h += '<button class="btn ghost" id="exportSaveBtn">Save to this device</button>';
+  h += '<button class="btn ghost" id="exportCancelBtn">Cancel</button>';
+  h += '</div>';
+  if (!canShareFiles) {
+    h += '<div class="small" style="margin-top:8px">Sharing isn\'t available in this browser (needs Android Chrome over HTTPS). Use \'Save to device\'.</div>';
+  }
+  
+  sheet.innerHTML = h;
+
+  document.getElementById('exportShareBtn').onclick = () => {
+    if (canShareFiles) exportShare(blob, filename, eventCount);
+  };
+  document.getElementById('exportSaveBtn').onclick = () => {
+    exportSaveDevice(blob, filename, eventCount);
+  };
+  document.getElementById('exportCancelBtn').onclick = () => {
+    closeSheet();
+  };
+
+  document.getElementById('scrim').classList.add('show');
+}
+
+async function exportShare(blob, filename, eventCount) {
+  const file = new File([blob], filename, {type: 'application/json'});
+  try {
+    await navigator.share({files: [file]});
     S.prefs.lastExportTs = Date.now();
     save();
     checkExportStaleness();
-  };
-  getEvents({}).then(finish).catch(()=>finish([]));
+    toast('Exported' + (eventCount ? (' (' + eventCount + ' events)') : ''));
+    closeSheet();
+    logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file via Share'});
+  } catch(e) {
+    if (e.name === 'AbortError') {
+      closeSheet();
+    } else {
+      toast('Share failed');
+      closeSheet();
+    }
+  }
+}
+
+function exportSaveDevice(blob, filename, eventCount) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+  S.prefs.lastExportTs = Date.now();
+  save();
+  checkExportStaleness();
+  toast('Exported' + (eventCount ? (' (' + eventCount + ' events)') : ''));
+  closeSheet();
+  logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file via Download'});
+}
+
+function exportData(){
+  getEvents({})
+    .then(buildBackupFile)
+    .then(({blob, filename, eventCount}) => showExportChooser(blob, filename, eventCount))
+    .catch(() => buildBackupFile([]).then(({blob, filename, eventCount}) => showExportChooser(blob, filename, eventCount)));
 }
 function importData(ev){
   const f=ev.target.files[0]; if(!f)return;

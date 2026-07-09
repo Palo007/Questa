@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-2214 CET";
+const APP_VERSION = "v2026.07.09-0925 CET";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -85,7 +85,7 @@ function freshState(){
            lvl:1, xp:0, hp:50, maxHp:50, mp:0, gold:0 },
     tasks:[], rewards:[], tags:[],
     lastCron: dayStamp(new Date()),
-    history:[], charHistory:[],     prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardPad:5 }
+    history:[], charHistory:[],     prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0 }
   };
 }
 let S = load();
@@ -96,7 +96,14 @@ function load(){
 }
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
-  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardPad:5}, s.prefs||{});
+  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardThick:0}, s.prefs||{});
+  if(out.prefs.cardPad !== undefined){
+    let cp = parseInt(out.prefs.cardPad, 10);
+    if(isFinite(cp)){
+      out.prefs.cardThick = Math.max(0, cp - 5);
+    }
+    delete out.prefs.cardPad;
+  }
   // Tooltip delay is fixed at Instant; the control was removed, so normalize any saved value.
   out.prefs.tipDelay=0;
   // Card drag delay now lives on a 100-300 ms slider; clamp legacy values into range.
@@ -315,7 +322,7 @@ function logCharSnapshot(){
   S.charHistory.push({date:Date.now(), hp:c.hp, maxHp:c.maxHp, xp:c.xp, mp:c.mp, gold:c.gold, lvl:c.lvl});
 }
 function applyWidth(){ document.documentElement.style.setProperty('--appw',(S.prefs.width||480)+'px'); }
-function applyCardPad(){ document.documentElement.style.setProperty('--body-pad-y',(S.prefs.cardPad||5)+'px'); }
+function applyCardThick(){ document.documentElement.style.setProperty('--card-min-h',(32+(S.prefs.cardThick||0))+'px'); }
 
 const uid = ()=> Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 function dayStamp(d){ return d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate(); }
@@ -2914,7 +2921,7 @@ function openSettings(){
   h+=settingRow('width','Width','Caps the width on a monitor and keeps it centered.',(widthLabels[wv]||'Custom'));
   h+=settingRow('notes','Note lines','Lines of a task\'s notes shown in the list preview.',(nl===0?'Off':(''+nl)));
   h+=settingRow('haptics','Haptics','Vibration on taps and completions.',(S.prefs.haptics===false?'Off':'On'));
-  h+=settingRow('cardPad','Card padding','Vertical space above and below each habit, daily and to-do card.',(S.prefs.cardPad||5)+' px');
+  h+=settingRow('cardThick','Card thickness','Minimum height of each card. Short cards grow first; taller cards are only affected at higher values.',(S.prefs.cardThick||0)===0?'Default':('+'+(S.prefs.cardThick||0)+' px'));
   h+='</div>';
   h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
@@ -2934,7 +2941,7 @@ function resetEverything() {
     S=freshState();
     save();
     applyWidth();
-    applyCardPad();
+    applyCardThick();
     closeSheet();
     render();
   });
@@ -2943,7 +2950,7 @@ function resetEverything() {
 function setWidth(px){ S.prefs.width=px; applyWidth(); save(); closeOpt(); openSettings(); }
 function setNotesLines(n){ S.prefs.notesLines=n; save(); closeOpt(); openSettings(); }
 function setHaptics(n){ S.prefs.haptics=!!n; save(); closeOpt(); openSettings(); }
-function setCardPad(px){ let n=parseInt(px,10); if(!isFinite(n)) n=5; n=Math.min(80,Math.max(3,n)); S.prefs.cardPad=n; applyCardPad(); save(); openSettings(); }
+function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.min(60,Math.max(0,n)); S.prefs.cardThick=n; applyCardThick(); save(); closeOpt(); openSettings(); }
 // --- Settings rows + foreground options menu -------------------------------
 // Build one tappable row: a label + short description on the left, current
 // value + chevron on the right. Tapping opens the matching options menu.
@@ -2983,18 +2990,18 @@ function openOpt(key){
         'onchange="setDragDelay(this.value)">'+
       '<div class="sEnds"><span>100</span><span>300</span></div>'+
       '</div>';
-  } else if(key==='cardPad'){
-    const cp=(S.prefs.cardPad==null?5:Math.min(80,Math.max(3,S.prefs.cardPad)));
-    h+='<h4>Card padding</h4>';
-    h+='<p class="optHint">Vertical space above and below each habit, daily and to-do card (3–80\u00a0px). Doesn\u2019t affect width.</p>';
+  } else if(key==='cardThick'){
+    const cp=(S.prefs.cardThick==null?0:Math.min(60,Math.max(0,S.prefs.cardThick)));
+    h+='<h4>Card thickness</h4>';
+    h+='<p class="optHint">Minimum height of each card. Short cards grow first; taller cards (with streaks, counters) are only affected at higher values.</p>';
     h+='<div class="optSlide">'+
-      '<div class="sVal"><span id="cpVal">'+cp+'</span> px</div>'+
-      '<input type="range" id="cpRange" min="3" max="80" step="1" value="'+cp+'" '+
-        'oninput="S.prefs.cardPad=+this.value;applyCardPad();document.getElementById(\'cpVal\').textContent=this.value" '+
-        'onchange="setCardPad(+this.value)">'+
-      '<div class="sEnds"><span>3</span><span>80</span></div>'+
+      '<div class="sVal"><span id="cpVal">'+(cp===0?'Default':('+'+cp+' px'))+'</span></div>'+
+      '<input type="range" id="cpRange" min="0" max="60" step="1" value="'+cp+'" '+
+        'oninput="S.prefs.cardThick=+this.value;applyCardThick();document.getElementById(\'cpVal\').textContent=(this.value===\'0\'?\'Default\':(\'+\'+this.value+\' px\'))" '+
+        'onchange="setCardThick(+this.value)">'+
+      '<div class="sEnds"><span>Default</span><span>+60 px</span></div>'+
       '</div>';
-    h+='<button type="button" class="btn ghost" style="margin-top:10px" onclick="setCardPad(5)">Reset to default</button>';
+    h+='<button type="button" class="btn ghost" style="margin-top:10px" onclick="setCardThick(0)">Reset to default</button>';
   }
   if(key==='haptics'){
     const hv=S.prefs.haptics!==false;
@@ -3064,7 +3071,7 @@ function importData(ev){
       const embeddedEvents = Array.isArray(data.events) ? data.events : null;
       confirmDialog('Import Progress', 'Replace current progress with the imported file?').then(ok => {
         if(!ok) return;
-        S=migrate(data); save(); applyWidth(); applyCardPad(); closeSheet(); render();
+        S=migrate(data); save(); applyWidth(); applyCardThick(); closeSheet(); render();
         if(embeddedEvents && typeof indexedDB!=="undefined"){
           clearAllEvents().then(()=>bulkAddEvents(embeddedEvents)).then(n=>{
             logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Restored ' + n + ' events'});
@@ -3163,7 +3170,7 @@ window.addEventListener('resize', updateHeaderHeightVar);
 window.addEventListener('touchend', () => { if (typeof _tActive !== 'undefined' && _tActive) endTouchDrag(); }, { passive: true });
 window.addEventListener('touchcancel', () => { if (typeof _tActive !== 'undefined' && _tActive) endTouchDrag(); }, { passive: true });
 applyWidth();
-applyCardPad();
+applyCardThick();
 startDay();
 updateHeaderHeightVar();
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }

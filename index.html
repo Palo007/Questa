@@ -101,7 +101,7 @@
     display:flex;align-items:center;justify-content:center;padding:0;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,0.3);transition:transform .15s}
   .addBtn:active{transform:scale(0.92)}
   .task{background:var(--panel);border:1px solid var(--line);border-radius:10px;
-    margin-bottom:6px;overflow:hidden;display:flex;align-items:stretch;
+    margin-bottom:6px;overflow:hidden;display:flex;align-items:stretch;min-height:var(--card-min-h,0);
     transition:transform .12s, opacity .2s}
   .task.flash{animation:flash .5s}
   @keyframes flash{0%{transform:scale(1)}40%{transform:scale(.98)}100%{transform:scale(1)}}
@@ -137,7 +137,7 @@
   .task.habit .check.up{color:var(--green);border-right:1px solid var(--line)}
   .task.habit .check.down{color:var(--red);border-left:1px solid var(--line);border-right:none}
   .task.habit .check.off{color:#4a3568;cursor:default}
-  .task .body{flex:1;min-width:0;padding:var(--body-pad-y,5px) 8px;cursor:pointer}
+  .task .body{flex:1;min-width:0;padding:5px 8px;cursor:pointer;display:flex;flex-direction:column;justify-content:center}
   .task .ttl{font-weight:600;font-size:14px;word-break:break-word;display:block;line-height:1.25}
   .task.done .ttl{text-decoration:line-through;color:var(--muted)}
   .task .meta{margin-top:3px;font-size:11px;color:var(--muted);display:flex;gap:8px;flex-wrap:wrap;align-items:center}

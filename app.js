@@ -130,7 +130,7 @@ function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
 // One database ("questa"), one object store ("events"), keyed by an
 // auto-increment id, with indexes on ts, kind and taskId.
 const IDB_NAME = "questa";
-const IDB_VERSION = 1;
+const IDB_VERSION = 2;
 const EVENTS_STORE = "events";
 // Prune policy (see HISTORY-TRACKING.md): drop events older than this many
 // months, with a generous hard-count backstop. localStorage's old 5 MB quota
@@ -154,6 +154,9 @@ function idbOpen(){
         os.createIndex("ts", "ts", {unique:false});
         os.createIndex("kind", "kind", {unique:false});
         os.createIndex("taskId", "taskId", {unique:false});
+      }
+      if(!db.objectStoreNames.contains("backups")){
+        db.createObjectStore("backups", {keyPath:"id", autoIncrement:true});
       }
     };
     req.onsuccess = ()=>{ const db=req.result; resolve(db); schedulePrune(db); };
@@ -260,6 +263,21 @@ function bulkAddEvents(list){
     tx.onabort = ()=>resolve(added);
   })).catch(()=>0);
 }
+// SHA-256 hash for backup integrity verification. Falls back to a simple
+// length-based digest when Web Crypto is unavailable (e.g. insecure context).
+async function computeHash(str){
+  if(typeof crypto!=="undefined" && crypto.subtle && crypto.subtle.digest){
+    try{
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+      return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+    }catch(e){ /* fall through */ }
+  }
+  // Fallback: deterministic string-length-based hash when crypto unavailable
+  let h = 0;
+  for(let i=0; i<str.length; i++){ h = ((h<<5)-h)+str.charCodeAt(i); h |= 0; }
+  return 'fallback-' + Math.abs(h).toString(16).padStart(8,'0');
+}
+
 // (Retained, no longer wired to a Settings button.) Loads a standalone events
 // JSON into IndexedDB, replacing prior synthetic events. The importer now embeds
 // events directly in the import file, so normal Settings -> Import handles them;

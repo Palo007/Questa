@@ -115,7 +115,8 @@ function migrate(s){ const f=freshState();
   if(!Array.isArray(out.tags)) out.tags=[];
   delete out.events;
   return out; }
-function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
+let IS_DIRTY = false;
+function save(){ IS_DIRTY = true; localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
 // --- append-only event log (IndexedDB-backed) ------------------------
 // Unlike history (one merged point/day), events are NEVER merged: each tap,
 // subtask toggle, completion and miss is its own timestamped record. This is
@@ -368,6 +369,52 @@ async function writeSnapshot(type){
     }catch(e){ console.error("Snapshot verification error:",e); }
     return id;
   }catch(e){ console.error("writeSnapshot failed:",e); return null; }
+}
+
+// Grandfather-father-son rotation: keep 7 daily, 4 weekly, 6 monthly baselines.
+async function rotateSnapshots(){
+  try{
+    const db = await idbOpen();
+    const snapshots = await listSnapshots();
+    if(snapshots.length <= 7) return;
+    const day = 86400000, week = 7*day, month = 30*day;
+    const keep = new Set();
+    if(snapshots.length > 0) keep.add(snapshots[0].id);
+    const seenDays = new Set();
+    for(const s of snapshots){
+      const dayKey = Math.floor(s.ts / day);
+      if(!seenDays.has(dayKey)){
+        seenDays.add(dayKey);
+        keep.add(s.id);
+        if(seenDays.size >= 7) break;
+      }
+    }
+    const seenWeeks = new Set();
+    for(const s of snapshots){
+      const weekKey = Math.floor(s.ts / week);
+      if(!seenWeeks.has(weekKey)){
+        seenWeeks.add(weekKey);
+        keep.add(s.id);
+        if(seenWeeks.size >= 4) break;
+      }
+    }
+    const seenMonths = new Set();
+    for(const s of snapshots){
+      const mKey = Math.floor(s.ts / month);
+      if(!seenMonths.has(mKey)){
+        seenMonths.add(mKey);
+        keep.add(s.id);
+        if(seenMonths.size >= 6) break;
+      }
+    }
+    const tx = db.transaction("backups", "readwrite");
+    const store = tx.objectStore("backups");
+    for(const s of snapshots){
+      if(!keep.has(s.id)){
+        store.delete(s.id);
+      }
+    }
+  }catch(e){ console.error("rotateSnapshots failed:", e); }
 }
 
 // (Retained, no longer wired to a Settings button.) Loads a standalone events
@@ -3334,6 +3381,21 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
   view.addEventListener('touchcancel',()=>{ tracking=false; },{passive:true});
 })();
 
+// Tier 1 backup: snapshot on visibility change if dirty
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden && IS_DIRTY){
+    listSnapshots().then(snapshots => {
+      const hasBaseline = snapshots.some(s => s.type === "full");
+      writeSnapshot(hasBaseline ? "delta" : "full").catch(()=>{}).then(()=>{ IS_DIRTY=false; });
+    }).catch(() => { writeSnapshot("full").catch(()=>{}).then(()=>{ IS_DIRTY=false; }); });
+  }
+});
+window.addEventListener('pagehide', () => {
+  if(IS_DIRTY){
+    writeSnapshot("delta").catch(()=>{}).then(()=>{ IS_DIRTY=false; });
+  }
+});
+
 document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };
 window.addEventListener('resize', updateHeaderHeightVar);
 window.addEventListener('touchend', () => { if (typeof _tActive !== 'undefined' && _tActive) endTouchDrag(); }, { passive: true });
@@ -3343,3 +3405,15 @@ applyCardThick();
 startDay();
 updateHeaderHeightVar();
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }
+
+rotateSnapshots().catch(()=>{});
+
+setTimeout(() => {
+  listSnapshots().then(snapshots => {
+    const now = Date.now();
+    const needsSnapshot = snapshots.length === 0 || (now - snapshots[0].ts) > 12*3600000;
+    if(needsSnapshot){
+      writeSnapshot("full").catch(()=>{});
+    }
+  }).catch(()=>{});
+}, 5000);

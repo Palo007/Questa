@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-1817";
+const APP_VERSION = "v2026.07.10-1858";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -2614,7 +2614,22 @@ function renderEventDetail(from,to){
       const titleHtml = e.taskTitle ? '<strong class="evTaskClick" onclick="evSetSearch(\'' + esc(e.taskTitle).replace(/'/g, "\\'") + '\')">' + esc(e.taskTitle) + '</strong>' : '';
 
       const _NEWK={create:1,edit:1,delete:1,uncomplete:1,rewardCreate:1,rewardEdit:1,rewardDelete:1,purchase:1,restore:1};
-      if (_NEWK[e.kind]) {
+      if (e.kind === 'subtask') {
+        icon = '↳';
+        badgeName = cat === 'todo' ? 'To-do' : 'Daily';
+        badgeClass = cat === 'todo' ? 'evBadge-todo' : 'evBadge-daily';
+        const fromState = e.done ? 'unchecked' : 'checked';
+        const toState   = e.done ? 'checked'   : 'unchecked';
+        let note = '';
+        if (cat === 'daily') {
+          const _t = S.tasks.find(x => x.id === e.taskId);
+          note = ' &middot; <span class="evNote" style="opacity:.7">daily ' + (_t && _t.done ? 'complete' : 'not complete') + '</span>';
+        }
+        desc = 'Subtask <code>' + esc(e.subText || '') + '</code> on ' + titleHtml +
+               ' &middot; ' + _evDiffText(fromState, toState) + note;
+      }
+
+      else if (_NEWK[e.kind]) {
         badgeName=_evCatBadgeName(cat); badgeClass=_evCatBadgeClass(cat);
         if (e.kind==='create'){ icon='🆕'; desc='Created '+(e.taskType||'task')+' '+titleHtml; }
         else if (e.kind==='edit'){ icon='✏️';
@@ -2675,18 +2690,21 @@ function renderEventDetail(from,to){
           icon = '📅';
           badgeClass = 'evBadge-daily';
           const lateStr = e.late ? ' <span class="evLate">late</span>' : '';
-          desc = 'Completed daily ' + titleHtml + lateStr;
+          let detail = '';
+          if (Array.isArray(e.checklist) && e.checklist.length) {
+            const _rows = e.checklist.map(c =>
+              '<div style="padding-left:8px">&bull; ' + (c.done ? '<span style="color:#7ee787">checked</span>' : '<span style="color:#f74e52">unchecked</span>') +
+              ' <span style="opacity:.8">' + esc(c.text || '') + '</span></div>'
+            ).join('');
+            detail = '<div style="margin-top:3px;font-size:11px;line-height:1.5"><span style="opacity:.7">subtasks:</span>' + _rows + '</div>';
+          }
+          desc = 'Completed daily ' + titleHtml + lateStr + detail;
         }
       } else if (cat === 'todo') {
         badgeName = 'To-do';
         badgeClass = 'evBadge-todo';
         icon = '☑️';
-        if (e.kind === 'subtask') {
-          icon = '↳';
-          desc = (e.done ? 'Checked' : 'Unchecked') + ' subtask <code>' + esc(e.subText || '') + '</code> on ' + titleHtml;
-        } else {
-          desc = 'Completed to-do ' + titleHtml;
-        }
+        desc = 'Completed to-do ' + titleHtml;
       } else if (cat === 'system') {
         badgeName = 'System';
         badgeClass = 'evBadge-system';

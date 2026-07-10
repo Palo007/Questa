@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-2155";
+const APP_VERSION = "v2026.07.10-2219";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -3617,11 +3617,8 @@ function openSettings(){
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button>'+
     '<button class="btn ghost" onclick="openRestorePicker()">Restore Snapshot</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json,text/plain,.txt" style="display:none" onchange="importData(event)">';
-  h+='<div id="lastFullBackupDate" class="small" style="margin-top:8px"></div>';
-  h+='<div id="lastExportDate" class="small" style="margin-top:8px"></div>';
-  h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
-  h+='<div class="appVersion">'+APP_VERSION+'</div>';
-  h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button></div>';
+  h+='<div class="backupMeta small"><span id="lastFullBackupDate"></span><span id="lastExportDate"></span></div>';
+  h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button><div class="appVersion">'+APP_VERSION+'</div></div>';
   if(IS_DIRTY){
     _flushPromise = listSnapshots().then(snapshots => {
       const hasBaseline = snapshots.some(s => s.type === "full");

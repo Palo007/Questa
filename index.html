@@ -335,7 +335,7 @@
   input[type=text],input[type=number],textarea,select{width:100%;background:var(--panel);color:var(--ink);
     border:1px solid var(--line);border-radius:8px;padding:9px 10px;font-size:14px;font-family:inherit}
   /* small, left-aligned destructive action, kept away from the common buttons */
-  .resetRow{display:flex;justify-content:flex-start;margin:18px 0 4px}
+  .resetRow{display:flex;align-items:center;justify-content:flex-start;position:relative;margin:12px 0 4px}
   .btn.resetMini{flex:0 0 auto;width:auto;background:transparent;color:var(--red);
     border:1px solid var(--red);border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600;opacity:.7}
   .btn.resetMini:active{opacity:1}
@@ -509,8 +509,9 @@
   .devNameRow .btn{flex:1 1 33%;font-size:13px;padding:10px}
   .devNameRow input{flex:1 1 33%;width:100%;box-sizing:border-box}
   .small{font-size:11px;color:var(--muted);line-height:1.5}
-  .appVersion{margin:14px 2px 4px;text-align:center;font-size:10px;letter-spacing:.05em;
-    color:var(--muted);opacity:.6;font-variant-numeric:tabular-nums}
+  .backupMeta{display:flex;justify-content:space-between;gap:12px;margin-top:8px}
+  .appVersion{position:absolute;left:50%;transform:translateX(-50%);margin:0;
+    font-size:10px;letter-spacing:.05em;color:var(--muted);opacity:.6;font-variant-numeric:tabular-nums}
   .deathOverlay{position:fixed;inset:0;background:rgba(40,5,20,.92);z-index:70;display:none;
     align-items:center;justify-content:center;text-align:center;padding:30px}
   .deathOverlay.show{display:flex}

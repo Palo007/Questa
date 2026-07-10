@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-2240";
+const APP_VERSION = "v2026.07.10-2340";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -619,7 +619,7 @@ function checkReminders() {
 }
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
-const DIFF = { trivial:0.1, easy:1, medium:1.5, hard:2 };
+const DIFF = { trivial:0.1, easy:1, medium:1.5, hard:2, log:0 };
 function xpToLevel(lvl){ return Math.round(0.25*lvl*lvl + 10*lvl + 139.75); }
 function valColor(v){
   if(v < -16) return ["Dark red","var(--darkred)"];
@@ -747,6 +747,28 @@ function uncompleteTodo(t){
 function scoreHabit(id, dir, ev){
   if(_suppressHabitClick===id){ _suppressHabitClick=null; return; }  // ignore the click fired right after a long-press
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
+  if(t.difficulty==='log'){
+    // Log habit: a pure tally. NO xp/gold/mp/hp, and value/color never changes.
+    // Any tap (+ or −) increments the period counter; a non-zero counter is what
+    // marks it "logged" and hides it from the All filter (see viewHabits) until
+    // the counter resets on the resetFreq boundary (cron). Reps are still logged
+    // so the metrics/analytics system counts the activity, but scored:false so it
+    // is never treated as a rewarded score.
+    const _rpt = t.repsPerTap || repsPerTap(t.title);
+    if(dir>0){
+      t.cUp=(t.cUp||0)+1;
+      logHistory(t,{value:t.value,reps:_rpt,repCounted:true,scored:false});
+      logEvent({kind:'habitTap', dir:1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value, log:true});
+    } else {
+      t.cDown=(t.cDown||0)+1;
+      logHistory(t,{value:t.value,reps:_rpt,repCounted:true,scored:false});
+      logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value, log:true});
+    }
+    buzz(50); floatFx('logged','pos',ev);
+    t.updatedAt=Date.now();
+    save(); render();
+    return;
+  }
   if(dir>0){
     const r=completionReward(t);
     gainXp(r.xp); S.char.gold=+(S.char.gold+r.gold).toFixed(2); S.char.mp+=r.mp;
@@ -1299,9 +1321,18 @@ function sortBar(tab){
 function viewHabits(){
   let habits=S.tasks.filter(t=>t.type==='habit');
   const fl=FILTER.habits;
-  if(fl==='weak') habits=habits.filter(t=>t.value<1);
-  else if(fl==='strong') habits=habits.filter(t=>t.value>=1);
-  const bar=filterBar('habits',[['All','all'],['Weak','weak'],['Strong','strong']]);
+  const isLog=t=>t.difficulty==='log';
+  const logged=t=>((t.cUp||0)+(t.cDown||0))>0;   // tapped this reset period
+  if(fl==='log'){
+    habits=habits.filter(isLog);                          // Log tab: every Log habit
+  } else if(fl==='weak'){
+    habits=habits.filter(t=>!isLog(t) && t.value<1);      // Log habits excluded
+  } else if(fl==='strong'){
+    habits=habits.filter(t=>!isLog(t) && t.value>=1);     // Log habits excluded
+  } else { // 'all'
+    habits=habits.filter(t=>!isLog(t) || !logged(t));     // hide already-logged Log habits
+  }
+  const bar=filterBar('habits',[['All','all'],['Weak','weak'],['Strong','strong'],['Log','log']]);
   habits=applyTagFilter(habits,'habits');
   habits=sortList(habits,'habits');
   habits=applySearch(habits,'habits');
@@ -3298,7 +3329,7 @@ function drawSheet(){
   h+='<button type="button" onclick="copyEditTask()" title="Copy title, checklist & notes" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.3;padding:0 4px;line-height:1;color:inherit">⧉</button></div>';
   h+='<label>Title</label><input type="text" id="eTitle" value="'+esc(t.title)+'" placeholder="What needs doing?">';
   h+='<label>Difficulty</label><div class="seg" id="eDiff">'+
-    ['trivial','easy','medium','hard'].map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
+    ['trivial','easy','medium','hard','log'].map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
   if(t.type==='habit'){
     h+='<label>Buttons</label><div class="seg">'+
       '<button class="'+(t.up!==false?'on':'')+'" onclick="EDIT.up=!(EDIT.up!==false);drawSheet()">+ Positive</button>'+

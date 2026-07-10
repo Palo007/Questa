@@ -19,6 +19,7 @@
 !/manifest.json
 !/sw.js
 !/README.md
+!/sync.js
 
 # === OS cruft ===
 .DS_Store

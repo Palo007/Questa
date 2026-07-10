@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-0753";
+const APP_VERSION = "v2026.07.10-1148";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -125,10 +125,20 @@ function migrate(s){ const f=freshState();
   if(!Array.isArray(out.tags)) out.tags=[];
   delete out.events;
   if(Array.isArray(out.tasks)){ out.tasks.forEach(normalizeTaskReminders); }
+  // Sync groundwork: every synced entity needs a deterministic updatedAt so
+  // three-way merge (see sync.js) can tiebreak consistently, even for data
+  // saved before this field existed.
+  (out.tasks||[]).forEach(t=>{ t.updatedAt = t.updatedAt || t.createdAt || 0; });
+  (out.rewards||[]).forEach(r=>{ r.updatedAt = r.updatedAt || r.createdAt || 0; });
+  (out.tags||[]).forEach(g=>{ g.updatedAt = g.updatedAt || g.createdAt || 0; });
+  if(out.prefs && out.prefs.an){
+    (out.prefs.an.views||[]).forEach(v=>{ v.updatedAt = v.updatedAt || v.createdAt || 0; });
+    (out.prefs.an.metrics||[]).forEach(m=>{ m.updatedAt = m.updatedAt || m.createdAt || 0; });
+  }
   return out; }
 let IS_DIRTY = false;
 let _flushPromise = null;
-function save(){ IS_DIRTY = true; localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
+function save(){ IS_DIRTY = true; localStorage.setItem(STORE_KEY, JSON.stringify(S)); if(typeof scheduleSync==="function" && !(typeof syncIsApplying==="function" && syncIsApplying())) scheduleSync(); }
 // --- append-only event log (IndexedDB-backed) ------------------------
 // Unlike history (one merged point/day), events are NEVER merged: each tap,
 // subtask toggle, completion and miss is its own timestamped record. This is
@@ -143,7 +153,7 @@ function save(){ IS_DIRTY = true; localStorage.setItem(STORE_KEY, JSON.stringify
 // One database ("questa"), one object store ("events"), keyed by an
 // auto-increment id, with indexes on ts, kind and taskId.
 const IDB_NAME = "questa";
-const IDB_VERSION = 2;
+const IDB_VERSION = 3;
 const EVENTS_STORE = "events";
 // Prune policy (see HISTORY-TRACKING.md): drop events older than this many
 // months, with a generous hard-count backstop. localStorage's old 5 MB quota
@@ -162,14 +172,23 @@ function idbOpen(){
     catch(e){ reject(e); return; }
     req.onupgradeneeded = ()=>{
       const db = req.result;
+      let evStore;
       if(!db.objectStoreNames.contains(EVENTS_STORE)){
-        const os = db.createObjectStore(EVENTS_STORE, {keyPath:"id", autoIncrement:true});
-        os.createIndex("ts", "ts", {unique:false});
-        os.createIndex("kind", "kind", {unique:false});
-        os.createIndex("taskId", "taskId", {unique:false});
+        evStore = db.createObjectStore(EVENTS_STORE, {keyPath:"id", autoIncrement:true});
+        evStore.createIndex("ts", "ts", {unique:false});
+        evStore.createIndex("kind", "kind", {unique:false});
+        evStore.createIndex("taskId", "taskId", {unique:false});
+      } else {
+        evStore = req.transaction.objectStore(EVENTS_STORE);
+      }
+      if(!evStore.indexNames.contains("uid")){
+        evStore.createIndex("uid", "uid", {unique:false});
       }
       if(!db.objectStoreNames.contains("backups")){
         db.createObjectStore("backups", {keyPath:"id", autoIncrement:true});
+      }
+      if(!db.objectStoreNames.contains("syncmeta")){
+        db.createObjectStore("syncmeta");
       }
     };
     req.onsuccess = ()=>{ const db=req.result; resolve(db); schedulePrune(db); };
@@ -181,7 +200,9 @@ function idbOpen(){
 // runCron, creditYesterday) stay synchronous; all async + failure handling is
 // internal here, so a missing/blocked IDB never breaks task scoring.
 function logEvent(ev){
-  const rec = Object.assign({ts:Date.now()}, ev);
+  const rec = (typeof syncEventUid==="function" && typeof syncDeviceId==="function")
+    ? Object.assign({ts:Date.now(), uid:syncEventUid(), dev:syncDeviceId()}, ev)
+    : Object.assign({ts:Date.now()}, ev);
   idbOpen().then(db=>{
     try{
       const tx = db.transaction(EVENTS_STORE, "readwrite");
@@ -666,6 +687,7 @@ function completeTask(t, ev){
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
+  t.updatedAt = Date.now();
   buzz(50);
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };  // remember exactly what was granted
   if(t.type==='daily'){ t.streak = (t.streak||0) + 1;
@@ -735,6 +757,7 @@ function scoreHabit(id, dir, ev){
     logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, value:t.value, dmg:dmg});
     takeDamage(dmg); buzz(100); floatFx('-'+dmg.toFixed(1)+' HP','neg',ev);
   }
+  t.updatedAt=Date.now();
   save(); render();
 }
 // Adjust the habit counter from the editor sheet. Reward/penalty application
@@ -796,6 +819,7 @@ function creditYesterday(t){
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
+  t.updatedAt = Date.now();
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };
   t.streak = (t.streak||0) + 1;
   const cl=(t.checklist||[]);
@@ -869,7 +893,7 @@ function runCron(){
   const dow = new Date().getDay();
   let totalDmg = 0;
   S.tasks.forEach(t=>{
-    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; } return; }
+    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; t.updatedAt=Date.now(); } return; }
     if(t.type!=='daily') return;
     const scheduledYesterday = isDailyDueOn(t, (dow+6)%7);  // intentional YESTERDAY test — do NOT use isDailyDueToday
     if(scheduledYesterday && !t.done){
@@ -886,6 +910,7 @@ function runCron(){
     }
     t.done = false;
     (t.checklist||[]).forEach(c=>c.done=false);
+    t.updatedAt = Date.now();
   });
   S.lastCron = today;
   if(totalDmg>0){ takeDamage(totalDmg); toast('-'+totalDmg.toFixed(1)+' HP (missed dailies)'); }
@@ -975,6 +1000,7 @@ function toggleSub(taskId, idx){
   if(c.done) buzz(50);
   logEvent({kind:'subtask', taskId:t.id, taskTitle:t.title, taskType:t.type,
             subId:c.id||null, subText:c.text, done:c.done});
+  t.updatedAt=Date.now();
   save(); render();
 }
 function checklistBlock(t){
@@ -1113,8 +1139,8 @@ function tagById(id){ ensureTags(); return S.tags.find(t=>t.id===id)||null; }
 function taskTags(t){ return (t&&Array.isArray(t.tags))?t.tags:[]; }
 function addTag(name){ name=(name||'').trim(); if(!name) return null; ensureTags();
   const ex=S.tags.find(t=>t.name.toLowerCase()===name.toLowerCase()); if(ex) return ex.id;
-  const col=TAG_COLORS[S.tags.length%TAG_COLORS.length]; const tg={id:uid(),name:name,color:col}; S.tags.push(tg); return tg.id; }
-function renameTag(id,name){ const g=tagById(id); if(g){ g.name=(name||'').trim()||g.name; save(); } }
+  const col=TAG_COLORS[S.tags.length%TAG_COLORS.length]; const tg={id:uid(),name:name,color:col,createdAt:Date.now(),updatedAt:Date.now()}; S.tags.push(tg); return tg.id; }
+function renameTag(id,name){ const g=tagById(id); if(g){ g.name=(name||'').trim()||g.name; g.updatedAt=Date.now(); save(); } }
 function deleteTag(id){ ensureTags(); S.tags=S.tags.filter(t=>t.id!==id);
   (S.tasks||[]).forEach(t=>{ if(Array.isArray(t.tags)) t.tags=t.tags.filter(x=>x!==id); });
   Object.keys(TAGFILTER).forEach(k=>{ TAGFILTER[k]=(TAGFILTER[k]||[]).filter(x=>x!==id); });
@@ -1854,8 +1880,8 @@ function bSaveMetric(){
   else { m.keyword=(document.getElementById('mKw').value||'').trim(); if(!m.keyword){ toast('Keyword required'); return; } }
   const habits=m.habits.map(h=>({id:h.id, reps:(h.reps===''||h.reps==null)?null:Number(h.reps)}));
   let id;
-  if(m._mid){ const tgt=p.metrics.find(x=>x.id===m._mid); tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits; id=m._mid; }
-  else { const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits}; p.metrics.push(nm); id=nm.id; }
+  if(m._mid){ const tgt=p.metrics.find(x=>x.id===m._mid); tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits; tgt.updatedAt=Date.now(); id=m._mid; }
+  else { const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits, createdAt:Date.now(), updatedAt:Date.now()}; p.metrics.push(nm); id=nm.id; }
   MEDIT=null; MBUILD=false;
   if(VDRAFT){ VDRAFT.source='metric'; VDRAFT.metricId=id; }
   save(); drawViewBuilder();
@@ -1863,7 +1889,7 @@ function bSaveMetric(){
 // clone the view currently open in the builder, inserting it just below
 function cloneView(){ if(!VDRAFT) return; const a=anPrefs(); a.views=a.views||[];
   if(a.views.length>=20){ toast('Max 20 view sections'); return; }
-  const copy=JSON.parse(JSON.stringify(VDRAFT)); copy.id=uid(); copy.name='clone - '+(VDRAFT.name||'view');
+  const copy=JSON.parse(JSON.stringify(VDRAFT)); copy.id=uid(); copy.name='clone - '+(VDRAFT.name||'view'); copy.createdAt=Date.now(); copy.updatedAt=Date.now();
   let idx=VDRAFT.id? a.views.findIndex(x=>x.id===VDRAFT.id) : -1; if(idx<0) idx=a.views.length-1;
   a.views.splice(idx+1,0,copy);
   VDRAFT=null; MEDIT=null; MBUILD=false; document.getElementById('scrim').classList.remove('show'); save(); refreshAnalytics();
@@ -1883,9 +1909,9 @@ function saveMetricEditor(){
   const habits=m.habits.map(h=>({id:h.id, reps:(h.reps===''||h.reps==null)?null:Number(h.reps)}));
   if(m._mid){
     const tgt=p.metrics.find(x=>x.id===m._mid);
-    tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits;
+    tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits; tgt.updatedAt=Date.now();
   } else {
-    const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits};
+    const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits, createdAt:Date.now(), updatedAt:Date.now()};
     p.metrics.push(nm); p.activeMetric=nm.id;
   }
   MEDIT=null; save(); render();
@@ -2130,8 +2156,9 @@ function cancelView(){ VDRAFT=null; document.getElementById('scrim').classList.r
 function saveView(){ if(!VDRAFT)return; const inp=document.getElementById('vName'); if(inp)VDRAFT.name=inp.value.trim();
   if(!VDRAFT.name){ toast('Name required'); return; }
   const a=anPrefs(); a.views=a.views||[];
+  VDRAFT.updatedAt=Date.now();
   if(VDRAFT.id){ const i=a.views.findIndex(x=>x.id===VDRAFT.id); if(i>=0)a.views[i]=VDRAFT; else a.views.push(VDRAFT); }
-  else { if(a.views.length>=20){ toast('Max 20 view sections'); return; } VDRAFT.id=uid(); a.views.push(VDRAFT); }
+  else { if(a.views.length>=20){ toast('Max 20 view sections'); return; } VDRAFT.id=uid(); VDRAFT.createdAt=Date.now(); a.views.push(VDRAFT); }
   a.activeView=VDRAFT.id; VDRAFT=null; document.getElementById('scrim').classList.remove('show'); save(); refreshAnalytics();
 }
 function delView(){ if(!VDRAFT||!VDRAFT.id){ cancelView(); return; }
@@ -2217,7 +2244,7 @@ function importViews(ev){
   rd.onload=()=>{ try{ const d=JSON.parse(rd.result); const arr=Array.isArray(d)?d:(d.views||[]);
       if(!Array.isArray(arr)||!arr.length) throw 0;
       const a=anPrefs(); a.views=a.views||[]; let n=0;
-      arr.forEach(v=>{ if(!v||!v.source) return; a.views.push({id:uid(), name:v.name||'Imported view', source:v.source, group:v.group||'day', chart:v.chart||'line', tags:Array.isArray(v.tags)?v.tags:[], types:Array.isArray(v.types)?v.types:[], metricId:v.metricId||null}); n++; });
+      arr.forEach(v=>{ if(!v||!v.source) return; a.views.push({id:uid(), name:v.name||'Imported view', source:v.source, group:v.group||'day', chart:v.chart||'line', tags:Array.isArray(v.tags)?v.tags:[], types:Array.isArray(v.types)?v.types:[], metricId:v.metricId||null, createdAt:Date.now(), updatedAt:Date.now()}); n++; });
       if(n){ a.activeView=a.views[a.views.length-1].id; }
       save(); refreshAnalytics(); toast('Imported '+n+' view'+(n===1?'':'s'));
     } catch(e){ alertDialog('Error', 'That file does not look like Questa views.'); } };
@@ -3292,6 +3319,31 @@ function openSettings(){
   h+=settingRow('cardThick','Card thickness','Minimum height of each card. Short cards grow first; taller cards are only affected at higher values.',(S.prefs.cardThick||0)===0?'Default':('+'+(S.prefs.cardThick||0)+' px'));
   h+=settingRow('notifications','Notifications','Browser-based notification permission and status.',(S.prefs.notificationsEnabled?'On':'Off'));
   h+='</div>';
+  h+='<div class="colTitle"><h2 style="font-size:13px">Sync</h2></div>';
+  if(typeof syncCfg==="function"){
+    const scfg=syncCfg();
+    if(!scfg.enabled){
+      h+='<div class="small">Sync via Dropbox (your account, no server) keeps this device and your other devices up to date automatically.</div>';
+      h+='<div class="settingsRow"><button class="btn ghost" onclick="syncConnect()">Connect Dropbox</button></div>';
+    } else {
+      const rel=(typeof syncRelativeTime==="function")?syncRelativeTime(scfg.lastSyncAt):(scfg.lastSyncAt?new Date(scfg.lastSyncAt).toLocaleString():'never');
+      const devShort=(scfg.deviceId||'').slice(0,6);
+      h+='<div class="small">Last sync: '+esc(rel)+' &middot; Device '+esc(devShort)+
+         (scfg.lastError?(' &middot; <span style="color:#f74e52">'+esc(scfg.lastError)+'</span>'):'')+'</div>';
+      h+='<div class="settingsRow"><button class="btn ghost" onclick="syncNow()">Sync now</button>'+
+         '<button class="btn ghost" onclick="confirmSyncDisconnect()">Disconnect</button></div>';
+      if(typeof confirmForcePush==="function" || typeof confirmForcePull==="function"){
+        h+='<div class="settingsRow">'+
+           (typeof confirmForcePush==="function"?'<button class="btn danger" onclick="confirmForcePush()">Force push</button>':'')+
+           (typeof confirmForcePull==="function"?'<button class="btn danger" onclick="confirmForcePull()">Force pull</button>':'')+
+           '</div>';
+      }
+      const _eid=(S.prefs.exportIntervalDays||0);
+      h+='<div class="setList">'+settingRow('exportInterval','Auto-backup to Dropbox','Uploads a full backup file (same as Export) on this schedule, in addition to normal sync.',(_eid?('every '+_eid+'d'):'Off'))+'</div>';
+    }
+  } else {
+    h+='<div class="small">Sync module not loaded.</div>';
+  }
   h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
@@ -3344,6 +3396,7 @@ function setWidth(px){ S.prefs.width=px; applyWidth(); save(); closeOpt(); openS
 function setNotesLines(n){ S.prefs.notesLines=n; save(); closeOpt(); openSettings(); }
 function setHaptics(n){ S.prefs.haptics=!!n; save(); closeOpt(); openSettings(); }
 function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.min(60,Math.max(0,n)); S.prefs.cardThick=n; applyCardThick(); save(); closeOpt(); openSettings(); }
+function setExportIntervalDays(n){ let d=parseInt(n,10); if(!isFinite(d)||d<0) d=0; S.prefs.exportIntervalDays=d; save(); closeOpt(); openSettings(); }
 // --- Settings rows + foreground options menu -------------------------------
 // Build one tappable row: a label + short description on the left, current
 // value + chevron on the right. Tapping opens the matching options menu.
@@ -3450,6 +3503,14 @@ function openOpt(key){
       '<div class="sEnds"><span>Default</span><span>+60 px</span></div>'+
       '</div>';
     h+='<button type="button" class="btn ghost" style="margin-top:10px" onclick="setCardThick(0)">Reset to default</button>';
+  } else if(key==='exportInterval'){
+    const eid=(S.prefs.exportIntervalDays||0);
+    h+='<h4>Auto-backup to Dropbox</h4>';
+    h+='<p class="optHint">Uploads a full backup file (the same one Settings \u2192 Export produces \u2014 everything, including your device settings) to Dropbox on this schedule, on top of normal sync. Off by default.</p>';
+    h+='<div class="optChoices">'+
+      [['Off',0],['Daily',1],['Every 3 days',3],['Weekly',7],['Every 2 weeks',14],['Monthly',30]].map(o=>
+        '<button type="button" class="'+(eid===o[1]?'on':'')+'" onclick="setExportIntervalDays('+o[1]+')"><span>'+o[0]+'</span></button>').join('')+
+      '</div>';
   }
   if(key==='haptics'){
     const hv=S.prefs.haptics!==false;
@@ -3516,11 +3577,16 @@ function showExportChooser(blob, filename, eventCount) {
   const shareFile = new File([blob], shareName, {type: 'text/plain'});
   const canShareFiles = !!(navigator.canShare && navigator.canShare({files: [shareFile]}));
 
+  const dbxAvailable = (typeof syncCfg==="function" && typeof exportSaveDropbox==="function" && syncCfg().enabled);
+
   let h = '<h3>Export backup</h3>';
   h += '<div class="small" style="margin-bottom:12px">Choose where to save your backup.</div>';
   h += '<div class="settingsRow">';
   h += '<button class="btn ghost" id="exportShareBtn"' + (canShareFiles ? '' : ' disabled') + '>Share</button>';
   h += '<button class="btn ghost" id="exportSaveBtn">Save to this device</button>';
+  if (dbxAvailable) {
+    h += '<button class="btn ghost" id="exportDropboxBtn">Save to Dropbox</button>';
+  }
   h += '<button class="btn ghost" id="exportCancelBtn">Cancel</button>';
   h += '</div>';
   if (!canShareFiles) {
@@ -3535,6 +3601,11 @@ function showExportChooser(blob, filename, eventCount) {
   document.getElementById('exportSaveBtn').onclick = () => {
     exportSaveDevice(blob, filename, eventCount);
   };
+  if (dbxAvailable) {
+    document.getElementById('exportDropboxBtn').onclick = () => {
+      exportSaveDropbox(blob, filename, eventCount);
+    };
+  }
   document.getElementById('exportCancelBtn').onclick = () => {
     closeSheet();
   };
@@ -3855,6 +3926,7 @@ applyWidth();
 applyCardThick();
 startDay();
 updateHeaderHeightVar();
+if(typeof syncInit==="function") syncInit();
 if('serviceWorker' in navigator){
   navigator.serviceWorker.register('sw.js')
     .then(() => { startReminderScheduler(); })

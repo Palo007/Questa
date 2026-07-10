@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.09-2224";
+const APP_VERSION = "v2026.07.10-0730";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -3293,7 +3293,7 @@ function openSettings(){
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button>'+
     '<button class="btn ghost" onclick="openRestorePicker()">Restore Local Snapshot</button></div>';
-  h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
+  h+='<input type="file" id="importFile" accept="application/json,.json,text/plain,.txt" style="display:none" onchange="importData(event)">';
   h+='<div id="lastFullBackupDate" class="small" style="margin-top:8px"></div>';
   h+='<div id="lastExportDate" class="small" style="margin-top:8px"></div>';
   h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
@@ -3508,8 +3508,9 @@ async function buildBackupFile(eventsArr){
 
 function showExportChooser(blob, filename, eventCount) {
   const sheet = document.getElementById('sheet');
-  const file = new File([blob], filename, {type: 'application/json'});
-  const canShareFiles = !!(navigator.canShare && navigator.canShare({files: [file]}));
+  const shareName = filename.replace(/\.json$/, '.txt');
+  const shareFile = new File([blob], shareName, {type: 'text/plain'});
+  const canShareFiles = !!(navigator.canShare && navigator.canShare({files: [shareFile]}));
 
   let h = '<h3>Export backup</h3>';
   h += '<div class="small" style="margin-bottom:12px">Choose where to save your backup.</div>';
@@ -3538,22 +3539,27 @@ function showExportChooser(blob, filename, eventCount) {
 }
 
 async function exportShare(blob, filename, eventCount) {
-  const file = new File([blob], filename, {type: 'application/json'});
+  const shareName = filename.replace(/\.json$/, '.txt');
+  const shareFile = new File([blob], shareName, {type: 'text/plain'});
+  let shared = false;
   try {
-    await navigator.share({files: [file]});
+    await navigator.share({files: [shareFile]});
+    shared = true;
+  } catch(e) {
+    if (e.name === 'AbortError') {
+      closeSheet();
+    } else {
+      toast('Share failed: ' + e.name);
+      closeSheet();
+    }
+  }
+  if (shared) {
     S.prefs.lastExportTs = Date.now();
     save();
     checkExportStaleness();
     toast('Exported' + (eventCount ? (' (' + eventCount + ' events)') : ''));
     closeSheet();
     logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file via Share'});
-  } catch(e) {
-    if (e.name === 'AbortError') {
-      closeSheet();
-    } else {
-      toast('Share failed');
-      closeSheet();
-    }
   }
 }
 

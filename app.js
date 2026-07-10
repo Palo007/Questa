@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-1552";
+const APP_VERSION = "v2026.07.10-1728";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -3418,20 +3418,32 @@ function buyShopItem(id){
   try{ logEvent({kind:'purchase', taskTitle:item.title, cost:item.cost, effect:item.desc}); }catch(e){}
   save(); render();
 }
+// Small "ⓘ" info icon that surfaces a tooltip (reuses the hoverTip system via
+// data-tip; call bindTips('.infoTip') after injecting the markup). First line of
+// the tip is the bold title, the rest is the body.
+function infoIcon(tip){
+  return '<span class="infoTip" tabindex="0" role="img" aria-label="More info" data-tip="'+esc(tip)+'">&#9432;</span>';
+}
 function openSettings(){
   const sheet=document.getElementById('sheet');
   let h='<div class="settingsHead"><h3>Settings</h3><button class="btn primary" type="button" onclick="closeSheet()">Close</button></div>';
-  h+='<label>Character name</label><input type="text" id="setName" value="'+esc(S.char.name)+'" onchange="setCharName(this.value)">';
-  h+='<label>Avatar</label>';
-  h+='<div class="avatarSetRow">'+
-      '<input type="text" id="setFace" value="'+esc(S.char.face)+'" maxlength="2" placeholder="emoji" onchange="setCharFace(this.value)">'+
-     '<button class="btn ghost" type="button" onclick="document.getElementById(\'faceFile\').click()">Browse image\u2026</button>'+
+  const avatarTip='Avatar\nType an emoji, or upload a PNG, JPEG or GIF (max 1 MB) to use as your avatar. An uploaded image takes priority over the emoji.';
+  h+='<div class="charAvatarRow">'+
+       '<div class="caCol caName"><label>Character name</label>'+
+         '<input type="text" id="setName" value="'+esc(S.char.name)+'" onchange="setCharName(this.value)"></div>'+
+       '<div class="caCol caAvatar"><label id="avatarLbl">Avatar</label>'+
+         '<div class="caAvatarCtl">'+
+           '<input type="text" id="setFace" class="caFace" value="'+esc(S.char.face)+'" maxlength="2" placeholder="emoji" onchange="setCharFace(this.value)">'+
+           '<div class="browseGroup">'+
+             '<button class="btn ghost" type="button" onclick="document.getElementById(\'faceFile\').click()">Browse image</button>'+
+             (S.char.faceImg?'<a href="#" class="caRemove" onclick="removeFace();return false">Remove</a>':'')+
+             infoIcon(avatarTip)+
+           '</div>'+
+         '</div>'+
+       '</div>'+
      '</div>';
   h+='<input type="file" id="faceFile" accept="image/jpeg,image/png,image/gif,.jpg,.jpeg,.png,.gif" style="display:none" onchange="uploadFace(event)">';
-  if(S.char.faceImg){ h+='<div class="small" style="margin-top:6px;display:flex;align-items:center;gap:8px">'+
-     '<img src="'+S.char.faceImg+'" alt="" style="width:32px;height:32px;border-radius:8px;object-fit:cover;border:1px solid var(--line)">'+
-     'Custom image in use. <a href="#" onclick="removeFace();return false">Remove</a> to use the emoji instead.</div>'; }
-  else { h+='<div class="small" style="margin-top:6px">Type an emoji, or upload a PNG, JPEG or GIF (max 1\u00a0MB) to use as your avatar. An uploaded image takes priority over the emoji.</div>'; }
+
   // Display preferences as tappable rows; each opens a foreground options menu (openOpt).
   const widthLabels={430:'Slim',560:'Medium',720:'Wide',3000:'Full'};
   const wv=(S.prefs.width||480);
@@ -3444,11 +3456,11 @@ function openSettings(){
   h+=settingRow('saveBtnTop','Save button position','Put the Save button at the top of the edit sheet, centered next to the title, instead of at the bottom.',(S.prefs.saveBtnTop?'Top':'Bottom'));
   h+=settingRow('notifications','Notifications','Browser-based notification permission and status.',(S.prefs.notificationsEnabled?'On':'Off'));
   h+='</div>';
-  h+='<div class="colTitle"><h2 style="font-size:13px">Sync</h2></div>';
+  const syncTip='Sync via Dropbox (your account, no server) keeps this device and your other devices up to date automatically.';
+  h+='<div class="colTitle"><h2 style="font-size:13px">Sync</h2>'+infoIcon('Sync\n'+syncTip)+'</div>';
   if(typeof syncCfg==="function"){
     const scfg=syncCfg();
     if(!scfg.enabled){
-      h+='<div class="small">Sync via Dropbox (your account, no server) keeps this device and your other devices up to date automatically.</div>';
       h+='<div class="settingsRow"><button class="btn ghost" onclick="syncConnect()">Connect Dropbox</button></div>';
     } else {
       const rel=(typeof syncRelativeTime==="function")?syncRelativeTime(scfg.lastSyncAt):(scfg.lastSyncAt?new Date(scfg.lastSyncAt).toLocaleString():'never');
@@ -3469,8 +3481,7 @@ function openSettings(){
   } else {
     h+='<div class="small">Sync module not loaded.</div>';
   }
-  h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
-  h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
+  h+='<div class="colTitle"><h2 style="font-size:13px">Backup &amp; transfer</h2>'+infoIcon('Backup & transfer\nYour progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.')+'</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button>'+
     '<button class="btn ghost" onclick="openRestorePicker()">Restore Snapshot</button></div>';
@@ -3489,10 +3500,18 @@ function openSettings(){
     }).finally(() => { _flushPromise = null; });
   }
   sheet.innerHTML=h;
+  bindTips('.infoTip');
   setTimeout(() => updateLastFullBackupText(), 100);
   setTimeout(() => updateLastExportText(), 100);
   checkExportStaleness();
   document.getElementById('scrim').classList.add('show');
+  // Measured AFTER the scrim gets display:flex (was display:none until here) --
+  // offsetWidth on a display:none ancestor tree is always 0, which previously
+  // collapsed this box to just its CSS padding/border (~20px). Must measure
+  // once the sheet is actually laid out.
+  const _al=document.getElementById('avatarLbl');
+  const _fi=document.getElementById('setFace');
+  if(_al&&_fi) _fi.style.width=(_al.offsetWidth+6)+'px';
 }
 function checkExportStaleness(){
   const btn = document.getElementById('gearBtn');

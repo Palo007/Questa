@@ -40,6 +40,18 @@
   .avatarSetRow{display:flex;gap:8px;align-items:stretch}
   .avatarSetRow #setFace{flex:1 1 50%;min-width:0}
   .avatarSetRow .btn{flex:1 1 50%;white-space:nowrap}
+  .charAvatarRow{display:flex;gap:6px;align-items:flex-start;margin-top:4px;flex-wrap:nowrap}
+  .charAvatarRow .caCol{display:flex;flex-direction:column;min-width:0}
+  .charAvatarRow .caName{flex:1 1 auto;min-width:0}
+  .charAvatarRow .caAvatar{flex:0 0 auto}
+  .charAvatarRow label{margin:0 0 4px;align-self:flex-start}
+  .charAvatarRow #avatarLbl{display:inline-block}
+  .caAvatarCtl{display:flex;gap:6px;align-items:center}
+  .caFace{flex:0 0 auto;box-sizing:border-box}
+  .browseGroup{position:relative;flex:0 0 auto;display:flex;flex-direction:column}
+  .browseGroup .btn{flex:none;width:auto;overflow:visible;text-overflow:clip}
+  .browseGroup .infoTip{position:absolute;top:-20px;right:0}
+  .caRemove{align-self:center;font-size:12px;color:var(--accent);text-decoration:none;white-space:nowrap;margin-top:4px}
   .who{flex:1;min-width:0}
   .who .lvl{font-size:12px;color:var(--muted)}
   .who .name{font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -84,6 +96,10 @@
   .colTitle{display:flex;align-items:center;gap:8px;margin:16px 4px 8px}
   main .colTitle:first-child{margin-top:8px}
   .colTitle h2{margin:0;font-size:15px;letter-spacing:.3px;flex:1}
+  .infoTip{display:inline-flex;align-items:center;justify-content:center;
+    width:18px;height:18px;border-radius:50%;cursor:help;color:#1d0f38;
+    background:var(--accent);font:700 12px/1 serif;flex:0 0 auto;user-select:none}
+  .infoTip:hover,.infoTip:focus{outline:none;filter:brightness(1.12)}
   .filterIcon{background:var(--panel2);border:1px solid var(--line);color:var(--muted);
     border-radius:10px;width:34px;height:34px;font-size:14px;cursor:pointer;flex:none;
     display:flex;align-items:center;justify-content:center;padding:0;line-height:1;transition:all .15s}

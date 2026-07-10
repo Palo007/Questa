@@ -305,6 +305,20 @@
   .adj span{flex:1;font-size:14px;font-weight:700;font-variant-numeric:tabular-nums}
   .adj button{width:30px;height:30px;border:1px solid var(--line);background:var(--panel2);color:var(--ink);
     border-radius:6px;font-size:16px;cursor:pointer;flex:none}
+  /* Bulk reps sheet (long-press +/− on a habit) */
+  .repRow{display:flex;align-items:stretch;gap:8px;margin:6px 0 14px}
+  .repSide{width:46px;flex:none;border:1px solid var(--line);background:var(--panel2);color:var(--ink);
+    border-radius:8px;font-size:22px;font-weight:700;cursor:pointer}
+  .repSide:active{background:var(--panel)}
+  .repInput{flex:1;min-width:0;text-align:center;font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;
+    border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);padding:8px}
+  .repQuickRow{display:flex;gap:8px;margin-bottom:16px}
+  .repQuick{flex:1;border:1px solid var(--line);background:var(--panel);color:var(--ink);
+    border-radius:8px;padding:12px 0;font-size:16px;font-weight:700;cursor:pointer}
+  .repQuick:active{background:var(--panel2)}
+  .repActions{display:flex;gap:8px}
+  .repActions .btn{flex:1}
+  .repActions .btn[disabled]{opacity:.4;cursor:default}
   .valdot{width:10px;flex:none;align-self:stretch}
   .pill{font-size:10px;padding:1px 6px;border-radius:6px;background:#2a1947;border:1px solid var(--line)}
   .scrim{position:fixed;inset:0;background:rgba(10,5,20,.66);display:none;z-index:50;
@@ -509,11 +523,7 @@
     box-shadow: 0 4px 16px rgba(10,5,20,0.5);
   }
   body.tab-analytics .scrim {
-    padding-top: calc(var(--header-height, 105px) + var(--sticky-header-height, 60px) + 8px);
-    align-items: flex-start;
-  }
-  body.tab-analytics .sheet {
-    max-height: calc(100vh - var(--header-height, 105px) - var(--sticky-header-height, 60px) - 24px);
+    z-index: 65;
   }
   .anWrap{padding:4px 2px 30px}
   .anHeaderRow {

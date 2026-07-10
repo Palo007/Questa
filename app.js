@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-1728";
+const APP_VERSION = "v2026.07.10-1817";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -743,6 +743,7 @@ function uncompleteTodo(t){
   save(); render();
 }
 function scoreHabit(id, dir, ev){
+  if(_suppressHabitClick===id){ _suppressHabitClick=null; return; }  // ignore the click fired right after a long-press
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
   if(dir>0){
     const r=completionReward(t);
@@ -763,6 +764,73 @@ function scoreHabit(id, dir, ev){
   }
   t.updatedAt=Date.now();
   save(); render();
+}
+// ---- Bulk reps entry (long-press +/− on a habit card) ---------------------
+// Logs a precise rep count WITHOUT scoring the habit (no value/XP/gold/HP, no
+// cUp/cDown increment). Reps are aggregated by the 'reps' metric system via the
+// history event. `n` is signed: positive adds, negative removes.
+let REP=null;                 // active rep-sheet draft: {id, sign, value}
+let _suppressHabitClick=null; // id whose trailing click we must ignore after a long-press
+const REP_LONGPRESS_MS=350;
+function addReps(id, n){
+  const t=S.tasks.find(x=>x.id===id); if(!t) return;
+  // Reflect bulk reps on the habit's +/− counter (no scoring): positive reps
+  // add to cUp, negative reps add to cDown. This is the on-card feedback the
+  // reps panel needs; value/XP/gold/HP are intentionally untouched.
+  if(n>0) t.cUp=(t.cUp||0)+n; else t.cDown=(t.cDown||0)+(-n);
+  logHistory(t,{value:t.value, reps:n, repCounted:true, scored:false});
+  logEvent({kind:'habitReps', dir:Math.sign(n), taskId:t.id, taskTitle:t.title, reps:n, value:t.value});
+  t.updatedAt=Date.now();
+  save(); render();
+  toast((n>0?'+':'') + n + ' reps · no reward');
+}
+function openRepSheet(id, sign){
+  const t=S.tasks.find(x=>x.id===id); if(!t) return;
+  REP={id, sign:sign>0?1:-1, value:0};
+  drawRepSheet();
+  document.getElementById('scrim').classList.add('show');
+}
+function closeRepSheet(){
+  REP=null;
+  document.getElementById('scrim').classList.remove('show');
+}
+function repAdjust(delta){
+  if(!REP) return;
+  if(REP.sign>0) REP.value=Math.max(0, REP.value+delta);
+  else           REP.value=Math.min(0, REP.value+delta);
+  drawRepSheet();
+}
+function repQuick(n){ repAdjust(n); }
+function repInput(v){
+  if(!REP) return;
+  let n=parseInt(v,10); if(isNaN(n)) n=0;
+  REP.value = REP.sign>0 ? Math.max(0,n) : Math.min(0,n);
+  const b=document.getElementById('repConfirm'); if(b) b.disabled=(REP.value===0);
+}
+function commitReps(){
+  if(!REP) return;
+  const n=REP.value; if(!n){ closeRepSheet(); return; }
+  const id=REP.id; closeRepSheet(); addReps(id, n);
+}
+function drawRepSheet(){
+  const sheet=document.getElementById('sheet'); if(!sheet||!REP) return;
+  const t=S.tasks.find(x=>x.id===REP.id); if(!t){ REP=null; return; }
+  const pos=REP.sign>0;
+  const q=pos?[{l:'+3',v:3},{l:'+6',v:6},{l:'+8',v:8}]:[{l:'−3',v:-3},{l:'−6',v:-6},{l:'−8',v:-8}];
+  const quick=q.map(o=>'<button type="button" class="repQuick" onclick="repQuick('+o.v+')">'+o.l+'</button>').join('');
+  let h='<h3 style="margin:0 0 4px">Log reps</h3>';
+  h+='<div class="small" style="margin-bottom:12px">'+esc(t.title)+'</div>';
+  h+='<div class="repRow">';
+  h+='<button type="button" class="repSide" onclick="repAdjust(-1)" aria-label="remove one">−</button>';
+  h+='<input type="number" id="repInput" class="repInput" value="'+(REP.value||0)+'" oninput="repInput(this.value)">';
+  h+='<button type="button" class="repSide" onclick="repAdjust(1)" aria-label="add one">+</button>';
+  h+='</div>';
+  h+='<div class="repQuickRow">'+quick+'</div>';
+  h+='<div class="repActions">';
+  h+='<button type="button" class="btn ghost" onclick="closeRepSheet()">✕ Cancel</button>';
+  h+='<button type="button" class="btn primary" id="repConfirm" onclick="commitReps()"'+((REP.value===0)?' disabled':'')+'>✓ Confirm</button>';
+  h+='</div>';
+  sheet.innerHTML=h;
 }
 // Adjust the habit counter from the editor sheet. Reward/penalty application
 // is deferred to saveTask() which calculates the net delta from the original
@@ -2409,7 +2477,7 @@ function evGoPage(n){
 }
 
 function getEventCategory(e) {
-  if (e.kind === 'habitTap' || e.taskType === 'habit') return 'habit';
+  if (e.kind === 'habitTap' || e.kind === 'habitReps' || e.taskType === 'habit') return 'habit';
   if (e.kind === 'import' || e.kind === 'export') return 'system';
   if (e.taskType === 'daily' || e.kind === 'miss') return 'daily';
   if (e.taskType === 'todo') return 'todo';
@@ -2586,11 +2654,16 @@ function renderEventDetail(from,to){
         icon = e.dir === -1 ? '➖' : '⚡';
         badgeClass = e.dir === -1 ? 'evBadge-habit-down' : 'evBadge-habit';
         badgeName = 'Habit';
-        const repText = e.reps && e.reps > 1 ? ' (' + e.reps + ' reps)' : '';
-        if (e.dir === -1) {
-          desc = 'Tapped negative on ' + titleHtml;
+        if (e.kind === 'habitReps') {
+          const repText = e.reps ? ' ' + Math.abs(e.reps) + ' rep' + (Math.abs(e.reps) === 1 ? '' : 's') : '';
+          desc = 'Logged' + repText + (e.dir < 0 ? ' (removed)' : '') + ' on ' + titleHtml;
         } else {
-          desc = 'Tapped ' + titleHtml + repText;
+          const repText = e.reps && e.reps > 1 ? ' (' + e.reps + ' reps)' : '';
+          if (e.dir === -1) {
+            desc = 'Tapped negative on ' + titleHtml;
+          } else {
+            desc = 'Tapped ' + titleHtml + repText;
+          }
         }
       } else if (cat === 'daily') {
         badgeName = 'Daily';
@@ -2652,7 +2725,11 @@ function renderEventDetail(from,to){
         if (e.reward.gold) parts.push('<span class="evGainGold">+' + (+e.reward.gold).toFixed(1) + 'G</span>');
         if (e.reward.mp) parts.push('<span class="evGainMp">+' + Math.round(e.reward.mp) + ' MP</span>');
         if (parts.length) rightSide = '<div class="evRewardRow">' + parts.join(' ') + '</div>';
-      } else if ((cat === 'daily' && e.kind === 'miss') || (cat === 'habit' && e.dir === -1)) {
+      } else if (cat === 'habit' && e.kind === 'habitReps') {
+        // bulk reps entry: no scoring, so just surface the rep total
+        const r = e.reps ? Math.abs(e.reps) : 0;
+        if (r) rightSide = '<div class="evRewardRow"><span class="evGainXp">' + (e.dir < 0 ? '-' : '+') + r + ' reps</span></div>';
+      } else if ((cat === 'daily' && e.kind === 'miss') || (e.kind === 'habitTap' && e.dir === -1)) {
         let lossVal = null;
         if (e.dmg !== undefined) {
           lossVal = e.dmg;
@@ -4067,7 +4144,46 @@ window.addEventListener('pagehide', () => {
   }
 });
 
-document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };
+document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim'){ closeSheet(); closeRepSheet(); } };
+// Long-press on a habit's +/− button opens the bulk reps sheet (no scoring).
+(function(){
+  let timer=null, startX=0, startY=0, targetId=null, sign=0;
+  function clear(){ if(timer){ clearTimeout(timer); timer=null; } targetId=null; sign=0; }
+  function begin(el, x, y){
+    if(el.classList.contains('off')) return;            // disabled +/− button
+    const card=el.closest('.habit'); if(!card) return;
+    targetId=card.dataset.id; sign=el.classList.contains('down')?-1:1;
+    startX=x; startY=y;
+    timer=setTimeout(()=>{
+      timer=null;
+      if(!targetId) return;
+      _suppressHabitClick=targetId;                      // swallow the trailing click
+      buzz(15);
+      openRepSheet(targetId, sign);
+    }, REP_LONGPRESS_MS);
+  }
+  document.addEventListener('touchstart', e=>{
+    const el=e.target.closest('.habit .check.hbtn');
+    if(!el || e.touches.length!==1) return;
+    clear(); begin(el, e.touches[0].clientX, e.touches[0].clientY);
+  }, {passive:true});
+  document.addEventListener('touchmove', e=>{
+    if(!timer) return;
+    const t=e.touches[0]; if(!t) return;
+    if(Math.abs(t.clientX-startX)>10 || Math.abs(t.clientY-startY)>10) clear();
+  }, {passive:true});
+  document.addEventListener('touchend', clear, {passive:true});
+  document.addEventListener('touchcancel', clear, {passive:true});
+  document.addEventListener('mousedown', e=>{
+    const el=e.target.closest('.habit .check.hbtn');
+    if(!el) return;
+    clear(); begin(el, e.clientX, e.clientY);
+  });
+  document.addEventListener('mouseup', clear);
+  document.addEventListener('mouseleave', clear);
+  document.addEventListener('dragstart', clear);
+  document.addEventListener('contextmenu', e=>{ if(e.target.closest('.habit .check.hbtn')) e.preventDefault(); });
+})();
 window.addEventListener('resize', updateHeaderHeightVar);
 window.addEventListener('touchend', () => { if (typeof _tActive !== 'undefined' && _tActive) endTouchDrag(); }, { passive: true });
 window.addEventListener('touchcancel', () => { if (typeof _tActive !== 'undefined' && _tActive) endTouchDrag(); }, { passive: true });

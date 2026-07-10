@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-0730";
+const APP_VERSION = "v2026.07.10-0747";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -840,7 +840,11 @@ function drawYesterCheck(){
   h+='<button class="btn primary yGo" onclick="commitYesterCheck()">Start my day</button>';
   h+='<p class="yFine">Anything left unticked applies its miss damage now.</p>';
   h+='</div>';
+  const _s = document.querySelector('.ySheet');
+  const _sc = _s ? _s.scrollTop : 0;
   document.getElementById('yScrim').innerHTML=h;
+  const _ns = document.querySelector('.ySheet');
+  if(_ns) _ns.scrollTop = _sc;
 }
 function commitYesterCheck(){
   _yesterMissed.forEach(t=>{ if(_yesterTick[t.id]) creditYesterday(t); });
@@ -3292,7 +3296,7 @@ function openSettings(){
   h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button>'+
-    '<button class="btn ghost" onclick="openRestorePicker()">Restore Local Snapshot</button></div>';
+    '<button class="btn ghost" onclick="openRestorePicker()">Restore Snapshot</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json,text/plain,.txt" style="display:none" onchange="importData(event)">';
   h+='<div id="lastFullBackupDate" class="small" style="margin-top:8px"></div>';
   h+='<div id="lastExportDate" class="small" style="margin-top:8px"></div>';
@@ -3515,7 +3519,7 @@ function showExportChooser(blob, filename, eventCount) {
   let h = '<h3>Export backup</h3>';
   h += '<div class="small" style="margin-bottom:12px">Choose where to save your backup.</div>';
   h += '<div class="settingsRow">';
-  h += '<button class="btn ghost" id="exportShareBtn"' + (canShareFiles ? '' : ' disabled') + '>Share to another app</button>';
+  h += '<button class="btn ghost" id="exportShareBtn"' + (canShareFiles ? '' : ' disabled') + '>Share</button>';
   h += '<button class="btn ghost" id="exportSaveBtn">Save to this device</button>';
   h += '<button class="btn ghost" id="exportCancelBtn">Cancel</button>';
   h += '</div>';

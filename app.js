@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-2126";
+const APP_VERSION = "v2026.07.10-2155";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -1185,6 +1185,7 @@ function colTitle(title, addType, customTabKey){
     h += '</div>';
   }
   if (addType || customTabKey === 'rewards') {
+    h += '<div class="colTitleActions">';
     if (addType) {
       h += '<button class="filterIcon'+(FILTEROPEN?' open':'')+(filterActive?' active':'')+'" title="Filter" onclick="toggleFilter()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg></button>';
     }
@@ -1195,6 +1196,7 @@ function colTitle(title, addType, customTabKey){
     } else {
       h += '<button class="addBtn" onclick="openReward(null)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button>';
     }
+    h += '</div>';
   }
   h += '</div>';
   return h;

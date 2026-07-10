@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-1431";
+const APP_VERSION = "v2026.07.10-1552";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -3420,11 +3420,11 @@ function buyShopItem(id){
 }
 function openSettings(){
   const sheet=document.getElementById('sheet');
-  let h='<h3>Settings</h3>';
-  h+='<label>Character name</label><input type="text" id="setName" value="'+esc(S.char.name)+'">';
+  let h='<div class="settingsHead"><h3>Settings</h3><button class="btn primary" type="button" onclick="closeSheet()">Close</button></div>';
+  h+='<label>Character name</label><input type="text" id="setName" value="'+esc(S.char.name)+'" onchange="setCharName(this.value)">';
   h+='<label>Avatar</label>';
   h+='<div class="avatarSetRow">'+
-     '<input type="text" id="setFace" value="'+esc(S.char.face)+'" maxlength="2" placeholder="emoji">'+
+      '<input type="text" id="setFace" value="'+esc(S.char.face)+'" maxlength="2" placeholder="emoji" onchange="setCharFace(this.value)">'+
      '<button class="btn ghost" type="button" onclick="document.getElementById(\'faceFile\').click()">Browse image\u2026</button>'+
      '</div>';
   h+='<input type="file" id="faceFile" accept="image/jpeg,image/png,image/gif,.jpg,.jpeg,.png,.gif" style="display:none" onchange="uploadFace(event)">';
@@ -3432,7 +3432,6 @@ function openSettings(){
      '<img src="'+S.char.faceImg+'" alt="" style="width:32px;height:32px;border-radius:8px;object-fit:cover;border:1px solid var(--line)">'+
      'Custom image in use. <a href="#" onclick="removeFace();return false">Remove</a> to use the emoji instead.</div>'; }
   else { h+='<div class="small" style="margin-top:6px">Type an emoji, or upload a PNG, JPEG or GIF (max 1\u00a0MB) to use as your avatar. An uploaded image takes priority over the emoji.</div>'; }
-  h+='<div class="settingsRow"><button class="btn primary" onclick="saveSettings()">Save</button><button class="btn ghost" onclick="closeSheet()">Close</button></div>';
   // Display preferences as tappable rows; each opens a foreground options menu (openOpt).
   const widthLabels={430:'Slim',560:'Medium',720:'Wide',3000:'Full'};
   const wv=(S.prefs.width||480);
@@ -3524,6 +3523,8 @@ function setHaptics(n){ S.prefs.haptics=!!n; save(); closeOpt(); openSettings();
 function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.min(60,Math.max(0,n)); S.prefs.cardThick=n; applyCardThick(); save(); closeOpt(); openSettings(); }
 function setSaveBtnTop(n){ S.prefs.saveBtnTop=!!n; save(); closeOpt(); if(EDIT) drawSheet(); else if(REDIT) openReward(REDIT.id); openSettings(); }
 function setExportIntervalDays(n){ let d=parseInt(n,10); if(!isFinite(d)||d<0) d=0; S.prefs.exportIntervalDays=d; save(); closeOpt(); openSettings(); }
+function setCharName(v){ S.char.name=(v||'').trim()||'Adventurer'; save(); renderStats(); }
+function setCharFace(v){ S.char.face=(v||'🧙'); save(); renderStats(); }
 // --- Settings rows + foreground options menu -------------------------------
 // Build one tappable row: a label + short description on the left, current
 // value + chevron on the right. Tapping opens the matching options menu.
@@ -3670,13 +3671,6 @@ function setDragDelay(v){
   let n=parseInt(v,10); if(!isFinite(n)) n=DRAG_DELAY_DEFAULT;
   n=Math.min(300,Math.max(100,n));
   S.prefs.dragDelay=n; save(); openSettings();
-}
-function saveSettings(){
-  S.char.name=document.getElementById('setName').value.trim()||'Adventurer';
-  S.char.face=document.getElementById('setFace').value||'🧙';
-  // Card drag delay is set live by its slider (setDragDelay); nothing to read here.
-  S.prefs.tipDelay=0; // tooltip delay is fixed at Instant
-  save(); render(); closeSheet(); toast('Saved');
 }
 // Complete single-file backup: the localStorage S object PLUS the IndexedDB
 // event log, embedded under an `events` key. Async because reading IDB is async;

@@ -33,7 +33,10 @@ function syncCfgDefaults(){
     lastRev: null,
     lastSyncAt: null,
     lastError: null,
-    deviceId: null
+    deviceId: null,
+    evtLastUploadTs: 0,   // watermark: max ts of own events already uploaded
+    evtFileRevs: {},      // filename -> Dropbox rev of last successfully pulled version
+    evtLastPullAt: 0      // throttle: last time we ran a pull
   };
 }
 function syncCfg(){
@@ -550,6 +553,7 @@ function syncNow(){
       // by an unrelated "auto backup failed" if the same underlying
       // connectivity problem hit both.
       if(!syncCfg().lastError && typeof syncMaybeAutoExport==="function") syncMaybeAutoExport();
+      if(!syncCfg().lastError && typeof syncEventsSync==="function") syncEventsSync();
       if(typeof syncRefreshSettingsUI==="function") syncRefreshSettingsUI();
       if(_syncRerunQueued){
         _syncRerunQueued = false;
@@ -811,6 +815,195 @@ function syncMaybeAutoExport(){
   }catch(e){ /* best-effort only, never throw into syncNow()'s chain */ }
 }
 
+// ---- 3.9 Event-log sync (plan: .omo/plans/2026-07-10-eventlog-sync.md) ----
+const EVENTS_DIR = "/events";
+const EVT_PULL_MIN_INTERVAL_MS = 60000; // list_folder at most once/min
+
+/* BEGIN_EVTSYNC_HELPERS */
+// UTC month key for an event timestamp: 1467-style ms -> "YYYYMM".
+function evtMonthKey(ts){
+  const d = new Date(ts);
+  return String(d.getUTCFullYear()).padStart(4,"0") + String(d.getUTCMonth()+1).padStart(2,"0");
+}
+// "YYYYMM" -> {from,to} ms, both inclusive (getEvents uses inclusive bounds).
+function evtMonthRange(key){
+  const y = parseInt(key.slice(0,4),10), m = parseInt(key.slice(4,6),10);
+  return { from: Date.UTC(y, m-1, 1), to: Date.UTC(y, m, 1) - 1 };
+}
+// "<deviceId>-<YYYYMM>.json" -> {dev, month} | null. Greedy (.+) means the
+// month is always the LAST 6-digit group — safe even if a deviceId contains
+// digits or hyphens.
+function evtParseFileName(name){
+  const m = /^(.+)-(\d{6})\.json$/.exec(name || "");
+  return m ? { dev: m[1], month: m[2] } : null;
+}
+// Own not-yet-uploaded events: stamped, mine, real (not synthetic), newer than
+// the watermark.
+function evtUploadable(events, myDev, sinceTs){
+  return (events || []).filter(e => e && e.uid && e.dev === myDev && !e.synthetic
+    && typeof e.ts === "number" && e.ts > sinceTs);
+}
+// Full-month rebuild set for upload: same ownership rule, no watermark, local
+// IDB `id` stripped (meaningless on other devices).
+function evtOwnMonthRecords(events, myDev){
+  return (events || [])
+    .filter(e => e && e.uid && e.dev === myDev && !e.synthetic && typeof e.ts === "number")
+    .map(e => { const r = Object.assign({}, e); delete r.id; return r; });
+}
+// Filter a downloaded file's records down to what should be inserted locally:
+// stamped, not synthetic, not ours, inside the prune window, uid not already
+// present (in IDB — caller passes the set — or earlier in this same batch).
+function evtIncomingFilter(records, existingUidSet, myDev, nowMs, ageLimitMs){
+  const out = []; const seen = new Set();
+  (records || []).forEach(r => {
+    if(!r || typeof r !== "object") return;
+    if(!r.uid || typeof r.ts !== "number") return;
+    if(r.synthetic) return;
+    if(r.dev === myDev) return;
+    if(nowMs - r.ts > ageLimitMs) return;
+    if(existingUidSet.has(r.uid) || seen.has(r.uid)) return;
+    seen.add(r.uid);
+    const rec = Object.assign({}, r); delete rec.id;
+    out.push(rec);
+  });
+  return out;
+}
+// Is this whole month older than the prune window? (Compared against month END.)
+function evtMonthOlderThan(monthKey, nowMs, ageLimitMs){
+  return (nowMs - evtMonthRange(monthKey).to) > ageLimitMs;
+}
+/* END_EVTSYNC_HELPERS */
+
+// Raw download: like dbxDownload but returns {text, rev} with NO wrapper
+// validation (event files are bare arrays, not {schema,state} wrappers).
+// null on 409 (file/folder absent).
+async function dbxDownloadRaw(path, _retriedAuth){
+  const tok = await syncToken();
+  const res = await fetch("https://content.dropboxapi.com/2/files/download", {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + tok, "Dropbox-API-Arg": dbxArgHeader({ path: path }) }
+  });
+  if(res.status === 401 && !_retriedAuth){ await syncToken(true); return dbxDownloadRaw(path, true); }
+  if(res.status === 409) return null;
+  if(!res.ok){
+    let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
+    throw new HttpError("download failed: " + res.status + (detail ? " " + detail : ""), res.status);
+  }
+  const metaHeader = res.headers.get("dropbox-api-result");
+  let meta = {}; try{ meta = metaHeader ? JSON.parse(metaHeader) : {}; }catch(e){}
+  return { text: await res.text(), rev: meta.rev || null };
+}
+
+// List files in a folder, following pagination. [] if the folder doesn't exist.
+async function dbxListFolder(path, _retriedAuth){
+  const tok = await syncToken();
+  let entries = [];
+  let url = "https://api.dropboxapi.com/2/files/list_folder";
+  let body = { path: path, recursive: false, limit: 2000 };
+  for(;;){
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + tok, "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if(res.status === 401 && !_retriedAuth){ await syncToken(true); return dbxListFolder(path, true); }
+    if(res.status === 409) return []; // path/not_found — no events uploaded yet
+    if(!res.ok){
+      let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
+      throw new HttpError("list failed: " + res.status + (detail ? " " + detail : ""), res.status);
+    }
+    const data = await res.json();
+    entries = entries.concat((data.entries || []).filter(e => e[".tag"] === "file"));
+    if(!data.has_more) return entries;
+    url = "https://api.dropboxapi.com/2/files/list_folder/continue";
+    body = { cursor: data.cursor };
+  }
+}
+
+function evtInsertNew(records){
+  if(!records || !records.length) return Promise.resolve(0);
+  if(typeof idbOpen !== "function" || typeof EVENTS_STORE === "undefined") return Promise.resolve(0);
+  return idbOpen().then(db => new Promise((resolve) => {
+    let added = 0, tx;
+    try{ tx = db.transaction(EVENTS_STORE, "readwrite"); }catch(e){ resolve(0); return; }
+    const store = tx.objectStore(EVENTS_STORE);
+    records.forEach(r => { try{ store.add(r); added++; }catch(e){} });
+    tx.oncomplete = () => resolve(added);
+    tx.onerror = () => resolve(added);
+    tx.onabort = () => resolve(added);
+  })).catch(() => 0);
+}
+
+// Upload own new events, rebuilding each touched month's file in full and
+// overwriting it (single writer — no rev handshake needed; reuses
+// dbxUploadText, which uploads mode:overwrite).
+async function syncEventsPush(){
+  if(typeof getEvents !== "function") return;
+  const myDev = syncDeviceId();
+  const since = syncCfg().evtLastUploadTs || 0;
+  const fresh = evtUploadable(await getEvents({ from: since + 1 }), myDev, since);
+  if(!fresh.length) return;
+  const months = [...new Set(fresh.map(e => evtMonthKey(e.ts)))].sort();
+  let maxTs = since;
+  for(const mk of months){
+    const r = evtMonthRange(mk);
+    const recs = evtOwnMonthRecords(await getEvents({ from: r.from, to: r.to }), myDev);
+    if(!recs.length) continue;
+    await dbxUploadText(EVENTS_DIR + "/" + myDev + "-" + mk + ".json", JSON.stringify(recs));
+    recs.forEach(e => { if(e.ts > maxTs) maxTs = e.ts; });
+  }
+  syncCfgSave({ evtLastUploadTs: maxTs });
+}
+
+// Pull other devices' files whose rev changed; union-insert by uid.
+async function syncEventsPull(){
+  if(typeof getEvents !== "function" || typeof idbOpen !== "function") return;
+  const now = Date.now();
+  const cfg = syncCfg();
+  if(now - (cfg.evtLastPullAt || 0) < EVT_PULL_MIN_INTERVAL_MS) return;
+  const myDev = syncDeviceId();
+  const ageLimit = (typeof EVENT_AGE_LIMIT_MS !== "undefined") ? EVENT_AGE_LIMIT_MS : 18 * 30 * 86400000;
+  const entries = await dbxListFolder(EVENTS_DIR);
+  const revs = Object.assign({}, cfg.evtFileRevs || {});
+  for(const ent of entries){
+    const parsed = evtParseFileName(ent.name);
+    if(!parsed) continue;                    // not an event file (ignore strangers)
+    if(parsed.dev === myDev) continue;       // never re-import own uploads
+    if(evtMonthOlderThan(parsed.month, now, ageLimit)){ delete revs[ent.name]; continue; }
+    if(ent.rev && revs[ent.name] === ent.rev) continue; // unchanged since last pull
+    const dl = await dbxDownloadRaw(EVENTS_DIR + "/" + ent.name);
+    if(!dl) continue;
+    let records = null;
+    try{ records = JSON.parse(dl.text); }catch(e){ /* corrupt: skip content */ }
+    if(Array.isArray(records)){
+      const range = evtMonthRange(parsed.month);
+      const existing = new Set((await getEvents({ from: range.from, to: range.to }))
+        .map(e => e && e.uid).filter(Boolean));
+      await evtInsertNew(evtIncomingFilter(records, existing, myDev, now, ageLimit));
+    }
+    // Record the rev even if the file was corrupt — its writer overwrites it
+    // on their next push; re-downloading a permanently bad file every minute
+    // helps no one.
+    revs[ent.name] = dl.rev || ent.rev || null;
+  }
+  syncCfgSave({ evtFileRevs: revs, evtLastPullAt: now });
+}
+
+// Fire-and-forget wrapper, called from syncNow()'s success path. Own in-flight
+// guard; any failure lands in lastError and never breaks ordinary state sync.
+let _evtSyncInFlight = false;
+function syncEventsSync(){
+  if(_evtSyncInFlight) return;
+  const cfg = syncCfg();
+  if(!cfg.enabled || !cfg.refreshToken) return;
+  if(typeof navigator !== "undefined" && navigator.onLine === false) return;
+  _evtSyncInFlight = true;
+  syncEventsPush()
+    .then(() => syncEventsPull())
+    .catch(e => { syncCfgSave({ lastError: "event sync failed: " + ((e && e.message) || String(e)) }); })
+    .then(() => { _evtSyncInFlight = false; });
+}
+
 // ---- 3.6 scheduleSync() — 5s trailing debounce -----------------------------
 let _syncDebounceTimer = null;
 function scheduleSync(){
@@ -918,7 +1111,11 @@ if(typeof window !== "undefined"){
     mergeCollection: mergeCollection,
     mergeDayArray: mergeDayArray,
     exportBackup: exportSaveDropbox,
-    maybeAutoExport: syncMaybeAutoExport
+    maybeAutoExport: syncMaybeAutoExport,
+    eventsPush: syncEventsPush,
+    eventsPull: syncEventsPull,
+    eventsSync: syncEventsSync,
+    evtHelpers: { evtMonthKey, evtMonthRange, evtParseFileName, evtUploadable, evtOwnMonthRecords, evtIncomingFilter, evtMonthOlderThan }
   };
 }
 

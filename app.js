@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-1942";
+const APP_VERSION = "v2026.07.10-2126";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -93,7 +93,7 @@ function freshState(){
     version:1,
     char:{ name:"Adventurer", face:"🧙", cls:"Warrior",
            lvl:1, xp:0, hp:50, maxHp:50, mp:0, gold:0 },
-    tasks:[], rewards:[], tags:[],
+    tasks:[], rewards:[], tags:[], devices:[],
     lastCron: dayStamp(new Date()),
     history:[], charHistory:[],     prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false }
   };
@@ -123,6 +123,7 @@ function migrate(s){ const f=freshState();
   // array carried in from a legacy save or an import file so it can't bloat the
   // localStorage blob or be mistaken for a live source.
   if(!Array.isArray(out.tags)) out.tags=[];
+  if(!Array.isArray(out.devices)) out.devices=[];
   delete out.events;
   if(Array.isArray(out.tasks)){ out.tasks.forEach(normalizeTaskReminders); }
   // Sync groundwork: every synced entity needs a deterministic updatedAt so
@@ -131,6 +132,7 @@ function migrate(s){ const f=freshState();
   (out.tasks||[]).forEach(t=>{ t.updatedAt = t.updatedAt || t.createdAt || 0; });
   (out.rewards||[]).forEach(r=>{ r.updatedAt = r.updatedAt || r.createdAt || 0; });
   (out.tags||[]).forEach(g=>{ g.updatedAt = g.updatedAt || g.createdAt || 0; });
+  (out.devices||[]).forEach(d=>{ d.updatedAt = d.updatedAt || 0; });
   if(out.prefs && out.prefs.an){
     (out.prefs.an.views||[]).forEach(v=>{ v.updatedAt = v.updatedAt || v.createdAt || 0; });
     (out.prefs.an.metrics||[]).forEach(m=>{ m.updatedAt = m.updatedAt || m.createdAt || 0; });
@@ -2478,7 +2480,7 @@ function evGoPage(n){
 
 function getEventCategory(e) {
   if (e.kind === 'habitTap' || e.kind === 'habitReps' || e.taskType === 'habit') return 'habit';
-  if (e.kind === 'import' || e.kind === 'export') return 'system';
+  if (e.kind === 'import' || e.kind === 'export' || e.kind === 'devicename') return 'system';
   if (e.taskType === 'daily' || e.kind === 'miss') return 'daily';
   if (e.taskType === 'todo') return 'todo';
   if (e.kind === 'subtask') {
@@ -2507,6 +2509,20 @@ function _evDiffText(from,to){
   if(hasFrom&&!hasTo) return '<span '+F+'>'+_c(from)+'</span> \u2192 <span style="color:#f74e52;font-style:italic">removed</span>';
   return '<span '+F+'>'+_c(from)+'</span> \u2192 <span '+T+'>'+_c(to)+'</span>';
 }
+
+/* BEGIN_DEVICENAME_HELPERS */
+// Resolve a device's display name for the event log / Settings: prefer the
+// user-set name (S.devices entries, synced across devices the same way as
+// tasks/rewards/tags via mergeCollection), fall back to the same truncated
+// raw deviceId already shown in Settings so an unnamed device is still
+// distinguishable from others instead of showing nothing.
+function deviceDisplayName(devices, devId){
+  if(!devId) return '';
+  const d = (devices||[]).find(x=>x && x.id===devId);
+  const name = d && d.name ? String(d.name).trim() : '';
+  return name || String(devId).slice(0,6);
+}
+/* END_DEVICENAME_HELPERS */
 
 // Async, event-driven dashboard section. Redesigned to show a unified
 // Activity Feed where users can browse, search and filter ALL events.
@@ -2716,6 +2732,10 @@ function renderEventDetail(from,to){
           icon = '📤';
           desc = 'Exported progress data';
           if (e.notes) desc += ' &middot; <span class="evNotes">' + esc(e.notes) + '</span>';
+        } else if (e.kind === 'devicename') {
+          icon = '🏷️';
+          desc = 'Device name updated';
+          if (e.notes) desc += ' &middot; <span class="evNotes">' + esc(e.notes) + '</span>';
         } else {
           icon = '⚙️';
           desc = esc(e.taskTitle || 'System action');
@@ -2767,6 +2787,7 @@ function renderEventDetail(from,to){
       const fullTime = dateStr + ' @ ' + timeStr;
 
       const mark = e.synthetic ? ' <span class="anEvSyn" title="Backfilled from Habitica">~ backfill</span>' : '';
+      const devLabel = e.dev ? ' <span class="evDevice" style="opacity:.65" title="Device ID: '+esc(e.dev)+'">&middot; '+esc((typeof deviceDisplayName==="function")?deviceDisplayName(S.devices,e.dev):e.dev.slice(0,6))+'</span>' : '';
 
       listHtml+='<div class="evRow">'+
          '  <div class="evColIcon">'+icon+'</div>'+
@@ -2775,7 +2796,7 @@ function renderEventDetail(from,to){
          '    <div class="evMetaRow">'+
          '      <span class="evBadge '+badgeClass+'">'+badgeName+'</span>'+
          '      <span class="evTime">'+fullTime+'</span>'+
-         '      '+mark+
+         '      '+mark+devLabel+
          '    </div>'+
          '  </div>'+
          '  <div class="evColRight">'+rightSide+'</div>'+
@@ -3559,11 +3580,24 @@ function openSettings(){
       h+='<div class="settingsRow"><button class="btn ghost" onclick="syncConnect()">Connect Dropbox</button></div>';
     } else {
       const rel=(typeof syncRelativeTime==="function")?syncRelativeTime(scfg.lastSyncAt):(scfg.lastSyncAt?new Date(scfg.lastSyncAt).toLocaleString():'never');
-      const devShort=(scfg.deviceId||'').slice(0,6);
-      h+='<div class="small">Last sync: '+esc(rel)+' &middot; Device '+esc(devShort)+
-         (scfg.lastError?(' &middot; <span style="color:#f74e52">'+esc(scfg.lastError)+'</span>'):'')+'</div>';
-      h+='<div class="settingsRow"><button class="btn ghost" onclick="syncNow()">Sync now</button>'+
-         '<button class="btn ghost" onclick="confirmSyncDisconnect()">Disconnect</button></div>';
+      const devId=scfg.deviceId||'';
+      const devShort=devId.slice(0,6);
+      const myDevEntry=(S.devices||[]).find(x=>x&&x.id===devId);
+      const myDevName=(myDevEntry&&myDevEntry.name)?myDevEntry.name:'';
+      const myDevLabel=(typeof deviceDisplayName==="function")?deviceDisplayName(S.devices,devId):(myDevName||devShort);
+      h+='<div class="devNameWrap">'+
+           '<div class="devNameHeader">'+
+             '<div class="devSyncStatus">Last sync: '+esc(rel)+' &middot; Device '+esc(myDevLabel)+
+               (scfg.lastError?(' &middot; <span style="color:#f74e52">'+esc(scfg.lastError)+'</span>'):'')+'</div>'+
+             '<label class="devNameLbl">Device name</label>'+
+             '<div></div>'+
+           '</div>'+
+           '<div class="devNameRow">'+
+             '<button class="btn ghost" onclick="syncNow()">Sync now</button>'+
+             '<input type="text" id="setDeviceName" placeholder="'+esc(devShort)+'" value="'+esc(myDevName)+'" onchange="setDeviceName(this.value)">'+
+             '<button class="btn ghost" onclick="confirmSyncDisconnect()">Disconnect</button>'+
+           '</div>'+
+         '</div>';
       if(typeof confirmForcePush==="function" || typeof confirmForcePull==="function"){
         h+='<div class="settingsRow">'+
            (typeof confirmForcePush==="function"?'<button class="btn danger" onclick="confirmForcePush()">Force push</button>':'')+
@@ -3638,6 +3672,23 @@ function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.m
 function setSaveBtnTop(n){ S.prefs.saveBtnTop=!!n; save(); closeOpt(); if(EDIT) drawSheet(); else if(REDIT) openReward(REDIT.id); openSettings(); }
 function setExportIntervalDays(n){ let d=parseInt(n,10); if(!isFinite(d)||d<0) d=0; S.prefs.exportIntervalDays=d; save(); closeOpt(); openSettings(); }
 function setCharName(v){ S.char.name=(v||'').trim()||'Adventurer'; save(); renderStats(); }
+function setDeviceName(v){
+  if(typeof syncDeviceId!=="function") return;
+  const devId=syncDeviceId();
+  const name=(v||'').trim();
+  S.devices=Array.isArray(S.devices)?S.devices:[];
+  let d=S.devices.find(x=>x&&x.id===devId);
+  if(!d){ d={id:devId,name:'',updatedAt:0}; S.devices.push(d); }
+  const prevName=d.name||'';
+  if(prevName===name) return; // no real change (e.g. blur without editing) -- don't log a no-op
+  d.name=name;
+  d.updatedAt=Date.now();
+  save();
+  logEvent({kind:'devicename', taskTitle:'Device name',
+    notes:'Device '+devId.slice(0,6)+' \u2192 "'+(name||'(cleared)')+'"'+(prevName?' (was "'+prevName+'")':''),
+    deviceId:devId, deviceName:name, prevDeviceName:prevName});
+  openSettings();
+}
 function setCharFace(v){ S.char.face=(v||'🧙'); save(); renderStats(); }
 // --- Settings rows + foreground options menu -------------------------------
 // Build one tappable row: a label + short description on the left, current

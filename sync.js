@@ -320,6 +320,7 @@ function syncSubset(){
     tasks: S.tasks || [],
     rewards: S.rewards || [],
     tags: S.tags || [],
+    devices: S.devices || [],
     lastCron: S.lastCron || 0,
     history: S.history || [],
     charHistory: S.charHistory || [],
@@ -354,6 +355,7 @@ function syncApply(subset){
     S.tasks = subset.tasks;
     S.rewards = Array.isArray(subset.rewards) ? subset.rewards : [];
     S.tags = Array.isArray(subset.tags) ? subset.tags : [];
+    S.devices = Array.isArray(subset.devices) ? subset.devices : [];
     if(subset.lastCron) S.lastCron = subset.lastCron;
     S.history = Array.isArray(subset.history) ? subset.history : [];
     S.charHistory = Array.isArray(subset.charHistory) ? subset.charHistory : [];
@@ -502,6 +504,7 @@ function merge(base, local, remote, remoteSavedAt){
     tasks: mergeCollection(base.tasks, local.tasks, remote.tasks),
     rewards: mergeCollection(base.rewards, local.rewards, remote.rewards),
     tags: mergeCollection(base.tags, local.tags, remote.tags),
+    devices: mergeCollection(base.devices, local.devices, remote.devices),
     an: {
       views: mergeCollection(baseAn.views, localAn.views, remoteAn.views),
       metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics)

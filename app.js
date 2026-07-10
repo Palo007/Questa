@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-1148";
+const APP_VERSION = "v2026.07.10-1314";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -95,7 +95,7 @@ function freshState(){
            lvl:1, xp:0, hp:50, maxHp:50, mp:0, gold:0 },
     tasks:[], rewards:[], tags:[],
     lastCron: dayStamp(new Date()),
-    history:[], charHistory:[],     prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0 }
+    history:[], charHistory:[],     prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false }
   };
 }
 let S = load();
@@ -106,7 +106,7 @@ function load(){
 }
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
-  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardThick:0, notificationsEnabled:false}, s.prefs||{});
+  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardThick:0, notificationsEnabled:false, saveBtnTop:false}, s.prefs||{});
   if(out.prefs.cardPad !== undefined){
     let cp = parseInt(out.prefs.cardPad, 10);
     if(isFinite(cp)){
@@ -3081,8 +3081,11 @@ function drawSheet(){
   const t=EDIT; const dayLabels=['S','M','T','W','T','F','S'];
   const sheet=document.getElementById('sheet');
   let h='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">'+
-     '<h3 style="margin:0">'+(t.id?'Edit':'New')+' '+(t.type==='daily'?'Daily':t.type==='habit'?'Habit':'To-Do')+'</h3>'+
-     '<button type="button" onclick="copyEditTask()" title="Copy title, checklist & notes" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.3;padding:0 4px;line-height:1;color:inherit">⧉</button></div>';
+     '<h3 style="margin:0">'+(t.id?'Edit':'New')+' '+(t.type==='daily'?'Daily':t.type==='habit'?'Habit':'To-Do')+'</h3>';
+  if(S.prefs.saveBtnTop){
+    h+='<button class="btn primary" type="button" onclick="saveTask()" style="padding:6px 14px;height:auto">Save</button>';
+  }
+  h+='<button type="button" onclick="copyEditTask()" title="Copy title, checklist & notes" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.3;padding:0 4px;line-height:1;color:inherit">⧉</button></div>';
   h+='<label>Title</label><input type="text" id="eTitle" value="'+esc(t.title)+'" placeholder="What needs doing?">';
   h+='<label>Difficulty</label><div class="seg" id="eDiff">'+
     ['trivial','easy','medium','hard'].map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
@@ -3125,7 +3128,7 @@ function drawSheet(){
   h+=tagEditorBlock(t);
   h+='<div class="rowBtns">'+(t.id?'<button class="btn danger" onclick="deleteTask()">Delete</button>':'')+
     '<button class="btn ghost" onclick="closeSheet()">Cancel</button>'+
-    '<button class="btn primary" onclick="saveTask()">Save</button></div>';
+    (S.prefs.saveBtnTop?'':'<button class="btn primary" onclick="saveTask()">Save</button>')+'</div>';
   sheet.innerHTML=h;
 }
 function saveTask(){
@@ -3254,13 +3257,21 @@ let REDIT=null;
 function openReward(id){
   REDIT = id? JSON.parse(JSON.stringify(S.rewards.find(r=>r.id===id))) : {id:null,title:'',cost:10,notes:''};
   const sheet=document.getElementById('sheet');
-  sheet.innerHTML='<h3>'+(REDIT.id?'Edit':'New')+' Reward</h3>'+
-    '<label>Reward</label><input type="text" id="rTitle" value="'+esc(REDIT.title)+'" placeholder="e.g. 30 min of gaming">'+
+  let h='';
+  if(S.prefs.saveBtnTop){
+    h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">'+
+       '<h3 style="margin:0">'+(REDIT.id?'Edit':'New')+' Reward</h3>'+
+       '<button class="btn primary" type="button" onclick="saveReward()" style="padding:6px 14px;height:auto">Save</button></div>';
+  } else {
+    h+='<h3>'+(REDIT.id?'Edit':'New')+' Reward</h3>';
+  }
+  h+='<label>Reward</label><input type="text" id="rTitle" value="'+esc(REDIT.title)+'" placeholder="e.g. 30 min of gaming">'+
     '<label>Cost (gold)</label><input type="text" id="rCost" value="'+REDIT.cost+'">'+
     '<label>Notes</label><textarea id="rNotes">'+esc(REDIT.notes)+'</textarea>'+
     '<div class="rowBtns">'+(REDIT.id?'<button class="btn danger" onclick="delReward()">Delete</button>':'')+
     '<button class="btn ghost" onclick="closeSheet()">Cancel</button>'+
-    '<button class="btn primary" onclick="saveReward()">Save</button></div>';
+    (S.prefs.saveBtnTop?'':'<button class="btn primary" onclick="saveReward()">Save</button>')+'</div>';
+  sheet.innerHTML=h;
   document.getElementById('scrim').classList.add('show');
 }
 function saveReward(){
@@ -3317,6 +3328,7 @@ function openSettings(){
   h+=settingRow('notes','Note lines','Lines of a task\'s notes shown in the list preview.',(nl===0?'Off':(''+nl)));
   h+=settingRow('haptics','Haptics','Vibration on taps and completions.',(S.prefs.haptics===false?'Off':'On'));
   h+=settingRow('cardThick','Card thickness','Minimum height of each card. Short cards grow first; taller cards are only affected at higher values.',(S.prefs.cardThick||0)===0?'Default':('+'+(S.prefs.cardThick||0)+' px'));
+  h+=settingRow('saveBtnTop','Save button position','Put the Save button at the top of the edit sheet, centered next to the title, instead of at the bottom.',(S.prefs.saveBtnTop?'Top':'Bottom'));
   h+=settingRow('notifications','Notifications','Browser-based notification permission and status.',(S.prefs.notificationsEnabled?'On':'Off'));
   h+='</div>';
   h+='<div class="colTitle"><h2 style="font-size:13px">Sync</h2></div>';
@@ -3396,6 +3408,7 @@ function setWidth(px){ S.prefs.width=px; applyWidth(); save(); closeOpt(); openS
 function setNotesLines(n){ S.prefs.notesLines=n; save(); closeOpt(); openSettings(); }
 function setHaptics(n){ S.prefs.haptics=!!n; save(); closeOpt(); openSettings(); }
 function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.min(60,Math.max(0,n)); S.prefs.cardThick=n; applyCardThick(); save(); closeOpt(); openSettings(); }
+function setSaveBtnTop(n){ S.prefs.saveBtnTop=!!n; save(); closeOpt(); if(EDIT) drawSheet(); else if(REDIT) openReward(REDIT.id); openSettings(); }
 function setExportIntervalDays(n){ let d=parseInt(n,10); if(!isFinite(d)||d<0) d=0; S.prefs.exportIntervalDays=d; save(); closeOpt(); openSettings(); }
 // --- Settings rows + foreground options menu -------------------------------
 // Build one tappable row: a label + short description on the left, current
@@ -3503,6 +3516,15 @@ function openOpt(key){
       '<div class="sEnds"><span>Default</span><span>+60 px</span></div>'+
       '</div>';
     h+='<button type="button" class="btn ghost" style="margin-top:10px" onclick="setCardThick(0)">Reset to default</button>';
+  }
+  if(key==='saveBtnTop'){
+    const sv=S.prefs.saveBtnTop;
+    h+='<h4>Save button position</h4>';
+    h+='<p class="optHint">Where the Save button sits in the edit sheet. "Top" centers it next to the title ("Edit To-Do" / "Edit Daily" / "Edit Habit"); "Bottom" keeps it at the foot of the sheet next to Cancel.</p>';
+    h+='<div class="optChoices">';
+    h+='<button type="button" class="'+(sv?'on':'')+'" onclick="setSaveBtnTop(true)">Top</button>';
+    h+='<button type="button" class="'+(sv?'':'on')+'" onclick="setSaveBtnTop(false)">Bottom</button>';
+    h+='</div>';
   } else if(key==='exportInterval'){
     const eid=(S.prefs.exportIntervalDays||0);
     h+='<h4>Auto-backup to Dropbox</h4>';

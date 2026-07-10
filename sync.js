@@ -337,6 +337,14 @@ function syncApply(subset){
     syncCfgSave({ lastError: "merge produced invalid state; sync aborted" });
     return false;
   }
+  // Snapshot the on-screen state BEFORE we overwrite it, so an ordinary
+  // no-op sync (remote identical to local — the common case, and the case a
+  // 5s post-save debounce fires on every scroll) does NOT re-run save()/
+  // render(). render() rebuilds #view and restoreScroll()s, which was
+  // collapsing an open analytics event-detail and jumping the page up every
+  // few seconds. Only touch state + repaint when the merge actually changed
+  // something.
+  const _before = (typeof syncSubset === "function") ? stableStringify(syncSubset()) : null;
   SYNC_APPLYING = true;
   try{
     S.char = subset.char || S.char;
@@ -350,9 +358,13 @@ function syncApply(subset){
     S.prefs.an = S.prefs.an || {};
     S.prefs.an.views = (subset.an && Array.isArray(subset.an.views)) ? subset.an.views : [];
     S.prefs.an.metrics = (subset.an && Array.isArray(subset.an.metrics)) ? subset.an.metrics : [];
-    if(typeof save === "function") save();
-    else if(typeof STORE_KEY !== "undefined") localStorage.setItem(STORE_KEY, JSON.stringify(S));
-    if(typeof render === "function") render();
+    const _after = (typeof syncSubset === "function") ? stableStringify(syncSubset()) : null;
+    const _changed = (_before === null || _after === null) ? true : (_before !== _after);
+    if(_changed){
+      if(typeof save === "function") save();
+      else if(typeof STORE_KEY !== "undefined") localStorage.setItem(STORE_KEY, JSON.stringify(S));
+      if(typeof render === "function") render();
+    }
   } finally {
     SYNC_APPLYING = false;
   }
@@ -819,8 +831,16 @@ function syncRelativeTime(ms){
 }
 function syncRefreshSettingsUI(){
   try{
+    // Only refresh Settings if it is ACTUALLY on screen. closeSheet() removes
+    // the scrim's "show" class but leaves the last sheet's HTML in #sheet, so
+    // querying for .appVersion alone was true even after Settings was closed —
+    // which made every sync re-call openSettings() and pop Settings open by
+    // itself. Gate on the scrim being visible.
+    const scrim = document.getElementById('scrim');
     const sheet = document.getElementById('sheet');
-    if(sheet && sheet.querySelector('.appVersion') && typeof openSettings==="function") openSettings();
+    if(scrim && scrim.classList.contains('show') &&
+       sheet && sheet.querySelector('.appVersion') &&
+       typeof openSettings==="function") openSettings();
   }catch(e){ /* best-effort UI refresh only */ }
 }
 function confirmSyncDisconnect(){

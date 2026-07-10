@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-1314";
+const APP_VERSION = "v2026.07.10-1431";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -725,17 +725,21 @@ function unlogToday(t){
   }
 }
 function uncompleteDaily(t){
+  const _gr=t._gr?Object.assign({},t._gr):null;
   reverseGrant(t);
   unlogToday(t);
   t.done = false;
   if(t.type==='daily' && t.streak){ t.streak = Math.max(0, t.streak - 1); }
+  try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();
 }
 function uncompleteTodo(t){
+  const _gr=t._gr?Object.assign({},t._gr):null;
   reverseGrant(t);
   unlogToday(t);
   t.done = false;
   toast('Reverted');
+  try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();
 }
 function scoreHabit(id, dir, ev){
@@ -2255,9 +2259,14 @@ function refreshAnalytics(){
   const body=document.getElementById('anBody'); if(!body)return;
   const oldDetails = document.querySelector('.anDetails');
   const wasOpen = oldDetails ? oldDetails.hasAttribute('open') : false;
+  const oldEventDetails = document.querySelector('.anEventDetails');
+  const eventWasOpen = oldEventDetails ? oldEventDetails.hasAttribute('open') : false;
   let h='';
   h+=anViewsUI(from,to);
   h+='<details class="anDetails"'+(wasOpen?' open':'')+'><summary>🔎 Full activity detail (reps, adherence, streaks, event log)</summary><div class="anDetailWrap">'+anDetailDashboard(from,to)+'</div></details>';
+  h+='<details class="anDetails anEventDetails"'+(eventWasOpen?' open':'')+'><summary>&#128203; Event log detail (live)</summary>'+
+     '<div id="anEventDetail" class="anCard full"><div class="k">From IndexedDB event log</div>'+
+     '<div class="anNote">Loading events&hellip;</div></div></details>';
   body.innerHTML=h;
   bindHeatTooltips();
   bindTips('.spkPt'); bindTips('.spkHit'); bindTips('.barHit');
@@ -2362,9 +2371,6 @@ function anDetailDashboard(from,to){
   // detail history arrays cannot: per-subtask completion (name + time of day),
   // individual habit-tap times, per-completion reward, miss-time partial state.
   h+=anLifecycleHTML(from,to);
-  h+='<div class="anSection">&#128203; Event log detail (live)</div>';
-  h+='<div id="anEventDetail" class="anCard full"><div class="k">From IndexedDB event log</div>'+
-     '<div class="anNote">Loading events&hellip;</div></div>';
   return h;
 }
 // Async, event-driven dashboard section. Proves the IDB read API end to end on
@@ -2414,6 +2420,24 @@ function getEventCategory(e) {
     return e.taskType === 'todo' ? 'todo' : 'daily';
   }
   return 'system';
+}
+function _evCatBadgeName(cat){ return {habit:'Habit',daily:'Daily',todo:'To-do',system:'System'}[cat]||'Event'; }
+function _evCatBadgeClass(cat){ return {habit:'evBadge-habit',daily:'evBadge-daily',todo:'evBadge-todo',system:'evBadge-system'}[cat]||'evBadge-default'; }
+function _evDeltaSpan(val,unit){
+  if(!val) return '';
+  const pos=val>0;
+  const num=(unit==='XP'||unit==='MP')?Math.round(Math.abs(val)):Math.abs(val).toFixed(1);
+  return '<span style="font-size:10px;font-weight:700;color:'+(pos?'#7ee787':'#f74e52')+'">'+(pos?'+':'-')+num+(unit==='G'?'G':' '+unit)+'</span>';
+}
+function _evDiffText(from,to){
+  const _c=s=>esc(String(s==null?'':s));
+  const hasFrom=from!=null&&String(from)!=='';
+  const hasTo=to!=null&&String(to)!=='';
+  const F='style="color:#f74e52;text-decoration:line-through"';
+  const T='style="color:#7ee787"';
+  if(!hasFrom&&hasTo) return '<span style="color:#8b96a8;font-style:italic">new</span> \u2192 <span '+T+'>'+_c(to)+'</span>';
+  if(hasFrom&&!hasTo) return '<span '+F+'>'+_c(from)+'</span> \u2192 <span style="color:#f74e52;font-style:italic">removed</span>';
+  return '<span '+F+'>'+_c(from)+'</span> \u2192 <span '+T+'>'+_c(to)+'</span>';
 }
 
 // Async, event-driven dashboard section. Redesigned to show a unified
@@ -2521,7 +2545,44 @@ function renderEventDetail(from,to){
       const cat = getEventCategory(e);
       const titleHtml = e.taskTitle ? '<strong class="evTaskClick" onclick="evSetSearch(\'' + esc(e.taskTitle).replace(/'/g, "\\'") + '\')">' + esc(e.taskTitle) + '</strong>' : '';
 
-      if (cat === 'habit') {
+      const _NEWK={create:1,edit:1,delete:1,uncomplete:1,rewardCreate:1,rewardEdit:1,rewardDelete:1,purchase:1,restore:1};
+      if (_NEWK[e.kind]) {
+        badgeName=_evCatBadgeName(cat); badgeClass=_evCatBadgeClass(cat);
+        if (e.kind==='create'){ icon='🆕'; desc='Created '+(e.taskType||'task')+' '+titleHtml; }
+        else if (e.kind==='edit'){ icon='✏️';
+          const _summ=[]; let _detail='';
+          if(Array.isArray(e.changes)){
+            e.changes.forEach(c=>{
+              if(c.field==='title' && c.from!=null){ _summ.push('title: '+esc(c.from)+'→'+esc(c.to)); }
+              else if(c.field==='difficulty' && c.from!=null){ _summ.push('difficulty: '+esc(c.from)+'→'+esc(c.to)); }
+              else if(c.field==='notes'){ _summ.push('notes');
+                if(c.from!=null||c.to!=null){ _detail+='<div style="margin-top:3px;font-size:11px;line-height:1.5"><span style="opacity:.7">notes:</span> '+_evDiffText(c.from,c.to)+'</div>'; }
+              }
+              else if(c.field==='checklist'){ _summ.push('subtasks');
+                if(Array.isArray(c.items)&&c.items.length){
+                  const _rows=c.items.map(it=>{
+                    if(it.type==='changed') return '<div style="padding-left:8px">&bull; '+_evDiffText(it.from,it.to)+'</div>';
+                    if(it.type==='added') return '<div style="padding-left:8px">&bull; '+_evDiffText(null,it.to)+'</div>';
+                    if(it.type==='removed') return '<div style="padding-left:8px">&bull; '+_evDiffText(it.from,null)+'</div>';
+                    if(it.type==='toggled') return '<div style="padding-left:8px">&bull; <span style="color:#7ee787">'+(it.done?'checked':'unchecked')+'</span> <span style="opacity:.8">'+esc(it.to||'')+'</span></div>';
+                    return '';
+                  }).join('');
+                  _detail+='<div style="margin-top:3px;font-size:11px;line-height:1.5"><span style="opacity:.7">subtasks:</span>'+_rows+'</div>';
+                }
+              }
+              else { _summ.push(esc(c.field)); }
+            });
+          }
+          desc='Edited '+titleHtml+(_summ.length?' &middot; <span class="evNotes">'+_summ.join(', ')+'</span>':'')+_detail;
+        }
+        else if (e.kind==='delete'){ icon='🗑️'; desc='Deleted '+(e.taskType||'task')+' '+titleHtml; }
+        else if (e.kind==='uncomplete'){ icon='↩️'; desc='Reverted '+titleHtml; }
+        else if (e.kind==='rewardCreate'){ icon='🎁'; desc='Created reward '+titleHtml; badgeName='System'; badgeClass='evBadge-system'; }
+        else if (e.kind==='rewardEdit'){ icon='🎁'; desc='Edited reward '+titleHtml; badgeName='System'; badgeClass='evBadge-system'; }
+        else if (e.kind==='rewardDelete'){ icon='🗑️'; desc='Deleted reward '+titleHtml; badgeName='System'; badgeClass='evBadge-system'; }
+        else if (e.kind==='purchase'){ icon='🛒'; desc='Bought '+titleHtml+(e.effect?' &middot; <span class="evNotes">'+esc(e.effect)+'</span>':''); badgeName='System'; badgeClass='evBadge-system'; }
+        else if (e.kind==='restore'){ icon='♻️'; desc='Restored from snapshot'+(e.notes?' &middot; <span class="evNotes">'+esc(e.notes)+'</span>':''); badgeName='System'; badgeClass='evBadge-system'; }
+      } else if (cat === 'habit') {
         icon = e.dir === -1 ? '➖' : '⚡';
         badgeClass = e.dir === -1 ? 'evBadge-habit-down' : 'evBadge-habit';
         badgeName = 'Habit';
@@ -2570,7 +2631,22 @@ function renderEventDetail(from,to){
         }
       }
 
-      if (e.reward) {
+      if (e.kind === 'purchase') {
+        if (e.cost) rightSide = '<div class="evRewardRow">'+_evDeltaSpan(-(e.cost||0),'G')+'</div>';
+      } else if (e.kind === 'edit' && e.counter) {
+        const _c=e.counter, _pr=[];
+        if(_c.xp) _pr.push(_evDeltaSpan(_c.xp,'XP'));
+        if(_c.gold) _pr.push(_evDeltaSpan(_c.gold,'G'));
+        if(_c.mp) _pr.push(_evDeltaSpan(_c.mp,'MP'));
+        if(_c.hp) _pr.push(_evDeltaSpan(_c.hp,'HP'));
+        if(_pr.length) rightSide='<div class="evRewardRow">'+_pr.join(' ')+'</div>';
+      } else if (e.kind === 'uncomplete' && e.clawback) {
+        const _c=e.clawback, _pr=[];
+        if(_c.xp) _pr.push(_evDeltaSpan(-_c.xp,'XP'));
+        if(_c.gold) _pr.push(_evDeltaSpan(-_c.gold,'G'));
+        if(_c.mp) _pr.push(_evDeltaSpan(-_c.mp,'MP'));
+        if(_pr.length) rightSide='<div class="evRewardRow">'+_pr.join(' ')+'</div>';
+      } else if (e.reward) {
         const parts = [];
         if (e.reward.xp) parts.push('<span class="evGainXp">+' + Math.round(e.reward.xp) + ' XP</span>');
         if (e.reward.gold) parts.push('<span class="evGainGold">+' + (+e.reward.gold).toFixed(1) + 'G</span>');
@@ -3169,12 +3245,14 @@ function saveTask(){
     EDIT.updatedAt=Date.now();
     const t = S.tasks[idx];
     let gainParts=null, loseParts=null, doBump=false;
+    let _cXp=0,_cGold=0,_cMp=0,_cHp=0;
     if(upDelta > 0){
       let totalXp=0, totalGold=0;
       for(let i=0; i<upDelta; i++){
         const r=completionReward(t);
         totalXp+=r.xp; totalGold=+(totalGold+r.gold).toFixed(2);
         gainXp(r.xp); S.char.gold=+(S.char.gold+r.gold).toFixed(2); S.char.mp+=r.mp;
+        _cXp+=r.xp; _cGold=+(_cGold+r.gold).toFixed(2); _cMp+=r.mp;
         t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
       }
       gainParts=fxGain(totalXp,totalGold); doBump=true;
@@ -3186,6 +3264,7 @@ function saveTask(){
         S.char.xp=Math.max(0,S.char.xp-r.xp);
         S.char.gold=+Math.max(0,S.char.gold-r.gold).toFixed(2);
         S.char.mp=Math.max(0,S.char.mp-r.mp);
+        _cXp-=r.xp; _cGold=+(_cGold-r.gold).toFixed(2); _cMp-=r.mp;
         t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
       }
       const coin='<svg class="fxCoin" viewBox="0 0 24 24" width="20" height="20"><circle cx="12" cy="12" r="10" fill="#ffbe5c" stroke="#c8862f" stroke-width="1.5"/><circle cx="12" cy="12" r="6.5" fill="none" stroke="#c8862f" stroke-width="1.2" opacity="0.7"/><text x="12" y="16" text-anchor="middle" font-size="9" font-weight="700" fill="#7a4d12" font-family="serif">$</text></svg>';
@@ -3197,6 +3276,7 @@ function saveTask(){
         const dmg=missDamage(t);
         totalDmg=+(totalDmg+dmg).toFixed(2);
         takeDamage(dmg);
+        _cHp=+(_cHp-dmg).toFixed(2);
         t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
       }
       loseParts=(loseParts?loseParts+' ':'')+'-'+totalDmg.toFixed(1)+'HP';
@@ -3206,6 +3286,7 @@ function saveTask(){
         const heal=missDamage(t);
         totalHeal=+(totalHeal+heal).toFixed(2);
         S.char.hp=+Math.min(S.char.maxHp,(S.char.hp+heal)).toFixed(2);
+        _cHp=+(_cHp+heal).toFixed(2);
         t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
       }
       gainParts=(gainParts?gainParts+' ':'')+'+'+totalHeal.toFixed(1)+'HP';
@@ -3215,8 +3296,34 @@ function saveTask(){
     if(gainParts) buzz(50);
     else if(downDelta>0) buzz(100);
     else if(upDelta<0||downDelta<0) buzz(50);
+    try{
+      const _ch=[];
+      if((orig.title||'')!==(EDIT.title||'')) _ch.push({field:'title',from:orig.title||'',to:EDIT.title||''});
+      if((orig.notes||'')!==(EDIT.notes||'')) _ch.push({field:'notes',from:orig.notes||'',to:EDIT.notes||''});
+      if((orig.difficulty||'')!==(EDIT.difficulty||'')) _ch.push({field:'difficulty',from:orig.difficulty||'',to:EDIT.difficulty||''});
+      const _oc=(orig&&orig.checklist)||[], _ec=(EDIT&&EDIT.checklist)||[];
+      const _items=[];
+      for(let _i=0;_i<Math.max(_oc.length,_ec.length);_i++){
+        const _o=_oc[_i], _e=_ec[_i];
+        if(_o&&_e){
+          if((_o.text||'')!==(_e.text||'')) _items.push({type:'changed',from:_o.text||'',to:_e.text||''});
+          else if((!!_o.done)!==(!!_e.done)) _items.push({type:'toggled',to:_e.text||'',done:!!_e.done});
+        } else if(!_o&&_e){ _items.push({type:'added',to:_e.text||''}); }
+        else if(_o&&!_e){ _items.push({type:'removed',from:_o.text||''}); }
+      }
+      if(_items.length) _ch.push({field:'checklist',items:_items});
+      if(JSON.stringify(orig.repeat||[])!==JSON.stringify(EDIT.repeat||[])) _ch.push({field:'schedule'});
+      if(JSON.stringify(orig.reminders||[])!==JSON.stringify(EDIT.reminders||[])) _ch.push({field:'reminders'});
+      if(upDelta||downDelta) _ch.push({field:'counter'});
+      if(_ch.length){
+        const _ev={kind:'edit', taskType:t.type, taskId:t.id, taskTitle:t.title, changes:_ch};
+        if(upDelta||downDelta) _ev.counter={xp:+(_cXp||0),gold:+(_cGold||0),mp:+(_cMp||0),hp:+(_cHp||0)};
+        logEvent(_ev);
+      }
+    }catch(e){}
   } else {
     EDIT.id=uid(); EDIT.createdAt=Date.now(); EDIT.updatedAt=Date.now(); S.tasks.unshift(EDIT); buzz(50);
+    try{ logEvent({kind:'create', taskType:EDIT.type, taskId:EDIT.id, taskTitle:EDIT.title}); }catch(e){}
     setTimeout(() => window.scrollTo({top:0, behavior:'smooth'}), 50);
   }
   closeSheet(); save(); render();
@@ -3249,7 +3356,10 @@ function copyEditTask(){
 function deleteTask(){
   confirmDialog('Delete Task', 'Delete this task?').then(ok => {
     if(!ok) return;
-    S.tasks=S.tasks.filter(x=>x.id!==EDIT.id); closeSheet(); save(); render();
+    const _dt=S.tasks.find(x=>x.id===EDIT.id);
+    S.tasks=S.tasks.filter(x=>x.id!==EDIT.id);
+    if(_dt) try{ logEvent({kind:'delete', taskType:_dt.type, taskId:_dt.id, taskTitle:_dt.title}); }catch(e){}
+    closeSheet(); save(); render();
   });
 }
 function closeSheet(){ document.getElementById('scrim').classList.remove('show'); EDIT=null; if(VDRAFT){ VDRAFT=null; MEDIT=null; MBUILD=false; if(TAB==='analytics') refreshAnalytics(); } }
@@ -3279,15 +3389,18 @@ function saveReward(){
   REDIT.cost=Math.max(0,parseFloat(document.getElementById('rCost').value)||0);
   REDIT.notes=document.getElementById('rNotes').value;
   REDIT.updatedAt=Date.now();
+  const _rwNew=!REDIT.id;
   if(REDIT.id){ const i=S.rewards.findIndex(r=>r.id===REDIT.id); S.rewards[i]=REDIT; }
   else { REDIT.id=uid(); REDIT.createdAt=Date.now(); S.rewards.push(REDIT); }
+  try{ logEvent({kind:_rwNew?'rewardCreate':'rewardEdit', rewardId:REDIT.id, taskTitle:REDIT.title, cost:REDIT.cost}); }catch(e){}
   closeSheet(); save(); render();
 }
-function delReward(){ S.rewards=S.rewards.filter(r=>r.id!==REDIT.id); closeSheet(); save(); render(); }
+function delReward(){ try{ logEvent({kind:'rewardDelete', rewardId:REDIT.id, taskTitle:REDIT.title, cost:REDIT.cost}); }catch(e){} S.rewards=S.rewards.filter(r=>r.id!==REDIT.id); closeSheet(); save(); render(); }
 function buyReward(id){
   const r=S.rewards.find(x=>x.id===id); if(!r)return;
   if(S.char.gold < r.cost){ toast('Not enough gold'); return; }
   S.char.gold=+(S.char.gold-r.cost).toFixed(2);
+  try{ logEvent({kind:'purchase', taskTitle:r.title, cost:r.cost}); }catch(e){}
   toast('Bought: '+r.title); save(); render();
 }
 const SHOP_ITEMS = [
@@ -3302,6 +3415,7 @@ function buyShopItem(id){
   if(S.char.gold < item.cost){ toast('Not enough gold'); return; }
   S.char.gold = +(S.char.gold-item.cost).toFixed(2);
   item.use();
+  try{ logEvent({kind:'purchase', taskTitle:item.title, cost:item.cost, effect:item.desc}); }catch(e){}
   save(); render();
 }
 function openSettings(){

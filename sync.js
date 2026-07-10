@@ -320,7 +320,7 @@ function syncSubset(){
     tasks: S.tasks || [],
     rewards: S.rewards || [],
     tags: S.tags || [],
-    devices: S.devices || [],
+    devices: cleanDevices(S.devices || []),
     lastCron: S.lastCron || 0,
     history: S.history || [],
     charHistory: S.charHistory || [],
@@ -355,7 +355,7 @@ function syncApply(subset){
     S.tasks = subset.tasks;
     S.rewards = Array.isArray(subset.rewards) ? subset.rewards : [];
     S.tags = Array.isArray(subset.tags) ? subset.tags : [];
-    S.devices = Array.isArray(subset.devices) ? subset.devices : [];
+    S.devices = cleanDevices(Array.isArray(subset.devices) ? subset.devices : []);
     if(subset.lastCron) S.lastCron = subset.lastCron;
     S.history = Array.isArray(subset.history) ? subset.history : [];
     S.charHistory = Array.isArray(subset.charHistory) ? subset.charHistory : [];
@@ -466,6 +466,70 @@ function mergeCollection(baseArr, localArr, remoteArr){
   return out;
 }
 
+// Devices merge: a device name is a single scalar the user sets. The generic
+// mergeCollection() above takes "remote unconditionally" whenever the local side
+// didn't change (plan 2026-07-10-device-name-sync-revert-fix.md §3C) — so a stale
+// blank {name:'',updatedAt:0} from one device could silently wipe a real name on
+// every other device (the reported revert). This rule instead:
+//   - never lets a junk placeholder (blank name AND updatedAt:0, i.e. an entry
+//     that was never actually named) win over a real name,
+//   - otherwise picks the most-recently-updated entry (updatedAt), so a
+//     deliberate clear (updatedAt>0) still propagates by recency.
+function cleanDevices(arr){
+  if(!Array.isArray(arr)) return [];
+  const byId = new Map();
+  arr.forEach(d => {
+    if(!d || !d.id) return;
+    const prev = byId.get(d.id);
+    if(!prev){ byId.set(d.id, d); return; }
+    const nameOf = x => x && typeof x.name === "string" ? x.name.trim() : "";
+    const isJunk = x => !nameOf(x) && ((x.updatedAt) || 0) === 0;
+    const score = x => isJunk(x) ? -1 : ((x.updatedAt) || 0) + (nameOf(x) ? 0.5 : 0);
+    if(score(d) > score(prev)) byId.set(d.id, d);
+  });
+  return [...byId.values()];
+}
+
+function mergeDevices(baseArr, localArr, remoteArr){
+  const baseMap = new Map((baseArr || []).map(x => [x.id, x]));
+  const localMap = new Map((localArr || []).map(x => [x.id, x]));
+  const remoteMap = new Map((remoteArr || []).map(x => [x.id, x]));
+  const ids = new Set([].concat([...baseMap.keys()], [...localMap.keys()], [...remoteMap.keys()]));
+  const resultMap = new Map();
+  const nameOf = d => d && typeof d.name === "string" ? d.name.trim() : "";
+  const isJunk = d => !nameOf(d) && ((d && d.updatedAt) || 0) === 0;
+  const score = d => !d ? -2 : (isJunk(d) ? -1 : ((d.updatedAt) || 0) + (nameOf(d) ? 0.5 : 0));
+  ids.forEach(id => {
+    const b = baseMap.has(id) ? baseMap.get(id) : null;
+    const l = localMap.has(id) ? localMap.get(id) : null;
+    const r = remoteMap.has(id) ? remoteMap.get(id) : null;
+    const localChanged = !deepEqual(l, b);
+    const remoteChanged = !deepEqual(r, b);
+    if(!localChanged && !remoteChanged){
+      if(b) resultMap.set(id, b);
+      return;
+    }
+    // Winner: junk never wins; otherwise most-recent (updatedAt) wins, real
+    // names get a tiny bonus so an equal-timestamp name beats an equal-timestamp
+    // blank. Local breaks any remaining tie.
+    const sl = score(l), sr = score(r);
+    let winner;
+    if(sl > sr) winner = l;
+    else if(sr > sl) winner = r;
+    else {
+      const lu = (l && l.updatedAt) || 0, ru = (r && r.updatedAt) || 0;
+      winner = lu >= ru ? l : r;
+    }
+    if(winner) resultMap.set(id, winner);
+  });
+  const out = [];
+  const placed = new Set();
+  (localArr || []).forEach(x => { if(resultMap.has(x.id) && !placed.has(x.id)){ out.push(resultMap.get(x.id)); placed.add(x.id); } });
+  (remoteArr || []).forEach(x => { if(resultMap.has(x.id) && !placed.has(x.id)){ out.push(resultMap.get(x.id)); placed.add(x.id); } });
+  resultMap.forEach((v, id) => { if(!placed.has(id)){ out.push(v); placed.add(id); } });
+  return cleanDevices(out);
+}
+
 // Union-by-day merge for history-style arrays ({date:<ms>, ...numeric fields,
 // ...array fields whose entries have an id}). Used for S.charHistory (and the
 // always-empty top-level S.history, harmlessly).
@@ -504,7 +568,7 @@ function merge(base, local, remote, remoteSavedAt){
     tasks: mergeCollection(base.tasks, local.tasks, remote.tasks),
     rewards: mergeCollection(base.rewards, local.rewards, remote.rewards),
     tags: mergeCollection(base.tags, local.tags, remote.tags),
-    devices: mergeCollection(base.devices, local.devices, remote.devices),
+    devices: mergeDevices(base.devices, local.devices, remote.devices),
     an: {
       views: mergeCollection(baseAn.views, localAn.views, remoteAn.views),
       metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics)
@@ -1112,6 +1176,8 @@ if(typeof window !== "undefined"){
     cfg: syncCfg,
     merge: merge, // exposed so it can be unit-tested from the browser console too
     mergeCollection: mergeCollection,
+    mergeDevices: mergeDevices,
+    cleanDevices: cleanDevices,
     mergeDayArray: mergeDayArray,
     exportBackup: exportSaveDropbox,
     maybeAutoExport: syncMaybeAutoExport,

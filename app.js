@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-2219";
+const APP_VERSION = "v2026.07.10-2240";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -2543,6 +2543,18 @@ function renderEventDetail(from,to){
     // Sort events newest first
     const sorted = all.slice().sort((a,b)=>b.ts - a.ts);
 
+    // Last-known device name per device, derived from the devicename events in
+    // this window. `sorted` is newest-first, so the first hit per deviceId is
+    // the most recent. Used as a fallback so a rename event alone is enough to
+    // label a row correctly even if the live S.devices name is missing/stale
+    // (plan §3A/§3B).
+    const devNameFromEvents = {};
+    all.forEach(ev => {
+      if(ev && ev.kind==='devicename' && ev.deviceId && ev.deviceName && ev.deviceName.trim() && !devNameFromEvents[ev.deviceId]){
+        devNameFromEvents[ev.deviceId] = ev.deviceName.trim();
+      }
+    });
+
     // Filter events
     const filtered = sorted.filter(e=>{
       const cat = getEventCategory(e);
@@ -2789,7 +2801,11 @@ function renderEventDetail(from,to){
       const fullTime = dateStr + ' @ ' + timeStr;
 
       const mark = e.synthetic ? ' <span class="anEvSyn" title="Backfilled from Habitica">~ backfill</span>' : '';
-      const devLabel = e.dev ? ' <span class="evDevice" style="opacity:.65" title="Device ID: '+esc(e.dev)+'">&middot; '+esc((typeof deviceDisplayName==="function")?deviceDisplayName(S.devices,e.dev):e.dev.slice(0,6))+'</span>' : '';
+      const _devName0 = (typeof deviceDisplayName==="function")?deviceDisplayName(S.devices,e.dev):e.dev.slice(0,6);
+      // If the live lookup fell back to the short id, prefer the last-known name
+      // recorded in the event log for this device (plan §3A/§3B).
+      const _devLabelName = (_devName0===String(e.dev).slice(0,6) && devNameFromEvents[e.dev]) ? devNameFromEvents[e.dev] : _devName0;
+      const devLabel = e.dev ? ' <span class="evDevice" style="opacity:.65" title="Device ID: '+esc(e.dev)+'">&middot; '+esc(_devLabelName)+'</span>' : '';
 
       listHtml+='<div class="evRow">'+
          '  <div class="evColIcon">'+icon+'</div>'+
@@ -3544,6 +3560,12 @@ function infoIcon(tip){
 }
 function openSettings(){
   const sheet=document.getElementById('sheet');
+  // Fix 4 (plan §4): a background sync can trigger render()/openSettings() while
+  // the user is mid-edit in the device-name field. Capture the in-progress value
+  // so a re-render doesn't discard typed text before the field's onchange fires.
+  const _dnEl = document.getElementById('setDeviceName');
+  const _dnFocused = !!(_dnEl && document.activeElement===_dnEl);
+  const _dnVal = _dnFocused ? _dnEl.value : null;
   let h='<div class="settingsHead"><h3>Settings</h3><button class="btn primary" type="button" onclick="closeSheet()">Close</button></div>';
   const avatarTip='Avatar\nType an emoji, or upload a PNG, JPEG or GIF (max 1 MB) to use as your avatar. An uploaded image takes priority over the emoji.';
   h+='<div class="charAvatarRow">'+
@@ -3628,6 +3650,10 @@ function openSettings(){
     }).finally(() => { _flushPromise = null; });
   }
   sheet.innerHTML=h;
+  if(_dnFocused){
+    const _newDn = document.getElementById('setDeviceName');
+    if(_newDn){ _newDn.value = _dnVal; _newDn.focus(); }
+  }
   bindTips('.infoTip');
   setTimeout(() => updateLastFullBackupText(), 100);
   setTimeout(() => updateLastExportText(), 100);
@@ -3677,9 +3703,18 @@ function setDeviceName(v){
   const name=(v||'').trim();
   S.devices=Array.isArray(S.devices)?S.devices:[];
   let d=S.devices.find(x=>x&&x.id===devId);
-  if(!d){ d={id:devId,name:'',updatedAt:0}; S.devices.push(d); }
-  const prevName=d.name||'';
-  if(prevName===name) return; // no real change (e.g. blur without editing) -- don't log a no-op
+  const prevName=d?(d.name||''):'';
+  // No real change (e.g. blur without editing, or clearing a name that was
+  // never set) — bail WITHOUT creating a junk {name:'',updatedAt:0} placeholder.
+  // Fix: run the no-op check BEFORE pushing any placeholder so a stray empty
+  // onchange/blur can never manufacture a blank entry that later sync-clobbers
+  // a real name on another device (plan §3D).
+  if(prevName===name) return;
+  if(!d){
+    if(!name) return; // clearing a name that doesn't exist yet — nothing to do
+    d={id:devId,name:'',updatedAt:0};
+    S.devices.push(d);
+  }
   d.name=name;
   d.updatedAt=Date.now();
   save();

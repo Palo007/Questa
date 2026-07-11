@@ -316,10 +316,11 @@
   .repSide:active{background:var(--panel)}
   .repInput{flex:1;min-width:0;text-align:center;font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;
     border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);padding:8px}
-  .repQuickRow{display:flex;gap:8px;margin-bottom:16px}
-  .repQuick{flex:1;border:1px solid var(--line);background:var(--panel);color:var(--ink);
+  .repQuickRow{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}
+  .repQuick{border:1px solid var(--line);background:var(--panel);color:var(--ink);
     border-radius:8px;padding:12px 0;font-size:16px;font-weight:700;cursor:pointer}
   .repQuick:active{background:var(--panel2)}
+  .repQuick.on{background:var(--accent);border-color:var(--accent);color:#1a0f2e;font-weight:700}
   .repActions{display:flex;gap:8px}
   .repActions .btn{flex:1}
   .repActions .btn[disabled]{opacity:.4;cursor:default}

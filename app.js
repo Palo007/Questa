@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.11-1007";
+const APP_VERSION = "v2026.07.11-0131";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -830,7 +830,11 @@ function repAdjust(delta){
   else           REP.value=Math.min(0, REP.value+delta);
   drawRepSheet();
 }
-function repQuick(n){ repAdjust(n); }
+function repQuick(n){
+  if(!REP) return;
+  REP.value = n;
+  drawRepSheet();
+}
 function repInput(v){
   if(!REP) return;
   let n=parseInt(v,10); if(isNaN(n)) n=0;
@@ -846,20 +850,38 @@ function drawRepSheet(){
   const sheet=document.getElementById('sheet'); if(!sheet||!REP) return;
   const t=S.tasks.find(x=>x.id===REP.id); if(!t){ REP=null; return; }
   const pos=REP.sign>0;
-  const q=pos?[{l:'+3',v:3},{l:'+6',v:6},{l:'+8',v:8}]:[{l:'−3',v:-3},{l:'−6',v:-6},{l:'−8',v:-8}];
-  const quick=q.map(o=>'<button type="button" class="repQuick" onclick="repQuick('+o.v+')">'+o.l+'</button>').join('');
-  let h='<h3 style="margin:0 0 4px">Log reps</h3>';
-  h+='<div class="small" style="margin-bottom:12px">'+esc(t.title)+'</div>';
-  h+='<div class="repRow">';
-  h+='<button type="button" class="repSide" onclick="repAdjust(-1)" aria-label="remove one">−</button>';
-  h+='<input type="number" id="repInput" class="repInput" value="'+(REP.value||0)+'" oninput="repInput(this.value)">';
-  h+='<button type="button" class="repSide" onclick="repAdjust(1)" aria-label="add one">+</button>';
-  h+='</div>';
-  h+='<div class="repQuickRow">'+quick+'</div>';
-  h+='<div class="repActions">';
-  h+='<button type="button" class="btn ghost" onclick="closeRepSheet()">✕ Cancel</button>';
-  h+='<button type="button" class="btn primary" id="repConfirm" onclick="commitReps()"'+((REP.value===0)?' disabled':'')+'>✓ Confirm</button>';
-  h+='</div>';
+  
+  // Generate quick select buttons from +/- 2 up to +/- 10
+  const q = [];
+  for (let i = 2; i <= 10; i++) {
+    q.push({
+      l: pos ? '+' + i : '−' + i,
+      v: pos ? i : -i
+    });
+  }
+  
+  const quick = q.map(o => {
+    const isSelected = REP.value === o.v;
+    const cls = 'repQuick' + (isSelected ? ' on' : '');
+    return '<button type="button" class="' + cls + '" onclick="repQuick(' + o.v + ')">' + o.l + '</button>';
+  }).join('');
+  
+  let h = '<div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px">';
+  h += '  <div style="min-width:0; flex:1">';
+  h += '    <h3 style="margin:0 0 2px; font-size:16px; font-weight:700">Log reps</h3>';
+  h += '    <div class="small" style="margin:0; text-overflow:ellipsis; overflow:hidden; white-space:nowrap" title="' + esc(t.title) + '">' + esc(t.title) + '</div>';
+  h += '  </div>';
+  h += '  <button type="button" class="btn primary" id="repConfirm" onclick="commitReps()" style="flex:none; width:auto; padding:0 16px; height:32px; font-size:13px" ' + ((REP.value === 0) ? 'disabled' : '') + '>Confirm</button>';
+  h += '</div>';
+  
+  h += '<div class="repRow" style="margin-top:10px">';
+  h += '  <button type="button" class="repSide" onclick="repAdjust(-1)" aria-label="remove one">−</button>';
+  h += '  <input type="number" id="repInput" class="repInput" value="' + (REP.value || 0) + '" oninput="repInput(this.value)">';
+  h += '  <button type="button" class="repSide" onclick="repAdjust(1)" aria-label="add one">+</button>';
+  h += '</div>';
+  
+  h += '<div class="repQuickRow">' + quick + '</div>';
+  
   sheet.innerHTML=h;
 }
 // Adjust the habit counter from the editor sheet. Reward/penalty application

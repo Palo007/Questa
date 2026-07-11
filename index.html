@@ -839,6 +839,46 @@
   .mEmpty{padding:10px 11px;font-size:12px;color:var(--muted);text-align:center}
   .mActions{display:flex;align-items:center;gap:8px;margin-top:14px}
 
+  /* Subtask & Checklist Drag & Drop Styles */
+  .subitem[draggable="true"] {
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    transition: transform 0.15s ease, opacity 0.15s ease;
+  }
+  .subitem.dragging-sub {
+    opacity: 0.35;
+    outline: 1px dashed var(--accent) !important;
+    transform: scale(0.98);
+  }
+  .ci-drag-handle {
+    cursor: grab;
+    color: var(--muted);
+    font-size: 16px;
+    padding: 4px;
+    user-select: none;
+    -webkit-user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .ci.dragging-ci {
+    opacity: 0.35;
+    outline: 1px dashed var(--accent) !important;
+    transform: scale(0.98);
+  }
+  .dragGhost.subitem {
+    background: var(--panel) !important;
+    border: 1px solid var(--line) !important;
+    padding: 6px 10px !important;
+  }
+  .dragGhost.ci {
+    background: var(--panel) !important;
+    border: 1px solid var(--line) !important;
+    padding: 8px 10px !important;
+  }
+
 </style>
 </head>
 <body>

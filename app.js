@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.11-1932";
+const APP_VERSION = "v2026.07.11-2041";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -192,6 +192,79 @@ function save(){
   IS_DIRTY = true;
   localStorage.setItem(STORE_KEY, JSON.stringify(S));
   if(typeof scheduleSync==="function" && !applying) scheduleSync();
+}
+// --- TEMP debug overlay (2026-07-11 recency-guard on-device diagnosis) -----
+// 5 taps on the version number in Settings within 3s opens an on-screen dump
+// of BASE (IndexedDB syncmeta.base) vs LIVE (S) task/device state, so this can
+// be read directly on a phone with no console/bookmarklet access. Remove once
+// the on-device revert investigation is closed.
+var _versionTapCount = 0, _versionTapTimer = null;
+function tapVersionDebug(){
+  _versionTapCount++;
+  clearTimeout(_versionTapTimer);
+  _versionTapTimer = setTimeout(function(){ _versionTapCount = 0; }, 3000);
+  if(_versionTapCount >= 5){
+    _versionTapCount = 0;
+    clearTimeout(_versionTapTimer);
+    showSyncDebugOverlay();
+  }
+}
+function showSyncDebugOverlay(){
+  var cfg = {}; try{ cfg = JSON.parse(localStorage.getItem("questa.sync.v1") || "{}"); }catch(e){}
+  function dump(a){ return (a && a.tasks) ? a.tasks.map(function(t){ return {id:t.id, title:t.title, updatedAt:t.updatedAt, createdAt:t.createdAt}; }) : "n/a"; }
+  function renderOverlay(base){
+    var out = {
+      APP_VERSION: (typeof APP_VERSION!=="undefined")?APP_VERSION:"?",
+      baseReset: localStorage.getItem("questa.baseReset.v1"),
+      cfg: {lastRev:cfg.lastRev, lastSyncAt:cfg.lastSyncAt, lastError:cfg.lastError, evtLastUploadTs:cfg.evtLastUploadTs, deviceId:cfg.deviceId, deviceName:cfg.deviceName},
+      BASE_tasks: dump(base),
+      LIVE_tasks: (typeof S!=="undefined")?dump(S):"no S",
+      LIVE_devices: (typeof S!=="undefined" && S.devices)?S.devices:"n/a",
+      BASE_devices: (base && base.devices)?base.devices:"n/a"
+    };
+    var text = JSON.stringify(out, null, 2);
+    var ov = document.createElement("div");
+    ov.style.cssText = "position:fixed;inset:0;background:#000;z-index:99999;display:flex;flex-direction:column;padding:10px;box-sizing:border-box;";
+    var ta = document.createElement("textarea");
+    ta.readOnly = true;
+    ta.value = text;
+    ta.style.cssText = "flex:1;width:100%;background:#111;color:#0f0;font-family:monospace;font-size:11px;border:1px solid #444;padding:8px;box-sizing:border-box;";
+    var btnRow = document.createElement("div");
+    btnRow.style.cssText = "display:flex;gap:8px;margin-top:8px;";
+    var copyBtn = document.createElement("button");
+    copyBtn.textContent = "Copy";
+    copyBtn.style.cssText = "flex:1;padding:12px;font-size:16px;";
+    copyBtn.onclick = function(){
+      ta.focus(); ta.select();
+      try{
+        if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(text); }
+        else { document.execCommand("copy"); }
+        copyBtn.textContent = "Copied!";
+      }catch(e){
+        try{ document.execCommand("copy"); copyBtn.textContent = "Copied!"; }
+        catch(e2){ copyBtn.textContent = "Copy failed - select manually"; }
+      }
+    };
+    var closeBtn = document.createElement("button");
+    closeBtn.textContent = "Close";
+    closeBtn.style.cssText = "flex:1;padding:12px;font-size:16px;";
+    closeBtn.onclick = function(){ ov.remove(); };
+    btnRow.appendChild(copyBtn); btnRow.appendChild(closeBtn);
+    ov.appendChild(ta); ov.appendChild(btnRow);
+    document.body.appendChild(ov);
+    ta.focus(); ta.select();
+  }
+  try{
+    var r = indexedDB.open("questa");
+    r.onerror = function(){ renderOverlay(null); };
+    r.onsuccess = function(){
+      try{
+        var g = r.result.transaction("syncmeta","readonly").objectStore("syncmeta").get("base");
+        g.onsuccess = function(){ renderOverlay(g.result ? JSON.parse(g.result) : null); };
+        g.onerror = function(){ renderOverlay(null); };
+      }catch(e){ renderOverlay(null); }
+    };
+  }catch(e){ renderOverlay(null); }
 }
 // --- append-only event log (IndexedDB-backed) ------------------------
 // Unlike history (one merged point/day), events are NEVER merged: each tap,
@@ -4102,7 +4175,7 @@ function openSettings(){
     '<button class="btn ghost" onclick="openRestorePicker()">Restore Snapshot</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json,text/plain,.txt" style="display:none" onchange="importData(event)">';
   h+='<div class="backupMeta small"><span id="lastFullBackupDate"></span><span id="lastExportDate"></span></div>';
-  h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button><div class="appVersion">'+APP_VERSION+'</div></div>';
+  h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button><div class="appVersion" onclick="tapVersionDebug()">'+APP_VERSION+'</div></div>';
   if(IS_DIRTY){
     _flushPromise = listSnapshots().then(snapshots => {
       const hasBaseline = snapshots.some(s => s.type === "full");

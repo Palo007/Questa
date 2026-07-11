@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.11-1110";
+const APP_VERSION = "v2026.07.11-0255";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -1151,7 +1151,7 @@ function checklistBlock(t){
   if(!EXPANDED[t.id]) return '';
   let h='<div class="sublist">';
   cl.forEach((c,i)=>{
-    h+='<div class="subitem" onclick="event.stopPropagation();toggleSub(\''+t.id+'\','+i+')">'+
+    h+='<div class="subitem" draggable="true" data-task-id="'+t.id+'" data-idx="'+i+'" onclick="event.stopPropagation();toggleSub(\''+t.id+'\','+i+')">'+
        '<span class="subbox '+(c.done?'on':'')+'">'+(c.done?'✔':'')+'</span>'+
        '<span class="subtxt '+(c.done?'sdone':'')+'">'+esc(c.text)+'</span></div>';
   });
@@ -2989,6 +2989,7 @@ function enableDragReorder(){
     // --- touch: pure pointer-based drag with a floating ghost ---
     enableTouchDrag(card);
   });
+  if(typeof enableSubtaskDragReorder==='function') enableSubtaskDragReorder();
 }
 // Touch reordering via Touch Events. Long-press picks the card up; once lifted
 // we attach non-passive move/end listeners on the document and preventDefault on
@@ -3147,6 +3148,8 @@ function resetDragState(){
   if(_tGhost){ _tGhost.remove(); _tGhost=null; }
   if(_tDrag){ _tDrag.style.touchAction=''; _tDrag.classList.remove('dragging'); _tDrag=null; }
   _tActive=false;
+  if(typeof resetSubDragState==='function') resetSubDragState();
+  if(typeof resetEditDragState==='function') resetEditDragState();
 }
 function endTouchDrag(){
   if(!_tActive && !_tDrag){ resetDragState(); return; }  // nothing in flight
@@ -3165,6 +3168,311 @@ function endTouchDrag(){
     setTimeout(()=>{ ghost.remove(); },170);
   } else if(ghost){ ghost.remove(); }
 }
+
+// ---- Subtask Drag & Drop Reordering (Main View) ----
+let _dragSubEl = null, _dragSubTaskId = null;
+let _tSubDrag = null, _tSubGhost = null, _tSubGrabDY = 0, _tSubActive = false, _tSubTimer = null;
+
+function enableSubtaskDragReorder(){
+  const subitems = document.querySelectorAll('#view .subitem');
+  subitems.forEach(subitem => {
+    // --- Desktop: HTML5 Drag & Drop ---
+    subitem.addEventListener('dragstart', e => {
+      _dragSubEl = subitem;
+      _dragSubTaskId = subitem.dataset.taskId;
+      subitem.classList.add('dragging-sub');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', subitem.dataset.idx); } catch (_) {}
+      e.stopPropagation(); // Prevent parent task card from dragging
+    });
+
+    subitem.addEventListener('dragend', e => {
+      subitem.classList.remove('dragging-sub');
+      _dragSubEl = null;
+      commitSubOrder(_dragSubTaskId);
+      e.stopPropagation();
+    });
+
+    subitem.addEventListener('dragover', e => {
+      if (!_dragSubEl || subitem === _dragSubEl || subitem.dataset.taskId !== _dragSubTaskId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const r = subitem.getBoundingClientRect();
+      const after = (e.clientY - r.top) / r.height > 0.5;
+      subitem.parentNode.insertBefore(_dragSubEl, after ? subitem.nextSibling : subitem);
+    });
+
+    // --- Mobile/Touch Drag & Drop with long-press ---
+    enableSubTouchDrag(subitem);
+  });
+}
+
+function enableSubTouchDrag(subitem) {
+  subitem.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1) return;
+    if (e.target.closest('.subbox')) return; // Checkbox click is immediate, don't drag
+    
+    if (_tSubActive || _tSubGhost || _tSubDrag) resetSubDragState();
+    
+    const t = e.touches[0];
+    const startX = t.clientX, startY = t.clientY;
+    let isScroll = false, decided = false;
+    
+    clearTimeout(_tSubTimer);
+    _tSubTimer = setTimeout(() => {
+      if (!isScroll) {
+        decided = true;
+        beginSubTouchDrag(subitem, t);
+      }
+    }, longPressMs());
+
+    const onMove = ev => {
+      if (ev.cancelable) ev.preventDefault();
+      const tt = ev.touches[0];
+      if (!tt) return;
+      
+      if (_tSubActive) {
+        if (_tSubGhost) {
+          _tSubGhost.style.top = (tt.clientY - _tSubGrabDY) + 'px';
+        }
+        
+        const el = document.elementFromPoint(tt.clientX, tt.clientY);
+        const over = el && el.closest('.subitem');
+        if (over && over !== _tSubDrag && over !== _tSubGhost && over.dataset.taskId === _dragSubTaskId) {
+          const rr = over.getBoundingClientRect();
+          const after = (tt.clientY - rr.top) / rr.height > 0.5;
+          over.parentNode.insertBefore(_tSubDrag, after ? over.nextSibling : over);
+        }
+        return;
+      }
+      
+      // Before drag fires: check for drag-vs-scroll decision
+      const dx = Math.abs(tt.clientX - startX);
+      const dy = Math.abs(tt.clientY - startY);
+      if (!decided && (dx > 8 || dy > 8)) {
+        decided = true;
+        isScroll = true;
+        clearTimeout(_tSubTimer);
+        _tSubTimer = null;
+      }
+    };
+
+    const onEnd = () => {
+      clearTimeout(_tSubTimer);
+      _tSubTimer = null;
+      subitem.removeEventListener('touchmove', onMove);
+      window.removeEventListener('touchend', onEnd);
+      window.removeEventListener('touchcancel', onEnd);
+      
+      if (_tSubActive) {
+        commitSubOrder(_dragSubTaskId);
+        resetSubDragState();
+      }
+    };
+
+    subitem.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onEnd);
+    window.addEventListener('touchcancel', onEnd);
+  }, { passive: false });
+}
+
+function beginSubTouchDrag(subitem, t) {
+  _tSubActive = true;
+  _tSubDrag = subitem;
+  _dragSubTaskId = subitem.dataset.taskId;
+  
+  const r = subitem.getBoundingClientRect();
+  _tSubGrabDY = t.clientY - r.top;
+  
+  document.documentElement.classList.add('dragging-active');
+  
+  _tSubGhost = subitem.cloneNode(true);
+  _tSubGhost.classList.add('dragGhost');
+  _tSubGhost.classList.add('subitem');
+  _tSubGhost.style.width = r.width + 'px';
+  _tSubGhost.style.left = r.left + 'px';
+  _tSubGhost.style.top = (t.clientY - _tSubGrabDY) + 'px';
+  document.body.appendChild(_tSubGhost);
+  
+  subitem.classList.add('dragging-sub');
+  subitem.style.touchAction = 'none';
+  
+  if (typeof buzz === 'function') buzz(15);
+}
+
+function resetSubDragState() {
+  clearTimeout(_tSubTimer); _tSubTimer = null;
+  document.documentElement.classList.remove('dragging-active');
+  if (_tSubGhost) { _tSubGhost.remove(); _tSubGhost = null; }
+  if (_tSubDrag) {
+    _tSubDrag.style.touchAction = '';
+    _tSubDrag.classList.remove('dragging-sub');
+    _tSubDrag = null;
+  }
+  _tSubActive = false;
+}
+
+function commitSubOrder(taskId) {
+  if (!taskId) return;
+  const task = S.tasks.find(x => x.id === taskId);
+  if (!task || !task.checklist) return;
+  
+  // Find all subitems in the DOM for this specific task
+  const currentSubitems = [...document.querySelectorAll('#view .subitem[data-task-id="' + taskId + '"]')];
+  if (!currentSubitems.length) return;
+  
+  const newChecklist = [];
+  currentSubitems.forEach(subitem => {
+    const idx = parseInt(subitem.dataset.idx, 10);
+    if (task.checklist[idx]) {
+      newChecklist.push(task.checklist[idx]);
+    }
+  });
+  
+  task.checklist = newChecklist;
+  task.updatedAt = Date.now();
+  
+  // Save, bump version, and re-render
+  save();
+  render();
+}
+
+// ---- Checklist Drag & Drop Reordering (Edit Dialog) ----
+let _dragEditEl = null;
+let _tEditDrag = null, _tEditGhost = null, _tEditGrabDY = 0, _tEditActive = false;
+
+function enableEditChecklistDragReorder(){
+  const cis = document.querySelectorAll('#eCheck .ci');
+  cis.forEach(ci => {
+    const handle = ci.querySelector('.ci-drag-handle');
+    if (handle) {
+      handle.addEventListener('mousedown', () => {
+        ci.setAttribute('draggable', 'true');
+      });
+      handle.addEventListener('mouseup', () => {
+        ci.setAttribute('draggable', 'false');
+      });
+    }
+
+    // --- Desktop: HTML5 Drag & Drop ---
+    ci.addEventListener('dragstart', e => {
+      _dragEditEl = ci;
+      ci.classList.add('dragging-ci');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', ''); } catch (_) {}
+    });
+
+    ci.addEventListener('dragend', () => {
+      ci.classList.remove('dragging-ci');
+      ci.setAttribute('draggable', 'false');
+      _dragEditEl = null;
+      commitEditChecklistOrder();
+    });
+
+    ci.addEventListener('dragover', e => {
+      if (!_dragEditEl || ci === _dragEditEl) return;
+      e.preventDefault();
+      const r = ci.getBoundingClientRect();
+      const after = (e.clientY - r.top) / r.height > 0.5;
+      ci.parentNode.insertBefore(_dragEditEl, after ? ci.nextSibling : ci);
+    });
+
+    // --- Mobile/Touch ---
+    if (handle) {
+      handle.addEventListener('touchstart', e => {
+        if (e.touches.length !== 1) return;
+        if (_tEditActive || _tEditGhost || _tEditDrag) resetEditDragState();
+        
+        const t = e.touches[0];
+        _tEditActive = true;
+        _tEditDrag = ci;
+        
+        const r = ci.getBoundingClientRect();
+        _tEditGrabDY = t.clientY - r.top;
+        
+        document.documentElement.classList.add('dragging-active');
+
+        // Create ghost clone of the .ci row
+        _tEditGhost = ci.cloneNode(true);
+        _tEditGhost.classList.add('dragGhost');
+        _tEditGhost.classList.add('ci');
+        _tEditGhost.style.width = r.width + 'px';
+        _tEditGhost.style.left = r.left + 'px';
+        _tEditGhost.style.top = (t.clientY - _tEditGrabDY) + 'px';
+        document.body.appendChild(_tEditGhost);
+        
+        ci.classList.add('dragging-ci');
+        ci.style.touchAction = 'none';
+        
+        if (typeof buzz === 'function') buzz(15);
+        
+        const onMove = ev => {
+          if (ev.cancelable) ev.preventDefault();
+          const tt = ev.touches[0];
+          if (!tt) return;
+          
+          if (_tEditGhost) {
+            _tEditGhost.style.top = (tt.clientY - _tEditGrabDY) + 'px';
+          }
+          
+          const el = document.elementFromPoint(tt.clientX, tt.clientY);
+          const over = el && el.closest('#eCheck .ci');
+          if (over && over !== _tEditDrag && over !== _tEditGhost) {
+            const rr = over.getBoundingClientRect();
+            const after = (tt.clientY - rr.top) / rr.height > 0.5;
+            
+            // Reorder in DOM
+            over.parentNode.insertBefore(_tEditDrag, after ? over.nextSibling : over);
+          }
+        };
+        
+        const onEnd = () => {
+          handle.removeEventListener('touchmove', onMove);
+          window.removeEventListener('touchend', onEnd);
+          window.removeEventListener('touchcancel', onEnd);
+          
+          if (_tEditActive) {
+            commitEditChecklistOrder();
+            resetEditDragState();
+          }
+        };
+        
+        handle.addEventListener('touchmove', onMove, { passive: false });
+        window.addEventListener('touchend', onEnd);
+        window.addEventListener('touchcancel', onEnd);
+      }, { passive: true });
+    }
+  });
+}
+
+function commitEditChecklistOrder(){
+  const currentCis = [...document.querySelectorAll('#eCheck .ci')];
+  const newChecklist = [];
+  currentCis.forEach(ci => {
+    const idx = parseInt(ci.dataset.idx, 10);
+    const inp = ci.querySelector('input[type=text]');
+    if (EDIT.checklist[idx]) {
+      const item = EDIT.checklist[idx];
+      item.text = inp ? inp.value : item.text;
+      newChecklist.push(item);
+    }
+  });
+
+  EDIT.checklist = newChecklist;
+  drawSheet();
+}
+
+function resetEditDragState() {
+  document.documentElement.classList.remove('dragging-active');
+  if (_tEditGhost) { _tEditGhost.remove(); _tEditGhost = null; }
+  if (_tEditDrag) {
+    _tEditDrag.style.touchAction = '';
+    _tEditDrag.classList.remove('dragging-ci');
+    _tEditDrag = null;
+  }
+  _tEditActive = false;
+}
+
 // read the DOM order back into S.tasks / S.rewards
 function commitOrder(){
   const cards=[...document.querySelectorAll('#view .task[draggable="true"]')];
@@ -3407,7 +3715,9 @@ function drawSheet(){
   }
   if(t.type!=='habit'){
     h+='<label>Checklist (subtasks)</label><div class="checklist" id="eCheck">'+
-      (t.checklist||[]).map((c,i)=>'<div class="ci"><div class="box '+(c.done?'on':'')+'" onclick="EDIT.checklist['+i+'].done=!EDIT.checklist['+i+'].done;drawSheet()">'+(c.done?'✔':'')+'</div>'+
+      (t.checklist||[]).map((c,i)=>'<div class="ci" draggable="true" data-idx="'+i+'">'+
+        '<div class="ci-drag-handle">☰</div>'+
+        '<div class="box '+(c.done?'on':'')+'" onclick="EDIT.checklist['+i+'].done=!EDIT.checklist['+i+'].done;drawSheet()">'+(c.done?'✔':'')+'</div>'+
         '<input type="text" value="'+esc(c.text)+'" oninput="EDIT.checklist['+i+'].text=this.value">'+
         '<button class="del" onclick="EDIT.checklist.splice('+i+',1);drawSheet()">✕</button></div>').join('')+
       '<button class="btn ghost" style="padding:8px" onclick="EDIT.checklist.push({id:uid(),text:\'\',done:false});drawSheet()">+ Add subtask</button></div>';
@@ -3419,6 +3729,7 @@ function drawSheet(){
     '<button class="btn ghost" onclick="closeSheet()">Cancel</button>'+
     (S.prefs.saveBtnTop?'':'<button class="btn primary" onclick="saveTask()">Save</button>')+'</div>';
   sheet.innerHTML=h;
+  if(typeof enableEditChecklistDragReorder==='function') enableEditChecklistDragReorder();
 }
 function saveTask(){
   EDIT.title=document.getElementById('eTitle').value.trim()||'Untitled';

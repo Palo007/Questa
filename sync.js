@@ -587,7 +587,13 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
   return out;
 }
 
-function mergeCollection(baseArr, localArr, remoteArr){
+// recency helpers (2026-07-11 recency-guard). _ua = effective edit time,
+// _ca = creation time. Numeric-safe; missing fields -> 0. Clamped (D3): a
+// timestamp more than 2 min ahead of Date.now() is untrusted -> treated as 0
+// so a future-skewed clock cannot win a guard or mint an undeletable record.
+function _ua(x){ var v = (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; return v > Date.now() + 120000 ? 0 : v; }
+function _ca(x){ var v = (x && Number(x.createdAt)) || 0; return v > Date.now() + 120000 ? 0 : v; }
+function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt){
   const baseMap = new Map((baseArr || []).map(x => [x.id, x]));
   const localMap = new Map((localArr || []).map(x => [x.id, x]));
   const remoteMap = new Map((remoteArr || []).map(x => [x.id, x]));
@@ -608,10 +614,35 @@ function mergeCollection(baseArr, localArr, remoteArr){
     }
     if(localChanged && !remoteChanged){
       if(localHad) resultMap.set(id, l);
-      return; // else: local deleted it, remote never touched it -> deletion propagates
+      return; // local edited/added or deleted; remote untouched -> local wins (incl. deletion)
     }
     if(!localChanged && remoteChanged){
-      if(remoteHad) resultMap.set(id, r);
+      if(remoteHad){
+        // Both sides still have it; remote differs from base. GUARD 1 (recency):
+        // never let an OLDER remote overwrite a NEWER local. When base is honest,
+        // an untouched local has updatedAt == base < any real remote edit, so
+        // remote still wins -- identical to old behavior. Only a poisoned base
+        // (base == new local, remote older) is changed, and that is the bug.
+        if(localHad && _ua(l) > _ua(r)){
+          let w = l;
+          if(Array.isArray(l && l.checklist) || Array.isArray(r && r.checklist)){
+            // still merge subtasks so a remote toggle is not lost (F4 parity)
+            w = Object.assign({}, l, { checklist: mergeChecklist(b && b.checklist, (l&&l.checklist)||[], (r&&r.checklist)||[], true) });
+          }
+          resultMap.set(id, w);
+        } else {
+          resultMap.set(id, r);
+        }
+      } else {
+        // Remote no longer has it (deletion) while local is unchanged vs base.
+        // GUARD 2: never drop a record CREATED AFTER the remote snapshot was
+        // written -- the remote simply never saw it, so its absence is not a
+        // deletion. Only applies when caller supplied a real remoteSavedAt.
+        if(localHad && remoteSavedAt != null && _ca(l) > Number(remoteSavedAt)){
+          resultMap.set(id, l);
+        }
+        // else: genuine remote deletion -> leave unset (propagates)
+      }
       return;
     }
     // both changed relative to base
@@ -760,13 +791,13 @@ function merge(base, local, remote, remoteSavedAt){
   })();
 
   const merged = {
-    tasks: normalizeDailyResets(mergeCollection(base.tasks, local.tasks, remote.tasks), mergedLastCron), // F3 (2026-07-11): reset overlay keyed to merged lastCron
-    rewards: mergeCollection(base.rewards, local.rewards, remote.rewards),
-    tags: mergeCollection(base.tags, local.tags, remote.tags),
+    tasks: normalizeDailyResets(mergeCollection(base.tasks, local.tasks, remote.tasks, remoteSavedAt), mergedLastCron), // F3 (2026-07-11): reset overlay keyed to merged lastCron
+    rewards: mergeCollection(base.rewards, local.rewards, remote.rewards, remoteSavedAt),
+    tags: mergeCollection(base.tags, local.tags, remote.tags, remoteSavedAt),
     devices: mergeDevices(base.devices, local.devices, remote.devices),
     an: {
-      views: mergeCollection(baseAn.views, localAn.views, remoteAn.views),
-      metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics)
+      views: mergeCollection(baseAn.views, localAn.views, remoteAn.views, remoteSavedAt),
+      metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics, remoteSavedAt)
     },
     history: mergeDayArray(local.history, remote.history),
     charHistory: mergeDayArray(local.charHistory, remote.charHistory),
@@ -782,7 +813,10 @@ function merge(base, local, remote, remoteSavedAt){
       const remoteChanged = !deepEqual(r, b);
       if(!localChanged && !remoteChanged) return b;
       if(localChanged && !remoteChanged) return l;
-      if(!localChanged && remoteChanged) return r;
+      if(!localChanged && remoteChanged){
+        // GUARD (recency): accept remote char only if it is not OLDER than local.
+        return ((Number(r.updatedAt)||0) >= (Number(l.updatedAt)||0)) ? r : l;
+      }
       // F2 (2026-07-11): the old expression `Date.now() > remoteSavedAt` was
       // always true for any past savedAt, so both-changed char ALWAYS took
       // local in practice. Made explicit — local wins. (This also removes the
@@ -1400,7 +1434,7 @@ function confirmForcePull(){
   }
   confirmDialog(
     'Force pull — overwrite this device?',
-    "This replaces what's on THIS device with whatever is in Dropbox. Anything on this device that hasn't synced yet will be permanently lost. This cannot be undone."
+    "This replaces what's on THIS device with whatever is in Dropbox. Anything on this device that hasn't synced yet will be permanently lost. This cannot be undone.\n\nNote: normal sync now protects newer edits on each device, so a Force Push from another device will NOT overwrite a newer change you made here. If you want this device to show ONLY the exact state that is in Dropbox, use this Force Pull; to make EVERY device match Dropbox exactly, run Force Pull on each device (or do a full app reset — clear the app's site data / reinstall — which wipes all local data and re-pulls from Dropbox)."
   ).then(ok=>{
     if(!ok) return;
     if(typeof toast==="function") toast('Pulling Dropbox\'s data onto this device\u2026');
@@ -1414,6 +1448,22 @@ function syncInit(){
   if(_syncInitDone) return;
   _syncInitDone = true;
   syncHandleRedirect();
+  // One-time base purge (2026-07-11 recency-guard rollout): clear any base
+  // snapshot written by a pre-fix build so a stale poisoned base cannot fire.
+  // Next sync rebuilds base cleanly from fetch+guarded-merge. Runs exactly once.
+  try{
+    if(localStorage.getItem("questa.baseReset.v1") !== "done"){
+      if(typeof idbOpen === "function"){
+        idbOpen().then(function(db){
+          try{
+            var tx = db.transaction("syncmeta","readwrite");
+            tx.objectStore("syncmeta").delete("base");
+          }catch(e){}
+        }).catch(function(){});
+      }
+      localStorage.setItem("questa.baseReset.v1", "done");
+    }
+  }catch(e){ /* best-effort */ }
   window.addEventListener("online", () => syncNow());
   document.addEventListener("visibilitychange", () => {
     if(document.visibilityState === "visible") syncNow();

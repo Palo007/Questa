@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.11-1707";
+const APP_VERSION = "v2026.07.11-1932";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -172,10 +172,27 @@ function migrate(s){ const f=freshState();
     (out.prefs.an.views||[]).forEach(v=>{ v.updatedAt = v.updatedAt || v.createdAt || 0; });
     (out.prefs.an.metrics||[]).forEach(m=>{ m.updatedAt = m.updatedAt || m.createdAt || 0; });
   }
+  if(out.char && (out.char.updatedAt == null)) out.char.updatedAt = Date.now();
   return out; }
 let IS_DIRTY = false;
 let _flushPromise = null;
-function save(){ IS_DIRTY = true; localStorage.setItem(STORE_KEY, JSON.stringify(S)); if(typeof scheduleSync==="function" && !(typeof syncIsApplying==="function" && syncIsApplying())) scheduleSync(); }
+var _prevCharSig = null;
+function _charSig(c){ if(!c) return ""; var o={}; for(var k in c){ if(k!=="updatedAt") o[k]=c[k]; } try{ return JSON.stringify(o); }catch(e){ return ""; } }
+function save(){
+  var applying = (typeof syncIsApplying==="function" && syncIsApplying());
+  // Stamp char.updatedAt only on a genuine user-driven char change (not while
+  // sync is applying a merged state, which already carries its own updatedAt).
+  if(!applying && S && S.char){
+    var sig = _charSig(S.char);
+    if(_prevCharSig !== null && sig !== _prevCharSig){ S.char.updatedAt = Date.now(); }
+    _prevCharSig = sig;
+  } else if(S && S.char){
+    _prevCharSig = _charSig(S.char);
+  }
+  IS_DIRTY = true;
+  localStorage.setItem(STORE_KEY, JSON.stringify(S));
+  if(typeof scheduleSync==="function" && !applying) scheduleSync();
+}
 // --- append-only event log (IndexedDB-backed) ------------------------
 // Unlike history (one merged point/day), events are NEVER merged: each tap,
 // subtask toggle, completion and miss is its own timestamped record. This is

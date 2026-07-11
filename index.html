@@ -44,14 +44,16 @@
   .charAvatarRow .caCol{display:flex;flex-direction:column;min-width:0}
   .charAvatarRow .caName{flex:1 1 auto;min-width:0}
   .charAvatarRow .caAvatar{flex:0 0 auto}
-  .charAvatarRow label{margin:0 0 4px;align-self:flex-start}
-  .charAvatarRow #avatarLbl{display:inline-block}
+  .caLabelRow{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;min-height:18px}
+  .caLabelRow label{margin:0 !important;font-size:12px;color:var(--muted);align-self:auto;display:inline-block}
+  .caLabelActions{display:flex;align-items:center;gap:6px}
   .caAvatarCtl{display:flex;gap:6px;align-items:center}
   .caFace{flex:0 0 auto;box-sizing:border-box}
   .browseGroup{position:relative;flex:0 0 auto;display:flex;flex-direction:column}
   .browseGroup .btn{flex:none;width:auto;overflow:visible;text-overflow:clip}
-  .browseGroup .infoTip{position:absolute;top:-20px;right:0}
-  .caRemove{align-self:center;font-size:12px;color:var(--accent);text-decoration:none;white-space:nowrap;margin-top:4px}
+  .caRemove{font-size:11px;font-weight:600;color:var(--accent);text-decoration:none;white-space:nowrap;margin-right:2px}
+  .caRemove:hover{text-decoration:underline}
+  #setName,#setFace,.browseGroup .btn{height:38px !important}
   .who{flex:1;min-width:0}
   .who .lvl{font-size:12px;color:var(--muted)}
   .who .name{font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

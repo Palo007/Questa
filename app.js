@@ -3600,15 +3600,22 @@ function openSettings(){
   let h='<div class="settingsHead"><h3>Settings</h3><button class="btn primary" type="button" onclick="closeSheet()">Close</button></div>';
   const avatarTip='Avatar\nType an emoji, or upload a PNG, JPEG or GIF (max 1 MB) to use as your avatar. An uploaded image takes priority over the emoji.';
   h+='<div class="charAvatarRow">'+
-       '<div class="caCol caName"><label>Character name</label>'+
-         '<input type="text" id="setName" value="'+esc(S.char.name)+'" onchange="setCharName(this.value)"></div>'+
-       '<div class="caCol caAvatar"><label id="avatarLbl">Avatar</label>'+
+       '<div class="caCol caName">'+
+         '<div class="caLabelRow"><label>Character name</label></div>'+
+         '<input type="text" id="setName" value="'+esc(S.char.name)+'" onchange="setCharName(this.value)">'+
+       '</div>'+
+       '<div class="caCol caAvatar">'+
+         '<div class="caLabelRow">'+
+           '<label id="avatarLbl">Avatar</label>'+
+           '<div class="caLabelActions">'+
+             (S.char.faceImg?'<a href="#" class="caRemove" onclick="removeFace();return false">Remove</a>':'')+
+             infoIcon(avatarTip)+
+           '</div>'+
+         '</div>'+
          '<div class="caAvatarCtl">'+
            '<input type="text" id="setFace" class="caFace" value="'+esc(S.char.face)+'" maxlength="2" placeholder="emoji" onchange="setCharFace(this.value)">'+
            '<div class="browseGroup">'+
              '<button class="btn ghost" type="button" onclick="document.getElementById(\'faceFile\').click()">Browse image</button>'+
-             (S.char.faceImg?'<a href="#" class="caRemove" onclick="removeFace();return false">Remove</a>':'')+
-             infoIcon(avatarTip)+
            '</div>'+
          '</div>'+
        '</div>'+

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.08-1817 CET";
+const APP_VERSION = "v2026.07.10-2340";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -9,7 +9,7 @@ const APP_VERSION = "v2026.07.08-1817 CET";
 // committed, touchmove is non-cancelable and the card freezes lifted while the page
 // scrolls. A short window (~200) beats that commit; raising it (e.g. 1000) makes the
 // freeze MORE likely, not less. The setting exists so it can be tuned on a real device.
-const DRAG_DELAY_DEFAULT = 100;
+const DRAG_DELAY_DEFAULT = 200;
 function confirmDialog(title, text) {
   return new Promise((resolve) => {
     const overlay = document.getElementById('confirmOverlay');
@@ -72,22 +72,30 @@ function alertDialog(title, text) {
   });
 }
 function longPressMs(){
-  const v = (S.prefs && S.prefs.dragDelay);
-  const n = (v==null ? DRAG_DELAY_DEFAULT : +v);
-  return (isFinite(n) && n>=0) ? n : DRAG_DELAY_DEFAULT;
+  return 200;
 }
 let _buzzLastResult = null;
 let _buzzCount = 0;
 function getBuzzDiag(){ return { type: typeof navigator.vibrate, lastResult: _buzzLastResult, count: _buzzCount }; }
+// repeat index 0=Sun..6=Sat (matches JS getDay() AND the [Su,M,T,W,Th,F,Sa] array)
+function isDailyDueOn(t, dow){ return !t.repeat || !!t.repeat[dow]; }
+function isDailyDueToday(t){ return isDailyDueOn(t, new Date().getDay()); }
+const DOW_LABELS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+function nextDueWeekday(t){
+  if(!t.repeat) return null;              // legacy daily: due every day, no pill
+  const today=new Date().getDay();
+  for(let i=1;i<7;i++){ const d=(today+i)%7; if(t.repeat[d]) return DOW_LABELS[d]; }
+  return 'Never';                         // repeat all-false -> never due
+}
 const STORE_KEY = "questa.save.v1";
 function freshState(){
   return {
     version:1,
     char:{ name:"Adventurer", face:"🧙", cls:"Warrior",
            lvl:1, xp:0, hp:50, maxHp:50, mp:0, gold:0 },
-    tasks:[], rewards:[], tags:[],
+    tasks:[], rewards:[], tags:[], devices:[],
     lastCron: dayStamp(new Date()),
-    history:[], charHistory:[], prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true }
+    history:[], charHistory:[],     prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false }
   };
 }
 let S = load();
@@ -98,7 +106,14 @@ function load(){
 }
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
-  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true}, s.prefs||{});
+  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardThick:0, notificationsEnabled:false, saveBtnTop:false}, s.prefs||{});
+  if(out.prefs.cardPad !== undefined){
+    let cp = parseInt(out.prefs.cardPad, 10);
+    if(isFinite(cp)){
+      out.prefs.cardThick = Math.max(0, cp - 5);
+    }
+    delete out.prefs.cardPad;
+  }
   // Tooltip delay is fixed at Instant; the control was removed, so normalize any saved value.
   out.prefs.tipDelay=0;
   // Card drag delay now lives on a 100-300 ms slider; clamp legacy values into range.
@@ -108,9 +123,24 @@ function migrate(s){ const f=freshState();
   // array carried in from a legacy save or an import file so it can't bloat the
   // localStorage blob or be mistaken for a live source.
   if(!Array.isArray(out.tags)) out.tags=[];
+  if(!Array.isArray(out.devices)) out.devices=[];
   delete out.events;
+  if(Array.isArray(out.tasks)){ out.tasks.forEach(normalizeTaskReminders); }
+  // Sync groundwork: every synced entity needs a deterministic updatedAt so
+  // three-way merge (see sync.js) can tiebreak consistently, even for data
+  // saved before this field existed.
+  (out.tasks||[]).forEach(t=>{ t.updatedAt = t.updatedAt || t.createdAt || 0; });
+  (out.rewards||[]).forEach(r=>{ r.updatedAt = r.updatedAt || r.createdAt || 0; });
+  (out.tags||[]).forEach(g=>{ g.updatedAt = g.updatedAt || g.createdAt || 0; });
+  (out.devices||[]).forEach(d=>{ d.updatedAt = d.updatedAt || 0; });
+  if(out.prefs && out.prefs.an){
+    (out.prefs.an.views||[]).forEach(v=>{ v.updatedAt = v.updatedAt || v.createdAt || 0; });
+    (out.prefs.an.metrics||[]).forEach(m=>{ m.updatedAt = m.updatedAt || m.createdAt || 0; });
+  }
   return out; }
-function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
+let IS_DIRTY = false;
+let _flushPromise = null;
+function save(){ IS_DIRTY = true; localStorage.setItem(STORE_KEY, JSON.stringify(S)); if(typeof scheduleSync==="function" && !(typeof syncIsApplying==="function" && syncIsApplying())) scheduleSync(); }
 // --- append-only event log (IndexedDB-backed) ------------------------
 // Unlike history (one merged point/day), events are NEVER merged: each tap,
 // subtask toggle, completion and miss is its own timestamped record. This is
@@ -125,7 +155,7 @@ function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
 // One database ("questa"), one object store ("events"), keyed by an
 // auto-increment id, with indexes on ts, kind and taskId.
 const IDB_NAME = "questa";
-const IDB_VERSION = 1;
+const IDB_VERSION = 3;
 const EVENTS_STORE = "events";
 // Prune policy (see HISTORY-TRACKING.md): drop events older than this many
 // months, with a generous hard-count backstop. localStorage's old 5 MB quota
@@ -144,11 +174,23 @@ function idbOpen(){
     catch(e){ reject(e); return; }
     req.onupgradeneeded = ()=>{
       const db = req.result;
+      let evStore;
       if(!db.objectStoreNames.contains(EVENTS_STORE)){
-        const os = db.createObjectStore(EVENTS_STORE, {keyPath:"id", autoIncrement:true});
-        os.createIndex("ts", "ts", {unique:false});
-        os.createIndex("kind", "kind", {unique:false});
-        os.createIndex("taskId", "taskId", {unique:false});
+        evStore = db.createObjectStore(EVENTS_STORE, {keyPath:"id", autoIncrement:true});
+        evStore.createIndex("ts", "ts", {unique:false});
+        evStore.createIndex("kind", "kind", {unique:false});
+        evStore.createIndex("taskId", "taskId", {unique:false});
+      } else {
+        evStore = req.transaction.objectStore(EVENTS_STORE);
+      }
+      if(!evStore.indexNames.contains("uid")){
+        evStore.createIndex("uid", "uid", {unique:false});
+      }
+      if(!db.objectStoreNames.contains("backups")){
+        db.createObjectStore("backups", {keyPath:"id", autoIncrement:true});
+      }
+      if(!db.objectStoreNames.contains("syncmeta")){
+        db.createObjectStore("syncmeta");
       }
     };
     req.onsuccess = ()=>{ const db=req.result; resolve(db); schedulePrune(db); };
@@ -160,7 +202,9 @@ function idbOpen(){
 // runCron, creditYesterday) stay synchronous; all async + failure handling is
 // internal here, so a missing/blocked IDB never breaks task scoring.
 function logEvent(ev){
-  const rec = Object.assign({ts:Date.now()}, ev);
+  const rec = (typeof syncEventUid==="function" && typeof syncDeviceId==="function")
+    ? Object.assign({ts:Date.now(), uid:syncEventUid(), dev:syncDeviceId()}, ev)
+    : Object.assign({ts:Date.now()}, ev);
   idbOpen().then(db=>{
     try{
       const tx = db.transaction(EVENTS_STORE, "readwrite");
@@ -255,6 +299,163 @@ function bulkAddEvents(list){
     tx.onabort = ()=>resolve(added);
   })).catch(()=>0);
 }
+// SHA-256 hash for backup integrity verification. Falls back to a simple
+// length-based digest when Web Crypto is unavailable (e.g. insecure context).
+async function computeHash(str){
+  if(typeof crypto!=="undefined" && crypto.subtle && crypto.subtle.digest){
+    try{
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+      return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+    }catch(e){ /* fall through */ }
+  }
+  // Fallback: deterministic string-length-based hash when crypto unavailable
+  let h = 0;
+  for(let i=0; i<str.length; i++){ h = ((h<<5)-h)+str.charCodeAt(i); h |= 0; }
+  return 'fallback-' + Math.abs(h).toString(16).padStart(8,'0');
+}
+
+// --- Backup snapshot read/list (Tier-1 core write/verify) --------------------
+async function listSnapshots(){
+  try{
+    const db = await idbOpen();
+    const tx = db.transaction("backups","readonly");
+    const store = tx.objectStore("backups");
+    return await new Promise((resolve,reject)=>{
+      const out=[];
+      const req = store.openCursor();
+      req.onsuccess = ()=>{ const c=req.result;
+        if(!c){ resolve(out.sort((a,b)=>b.ts-a.ts)); return; }
+        out.push(c.value); c.continue(); };
+      req.onerror = ()=>reject(req.error);
+    });
+  }catch(e){ console.error("listSnapshots failed:",e); return []; }
+}
+async function readSnapshot(id){
+  try{
+    const db = await idbOpen();
+    return await new Promise((resolve,reject)=>{
+      const req = db.transaction("backups","readonly").objectStore("backups").get(id);
+      req.onsuccess = ()=>resolve(req.result||null);
+      req.onerror = ()=>reject(req.error);
+    });
+  }catch(e){ console.error("readSnapshot failed:",e); return null; }
+}
+async function writeSnapshot(type){
+  try{
+    const db = await idbOpen();
+    let events = [];
+    if(type === "full"){
+      const all = await getEvents({});
+      events = all || [];
+    } else {
+      try{
+        const snapshots = await listSnapshots();
+        const lastBaseline = snapshots.find(s => s.type === "full");
+        const since = lastBaseline ? lastBaseline.ts : 0;
+        const recent = await getEvents({from: since});
+        events = recent || [];
+      }catch(e){
+        console.warn("Delta snapshot fallback to full", e);
+        const all = await getEvents({});
+        events = all || [];
+        type = "full";
+      }
+    }
+    const payload = JSON.stringify({stateSnapshot: S, events});
+    const hash = await computeHash(payload);
+    const rec = {
+      payload, hash, type,
+      appVersion: typeof APP_VERSION!=="undefined"?APP_VERSION:"unknown",
+      ts: Date.now(),
+      counts: {
+        tasks: (S.tasks||[]).length, rewards: (S.rewards||[]).length,
+        tags: (S.tags||[]).length,
+        views: ((S.prefs&&S.prefs.an&&S.prefs.an.views)||[]).length,
+        events: events.length
+      },
+      verified: false
+    };
+    const tx = db.transaction("backups","readwrite");
+    const store = tx.objectStore("backups");
+    const id = await new Promise((resolve,reject)=>{
+      const req = store.add(rec);
+      req.onsuccess = ()=>resolve(req.result);
+      req.onerror = ()=>reject(req.error);
+    });
+    await new Promise(r=>{ tx.oncomplete=r; tx.onerror=r; tx.onabort=r; });
+    // Write-then-verify: read back, recompute hash, mark verified or delete
+    try{
+      const tx2 = db.transaction("backups","readonly");
+      const store2 = tx2.objectStore("backups");
+      const saved = await new Promise((resolve,reject)=>{
+        const req = store2.get(id);
+        req.onsuccess = ()=>resolve(req.result);
+        req.onerror = ()=>reject(req.error);
+      });
+      if(saved){
+        const check = await computeHash(saved.payload);
+        if(check === saved.hash){
+          const tx3 = db.transaction("backups","readwrite");
+          const store3 = tx3.objectStore("backups");
+          saved.verified = true; store3.put(saved);
+        } else {
+          const tx3 = db.transaction("backups","readwrite");
+          const store3 = tx3.objectStore("backups");
+          store3.delete(id);
+          console.error("Snapshot verification failed - hash mismatch, deleted record", id);
+        }
+      }
+    }catch(e){ console.error("Snapshot verification error:",e); }
+    return id;
+  }catch(e){ console.error("writeSnapshot failed:",e); return null; }
+}
+
+// Grandfather-father-son rotation: keep 7 daily, 4 weekly, 6 monthly baselines.
+async function rotateSnapshots(){
+  try{
+    const db = await idbOpen();
+    const snapshots = await listSnapshots();
+    if(snapshots.length <= 7) return;
+    const day = 86400000, week = 7*day, month = 30*day;
+    const keep = new Set();
+    if(snapshots.length > 0) keep.add(snapshots[0].id);
+    const seenDays = new Set();
+    for(const s of snapshots){
+      const dayKey = Math.floor(s.ts / day);
+      if(!seenDays.has(dayKey)){
+        seenDays.add(dayKey);
+        keep.add(s.id);
+        if(seenDays.size >= 7) break;
+      }
+    }
+    const seenWeeks = new Set();
+    for(const s of snapshots){
+      const weekKey = Math.floor(s.ts / week);
+      if(!seenWeeks.has(weekKey)){
+        seenWeeks.add(weekKey);
+        keep.add(s.id);
+        if(seenWeeks.size >= 4) break;
+      }
+    }
+    const seenMonths = new Set();
+    for(const s of snapshots){
+      const mKey = Math.floor(s.ts / month);
+      if(!seenMonths.has(mKey)){
+        seenMonths.add(mKey);
+        keep.add(s.id);
+        if(seenMonths.size >= 6) break;
+      }
+    }
+    const tx = db.transaction("backups", "readwrite");
+    const store = tx.objectStore("backups");
+    for(const s of snapshots){
+      if(!keep.has(s.id)){
+        store.delete(s.id);
+      }
+    }
+  }catch(e){ console.error("rotateSnapshots failed:", e); }
+}
+
 // (Retained, no longer wired to a Settings button.) Loads a standalone events
 // JSON into IndexedDB, replacing prior synthetic events. The importer now embeds
 // events directly in the import file, so normal Settings -> Import handles them;
@@ -317,12 +518,108 @@ function logCharSnapshot(){
   S.charHistory.push({date:Date.now(), hp:c.hp, maxHp:c.maxHp, xp:c.xp, mp:c.mp, gold:c.gold, lvl:c.lvl});
 }
 function applyWidth(){ document.documentElement.style.setProperty('--appw',(S.prefs.width||480)+'px'); }
+function applyCardThick(){ document.documentElement.style.setProperty('--card-min-h',(32+(S.prefs.cardThick||0))+'px'); }
 
 const uid = ()=> Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 function dayStamp(d){ return d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate(); }
+/* BEGIN_REMINDER_HELPERS */
+function normalizeTaskReminders(t) {
+  if (!t.reminders || !Array.isArray(t.reminders)) {
+    t.reminders = [];
+  }
+}
+
+function isReminderDue(t, r, now) {
+  if (!r.enabled) return false;
+  if (t.type === 'todo' && t.done) return false;
+  
+  const currentHour = String(now.getHours()).padStart(2, '0');
+  const currentMin = String(now.getMinutes()).padStart(2, '0');
+  const currentTimeStr = `${currentHour}:${currentMin}`;
+  if (r.time !== currentTimeStr) return false;
+  
+  if (r.kind === 'once') {
+    const currentYear = now.getFullYear();
+    const currentMonth = String(now.getMonth() + 1).padStart(2, '0');
+    const currentDateVal = String(now.getDate()).padStart(2, '0');
+    const currentDateStr = `${currentYear}-${currentMonth}-${currentDateVal}`;
+    if (r.date !== currentDateStr) return false;
+  } else {
+    const currentDay = now.getDay();
+    if (t.type === 'daily') {
+      if (t.repeat && !t.repeat[currentDay]) return false;
+    } else {
+      if (r.days && !r.days[currentDay]) return false;
+    }
+  }
+  
+  const fireKey = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${r.time}`;
+  if (r.lastFiredKey === fireKey) return false;
+  
+  return true;
+}
+
+function getReminderNotificationPayload(t, r) {
+  let title = t.title || 'Questa Reminder';
+  let body = '';
+  if (t.type === 'habit') {
+    body = t.notes ? `Nudge: ${t.notes}` : 'Time to score your habit!';
+  } else if (t.type === 'daily') {
+    body = t.notes ? `Daily reminder: ${t.notes}` : 'Check off your daily task!';
+  } else {
+    body = t.notes ? `To-Do due: ${t.notes}` : 'Complete your to-do!';
+  }
+  return {
+    title: title,
+    body: body,
+    tag: `questa-${t.id}`
+  };
+}
+/* END_REMINDER_HELPERS */
+let _schedulerInterval = null;
+function startReminderScheduler() {
+  if (_schedulerInterval) clearInterval(_schedulerInterval);
+  checkReminders();
+  _schedulerInterval = setInterval(checkReminders, 60000);
+}
+
+function checkReminders() {
+  if (!S.prefs || !S.prefs.notificationsEnabled) return;
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  
+  const now = new Date();
+  let tasksChanged = false;
+  
+  S.tasks.forEach(t => {
+    if (!t.reminders) return;
+    t.reminders.forEach(r => {
+      if (isReminderDue(t, r, now)) {
+        const payload = getReminderNotificationPayload(t, r);
+        if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+          navigator.serviceWorker.controller.postMessage({
+            type: 'SHOW_NOTIFICATION',
+            title: payload.title,
+            body: payload.body,
+            tag: payload.tag
+          });
+        } else {
+          new Notification(payload.title, { body: payload.body, tag: payload.tag });
+        }
+        
+        const fireKey = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${r.time}`;
+        r.lastFiredKey = fireKey;
+        tasksChanged = true;
+      }
+    });
+  });
+  
+  if (tasksChanged) {
+    save();
+  }
+}
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
-const DIFF = { trivial:0.1, easy:1, medium:1.5, hard:2 };
+const DIFF = { trivial:0.1, easy:1, medium:1.5, hard:2, log:0 };
 function xpToLevel(lvl){ return Math.round(0.25*lvl*lvl + 10*lvl + 139.75); }
 function valColor(v){
   if(v < -16) return ["Dark red","var(--darkred)"];
@@ -386,15 +683,19 @@ function logHistory(t, patch){
 }
 function completeTask(t, ev){
   if(t.done) return;
+  if(t.type==='daily' && !isDailyDueToday(t)) return; // non-due dailies must never complete (blocks streak/reward/isDue inflation)
   const r = completionReward(t);
   const delta = valueDelta(t.value);
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
+  t.updatedAt = Date.now();
+  buzz(50);
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };  // remember exactly what was granted
   if(t.type==='daily'){ t.streak = (t.streak||0) + 1;
     const cl=(t.checklist||[]); const snap = cl.length? {checklist:cl.map(c=>({text:c.text,done:!!c.done}))} : {};
     logHistory(t,Object.assign({value:t.value,completed:true,isDue:true,reward:Object.assign({},t._gr),repeat:(t.repeat||[]).slice()},snap));
+    // isDue:true is safe here: non-due dailies are gated above
     logEvent({kind:'complete', taskType:'daily', taskId:t.id, taskTitle:t.title,
               streak:t.streak, reward:Object.assign({},t._gr), repeat:(t.repeat||[]).slice(),
               checklist:cl.map(c=>({id:c.id||null,text:c.text,done:!!c.done}))}); }
@@ -402,7 +703,7 @@ function completeTask(t, ev){
     logHistory(t,{value:t.value,completed:true,reward:Object.assign({},t._gr)});
     logEvent({kind:'complete', taskType:'todo', taskId:t.id, taskTitle:t.title,
               reward:Object.assign({},t._gr), createdAt:t.createdAt||null, completedAt:t.completedAt}); }
-  bumpAvatar(); buzz([12,40,18]); floatFx(fxGain(r.xp,r.gold),'pos',ev);
+  bumpAvatar(); floatFx(fxGain(r.xp,r.gold),'pos',ev);
   save(); render();
 }
 function reverseGrant(t){
@@ -426,21 +727,48 @@ function unlogToday(t){
   }
 }
 function uncompleteDaily(t){
+  const _gr=t._gr?Object.assign({},t._gr):null;
   reverseGrant(t);
   unlogToday(t);
   t.done = false;
   if(t.type==='daily' && t.streak){ t.streak = Math.max(0, t.streak - 1); }
+  try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();
 }
 function uncompleteTodo(t){
+  const _gr=t._gr?Object.assign({},t._gr):null;
   reverseGrant(t);
   unlogToday(t);
   t.done = false;
   toast('Reverted');
+  try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();
 }
 function scoreHabit(id, dir, ev){
+  if(_suppressHabitClick===id){ _suppressHabitClick=null; return; }  // ignore the click fired right after a long-press
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
+  if(t.difficulty==='log'){
+    // Log habit: a pure tally. NO xp/gold/mp/hp, and value/color never changes.
+    // Any tap (+ or −) increments the period counter; a non-zero counter is what
+    // marks it "logged" and hides it from the All filter (see viewHabits) until
+    // the counter resets on the resetFreq boundary (cron). Reps are still logged
+    // so the metrics/analytics system counts the activity, but scored:false so it
+    // is never treated as a rewarded score.
+    const _rpt = t.repsPerTap || repsPerTap(t.title);
+    if(dir>0){
+      t.cUp=(t.cUp||0)+1;
+      logHistory(t,{value:t.value,reps:_rpt,repCounted:true,scored:false});
+      logEvent({kind:'habitTap', dir:1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value, log:true});
+    } else {
+      t.cDown=(t.cDown||0)+1;
+      logHistory(t,{value:t.value,reps:_rpt,repCounted:true,scored:false});
+      logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value, log:true});
+    }
+    buzz(50); floatFx('logged','pos',ev);
+    t.updatedAt=Date.now();
+    save(); render();
+    return;
+  }
   if(dir>0){
     const r=completionReward(t);
     gainXp(r.xp); S.char.gold=+(S.char.gold+r.gold).toFixed(2); S.char.mp+=r.mp;
@@ -449,16 +777,84 @@ function scoreHabit(id, dir, ev){
     const _rpt = t.repsPerTap || repsPerTap(t.title);
     logHistory(t,{value:t.value,scoredUp:1,reps:_rpt,repCounted:true,scored:true});
     logEvent({kind:'habitTap', dir:1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value});
-    bumpAvatar(); buzz([12,40,18]); floatFx(fxGain(r.xp,r.gold),'pos',ev);
+    bumpAvatar(); buzz(50); floatFx(fxGain(r.xp,r.gold),'pos',ev);
   } else {
     const dmg=missDamage(t);
     t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
     t.cDown=(t.cDown||0)+1;
     logHistory(t,{value:t.value,scoredDown:1});
     logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, value:t.value, dmg:dmg});
-    takeDamage(dmg); buzz([28,30,28]); floatFx('-'+dmg.toFixed(1)+' HP','neg',ev);
+    takeDamage(dmg); buzz(100); floatFx('-'+dmg.toFixed(1)+' HP','neg',ev);
   }
+  t.updatedAt=Date.now();
   save(); render();
+}
+// ---- Bulk reps entry (long-press +/− on a habit card) ---------------------
+// Logs a precise rep count WITHOUT scoring the habit (no value/XP/gold/HP, no
+// cUp/cDown increment). Reps are aggregated by the 'reps' metric system via the
+// history event. `n` is signed: positive adds, negative removes.
+let REP=null;                 // active rep-sheet draft: {id, sign, value}
+let _suppressHabitClick=null; // id whose trailing click we must ignore after a long-press
+const REP_LONGPRESS_MS=350;
+function addReps(id, n){
+  const t=S.tasks.find(x=>x.id===id); if(!t) return;
+  // Reflect bulk reps on the habit's +/− counter (no scoring): positive reps
+  // add to cUp, negative reps add to cDown. This is the on-card feedback the
+  // reps panel needs; value/XP/gold/HP are intentionally untouched.
+  if(n>0) t.cUp=(t.cUp||0)+n; else t.cDown=(t.cDown||0)+(-n);
+  logHistory(t,{value:t.value, reps:n, repCounted:true, scored:false});
+  logEvent({kind:'habitReps', dir:Math.sign(n), taskId:t.id, taskTitle:t.title, reps:n, value:t.value});
+  t.updatedAt=Date.now();
+  save(); render();
+  toast((n>0?'+':'') + n + ' reps · no reward');
+}
+function openRepSheet(id, sign){
+  const t=S.tasks.find(x=>x.id===id); if(!t) return;
+  REP={id, sign:sign>0?1:-1, value:0};
+  drawRepSheet();
+  document.getElementById('scrim').classList.add('show');
+}
+function closeRepSheet(){
+  REP=null;
+  document.getElementById('scrim').classList.remove('show');
+}
+function repAdjust(delta){
+  if(!REP) return;
+  if(REP.sign>0) REP.value=Math.max(0, REP.value+delta);
+  else           REP.value=Math.min(0, REP.value+delta);
+  drawRepSheet();
+}
+function repQuick(n){ repAdjust(n); }
+function repInput(v){
+  if(!REP) return;
+  let n=parseInt(v,10); if(isNaN(n)) n=0;
+  REP.value = REP.sign>0 ? Math.max(0,n) : Math.min(0,n);
+  const b=document.getElementById('repConfirm'); if(b) b.disabled=(REP.value===0);
+}
+function commitReps(){
+  if(!REP) return;
+  const n=REP.value; if(!n){ closeRepSheet(); return; }
+  const id=REP.id; closeRepSheet(); addReps(id, n);
+}
+function drawRepSheet(){
+  const sheet=document.getElementById('sheet'); if(!sheet||!REP) return;
+  const t=S.tasks.find(x=>x.id===REP.id); if(!t){ REP=null; return; }
+  const pos=REP.sign>0;
+  const q=pos?[{l:'+3',v:3},{l:'+6',v:6},{l:'+8',v:8}]:[{l:'−3',v:-3},{l:'−6',v:-6},{l:'−8',v:-8}];
+  const quick=q.map(o=>'<button type="button" class="repQuick" onclick="repQuick('+o.v+')">'+o.l+'</button>').join('');
+  let h='<h3 style="margin:0 0 4px">Log reps</h3>';
+  h+='<div class="small" style="margin-bottom:12px">'+esc(t.title)+'</div>';
+  h+='<div class="repRow">';
+  h+='<button type="button" class="repSide" onclick="repAdjust(-1)" aria-label="remove one">−</button>';
+  h+='<input type="number" id="repInput" class="repInput" value="'+(REP.value||0)+'" oninput="repInput(this.value)">';
+  h+='<button type="button" class="repSide" onclick="repAdjust(1)" aria-label="add one">+</button>';
+  h+='</div>';
+  h+='<div class="repQuickRow">'+quick+'</div>';
+  h+='<div class="repActions">';
+  h+='<button type="button" class="btn ghost" onclick="closeRepSheet()">✕ Cancel</button>';
+  h+='<button type="button" class="btn primary" id="repConfirm" onclick="commitReps()"'+((REP.value===0)?' disabled':'')+'>✓ Confirm</button>';
+  h+='</div>';
+  sheet.innerHTML=h;
 }
 // Adjust the habit counter from the editor sheet. Reward/penalty application
 // is deferred to saveTask() which calculates the net delta from the original
@@ -513,11 +909,13 @@ function missedYesterdayDailies(){
 // stays silent (no per-task toast, no render) for batch use by the modal.
 function creditYesterday(t){
   if(t.done) return;
+  if(t.type==='daily' && !isDailyDueOn(t, (new Date().getDay()+6)%7)) return; // only credit dailies actually due yesterday; missedYesterdayDailies already filters, this is defense-in-depth
   const r = completionReward(t);
   const delta = valueDelta(t.value);
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
+  t.updatedAt = Date.now();
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };
   t.streak = (t.streak||0) + 1;
   const cl=(t.checklist||[]);
@@ -562,7 +960,11 @@ function drawYesterCheck(){
   h+='<button class="btn primary yGo" onclick="commitYesterCheck()">Start my day</button>';
   h+='<p class="yFine">Anything left unticked applies its miss damage now.</p>';
   h+='</div>';
+  const _s = document.querySelector('.ySheet');
+  const _sc = _s ? _s.scrollTop : 0;
   document.getElementById('yScrim').innerHTML=h;
+  const _ns = document.querySelector('.ySheet');
+  if(_ns) _ns.scrollTop = _sc;
 }
 function commitYesterCheck(){
   _yesterMissed.forEach(t=>{ if(_yesterTick[t.id]) creditYesterday(t); });
@@ -587,9 +989,9 @@ function runCron(){
   const dow = new Date().getDay();
   let totalDmg = 0;
   S.tasks.forEach(t=>{
-    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; } return; }
+    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; t.updatedAt=Date.now(); } return; }
     if(t.type!=='daily') return;
-    const scheduledYesterday = !t.repeat || t.repeat[(dow+6)%7];
+    const scheduledYesterday = isDailyDueOn(t, (dow+6)%7);  // intentional YESTERDAY test — do NOT use isDailyDueToday
     if(scheduledYesterday && !t.done){
       const dmg = missDamage(t);
       totalDmg += dmg;
@@ -604,6 +1006,7 @@ function runCron(){
     }
     t.done = false;
     (t.checklist||[]).forEach(c=>c.done=false);
+    t.updatedAt = Date.now();
   });
   S.lastCron = today;
   if(totalDmg>0){ takeDamage(totalDmg); toast('-'+totalDmg.toFixed(1)+' HP (missed dailies)'); }
@@ -690,9 +1093,10 @@ function toggleSub(taskId, idx){
   const t=S.tasks.find(x=>x.id===taskId); if(!t||!t.checklist||!t.checklist[idx])return;
   const c=t.checklist[idx];
   c.done=!c.done;
-  if(c.done) buzz([12,40,18]);
+  if(c.done) buzz(50);
   logEvent({kind:'subtask', taskId:t.id, taskTitle:t.title, taskType:t.type,
             subId:c.id||null, subText:c.text, done:c.done});
+  t.updatedAt=Date.now();
   save(); render();
 }
 function checklistBlock(t){
@@ -737,8 +1141,16 @@ function metaRow(t){
 function rail(t){
   let items = [];
   items.push('<span class="railItem diff-'+t.difficulty+'">'+t.difficulty+'</span>');
+  const hasRem = t.reminders && t.reminders[0] && t.reminders[0].enabled;
+  if(hasRem){
+    items.push('<span class="railItem bell" title="Reminder set" style="color:var(--accent);border-color:transparent;background:transparent;padding:0 2px;font-size:11px">🔔</span>');
+  }
   if(t.type==='daily'){
     items.push('<span class="railItem streak" title="Day streak">🔥 '+(t.streak||0)+'</span>');
+    if(!t.done && !isDailyDueToday(t)){
+      const nd=nextDueWeekday(t);
+      if(nd) items.push('<span class="railItem notdue" title="Not due yet">⏳ '+nd+'</span>');
+    }
   } else if(t.type==='habit'){
     const up=t.up!==false, down=t.down!==false;
     if(up&&down) items.push('<span class="railItem cnt" title="Today + / −">+'+(t.cUp||0)+'|−'+(t.cDown||0)+'</span>');
@@ -761,7 +1173,8 @@ const COIN_SVG='<svg viewBox="0 0 24 24" width="22" height="22" aria-label="coin
 function taskCard(t){
   const ccol=valColor(t.value)[1];
   const inner = t.done ? '<span class="ckmark">✓</span>' : '<span class="ckbox"></span>';
-  return '<div class="task '+t.type+' '+(t.done?'done':'')+'" draggable="'+(dragOK(t.type)?'true':'false')+'" data-id="'+t.id+'" data-list="tasks">'+
+  const notDue = t.type==='daily' && !t.done && !isDailyDueToday(t);
+  return '<div class="task '+t.type+' '+(t.done?'done':'')+(notDue?' notdue':'')+'" draggable="'+(dragOK(t.type)?'true':'false')+'" data-id="'+t.id+'" data-list="tasks">'+
     '<div class="valdot" style="background:'+ccol+'"></div>'+
     '<div class="check" onclick="toggle(\''+t.id+'\',event)">'+inner+'</div>'+
     '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+rail(t)+'</div>';
@@ -794,6 +1207,7 @@ function colTitle(title, addType, customTabKey){
     h += '</div>';
   }
   if (addType || customTabKey === 'rewards') {
+    h += '<div class="colTitleActions">';
     if (addType) {
       h += '<button class="filterIcon'+(FILTEROPEN?' open':'')+(filterActive?' active':'')+'" title="Filter" onclick="toggleFilter()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg></button>';
     }
@@ -804,6 +1218,7 @@ function colTitle(title, addType, customTabKey){
     } else {
       h += '<button class="addBtn" onclick="openReward(null)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button>';
     }
+    h += '</div>';
   }
   h += '</div>';
   return h;
@@ -822,8 +1237,8 @@ function tagById(id){ ensureTags(); return S.tags.find(t=>t.id===id)||null; }
 function taskTags(t){ return (t&&Array.isArray(t.tags))?t.tags:[]; }
 function addTag(name){ name=(name||'').trim(); if(!name) return null; ensureTags();
   const ex=S.tags.find(t=>t.name.toLowerCase()===name.toLowerCase()); if(ex) return ex.id;
-  const col=TAG_COLORS[S.tags.length%TAG_COLORS.length]; const tg={id:uid(),name:name,color:col}; S.tags.push(tg); return tg.id; }
-function renameTag(id,name){ const g=tagById(id); if(g){ g.name=(name||'').trim()||g.name; save(); } }
+  const col=TAG_COLORS[S.tags.length%TAG_COLORS.length]; const tg={id:uid(),name:name,color:col,createdAt:Date.now(),updatedAt:Date.now()}; S.tags.push(tg); return tg.id; }
+function renameTag(id,name){ const g=tagById(id); if(g){ g.name=(name||'').trim()||g.name; g.updatedAt=Date.now(); save(); } }
 function deleteTag(id){ ensureTags(); S.tags=S.tags.filter(t=>t.id!==id);
   (S.tasks||[]).forEach(t=>{ if(Array.isArray(t.tags)) t.tags=t.tags.filter(x=>x!==id); });
   Object.keys(TAGFILTER).forEach(k=>{ TAGFILTER[k]=(TAGFILTER[k]||[]).filter(x=>x!==id); });
@@ -906,9 +1321,18 @@ function sortBar(tab){
 function viewHabits(){
   let habits=S.tasks.filter(t=>t.type==='habit');
   const fl=FILTER.habits;
-  if(fl==='weak') habits=habits.filter(t=>t.value<1);
-  else if(fl==='strong') habits=habits.filter(t=>t.value>=1);
-  const bar=filterBar('habits',[['All','all'],['Weak','weak'],['Strong','strong']]);
+  const isLog=t=>t.difficulty==='log';
+  const logged=t=>((t.cUp||0)+(t.cDown||0))>0;   // tapped this reset period
+  if(fl==='log'){
+    habits=habits.filter(isLog);                          // Log tab: every Log habit
+  } else if(fl==='weak'){
+    habits=habits.filter(t=>!isLog(t) && t.value<1);      // Log habits excluded
+  } else if(fl==='strong'){
+    habits=habits.filter(t=>!isLog(t) && t.value>=1);     // Log habits excluded
+  } else { // 'all'
+    habits=habits.filter(t=>!isLog(t) || !logged(t));     // hide already-logged Log habits
+  }
+  const bar=filterBar('habits',[['All','all'],['Weak','weak'],['Strong','strong'],['Log','log']]);
   habits=applyTagFilter(habits,'habits');
   habits=sortList(habits,'habits');
   habits=applySearch(habits,'habits');
@@ -918,7 +1342,7 @@ function viewHabits(){
 function viewDailies(){
   let dailies=S.tasks.filter(t=>t.type==='daily');
   const fl=FILTER.dailies; const dow=new Date().getDay();
-  const isScheduledToday=t=> !t.repeat || t.repeat[new Date().getDay()];
+  const isScheduledToday=t=> isDailyDueToday(t);
   if(fl==='due') dailies=dailies.filter(t=> isScheduledToday(t) && !t.done);
   else if(fl==='notdue') dailies=dailies.filter(t=> t.done || !isScheduledToday(t));
   const bar=filterBar('dailies',[['All','all'],['Due','due'],['Not Due','notdue']]);
@@ -1563,8 +1987,8 @@ function bSaveMetric(){
   else { m.keyword=(document.getElementById('mKw').value||'').trim(); if(!m.keyword){ toast('Keyword required'); return; } }
   const habits=m.habits.map(h=>({id:h.id, reps:(h.reps===''||h.reps==null)?null:Number(h.reps)}));
   let id;
-  if(m._mid){ const tgt=p.metrics.find(x=>x.id===m._mid); tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits; id=m._mid; }
-  else { const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits}; p.metrics.push(nm); id=nm.id; }
+  if(m._mid){ const tgt=p.metrics.find(x=>x.id===m._mid); tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits; tgt.updatedAt=Date.now(); id=m._mid; }
+  else { const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits, createdAt:Date.now(), updatedAt:Date.now()}; p.metrics.push(nm); id=nm.id; }
   MEDIT=null; MBUILD=false;
   if(VDRAFT){ VDRAFT.source='metric'; VDRAFT.metricId=id; }
   save(); drawViewBuilder();
@@ -1572,7 +1996,7 @@ function bSaveMetric(){
 // clone the view currently open in the builder, inserting it just below
 function cloneView(){ if(!VDRAFT) return; const a=anPrefs(); a.views=a.views||[];
   if(a.views.length>=20){ toast('Max 20 view sections'); return; }
-  const copy=JSON.parse(JSON.stringify(VDRAFT)); copy.id=uid(); copy.name='clone - '+(VDRAFT.name||'view');
+  const copy=JSON.parse(JSON.stringify(VDRAFT)); copy.id=uid(); copy.name='clone - '+(VDRAFT.name||'view'); copy.createdAt=Date.now(); copy.updatedAt=Date.now();
   let idx=VDRAFT.id? a.views.findIndex(x=>x.id===VDRAFT.id) : -1; if(idx<0) idx=a.views.length-1;
   a.views.splice(idx+1,0,copy);
   VDRAFT=null; MEDIT=null; MBUILD=false; document.getElementById('scrim').classList.remove('show'); save(); refreshAnalytics();
@@ -1592,9 +2016,9 @@ function saveMetricEditor(){
   const habits=m.habits.map(h=>({id:h.id, reps:(h.reps===''||h.reps==null)?null:Number(h.reps)}));
   if(m._mid){
     const tgt=p.metrics.find(x=>x.id===m._mid);
-    tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits;
+    tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits; tgt.updatedAt=Date.now();
   } else {
-    const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits};
+    const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits, createdAt:Date.now(), updatedAt:Date.now()};
     p.metrics.push(nm); p.activeMetric=nm.id;
   }
   MEDIT=null; save(); render();
@@ -1669,7 +2093,7 @@ function anSnapshotRows(v){
   let vals=[];
   if(src==='incomplete'){
     vals=items.filter(t=>{ if(t.type==='todo') return !t.done;
-      if(t.type==='daily'){ const due=!t.repeat||t.repeat[new Date().getDay()]; return due&&!t.done; }
+      if(t.type==='daily'){ const due=isDailyDueToday(t); return due&&!t.done; }
       return false; }).map(t=>({item:t,w:1}));
   } else if(src==='streaks'){ vals=items.filter(t=>t.type==='daily').map(t=>({item:t,w:(t.streak||0)})); }
   else if(src==='tagcount'){ vals=items.map(t=>({item:t,w:1})); }
@@ -1798,7 +2222,7 @@ function anOverviewBody(from,to){
   const updated=tasks.filter(t=>{ const u=updatedMs(t); return u!==createdMs(t)&&inWin(u); }).length;
   let completed=0; tasks.forEach(t=>{ (t.history||[]).forEach(p=>{ if(p&&p.completed&&inWin(p.date)) completed++; }); });
   const openTodos=tasks.filter(t=>t.type==='todo'&&!t.done).length;
-  const dueDailies=tasks.filter(t=>t.type==='daily'&&(!t.repeat||t.repeat[new Date().getDay()])&&!t.done).length;
+  const dueDailies=tasks.filter(t=>t.type==='daily'&&isDailyDueToday(t)&&!t.done).length;
   let h='<div class="anCards">';
   h+='<div class="anCard"><div class="k">Habits</div><div class="v">'+tasks.filter(t=>t.type==='habit').length+'</div><div class="sub">total</div></div>';
   h+='<div class="anCard"><div class="k">Dailies</div><div class="v">'+tasks.filter(t=>t.type==='daily').length+'</div><div class="sub">'+dueDailies+' due now</div></div>';
@@ -1839,8 +2263,9 @@ function cancelView(){ VDRAFT=null; document.getElementById('scrim').classList.r
 function saveView(){ if(!VDRAFT)return; const inp=document.getElementById('vName'); if(inp)VDRAFT.name=inp.value.trim();
   if(!VDRAFT.name){ toast('Name required'); return; }
   const a=anPrefs(); a.views=a.views||[];
+  VDRAFT.updatedAt=Date.now();
   if(VDRAFT.id){ const i=a.views.findIndex(x=>x.id===VDRAFT.id); if(i>=0)a.views[i]=VDRAFT; else a.views.push(VDRAFT); }
-  else { if(a.views.length>=20){ toast('Max 20 view sections'); return; } VDRAFT.id=uid(); a.views.push(VDRAFT); }
+  else { if(a.views.length>=20){ toast('Max 20 view sections'); return; } VDRAFT.id=uid(); VDRAFT.createdAt=Date.now(); a.views.push(VDRAFT); }
   a.activeView=VDRAFT.id; VDRAFT=null; document.getElementById('scrim').classList.remove('show'); save(); refreshAnalytics();
 }
 function delView(){ if(!VDRAFT||!VDRAFT.id){ cancelView(); return; }
@@ -1926,7 +2351,7 @@ function importViews(ev){
   rd.onload=()=>{ try{ const d=JSON.parse(rd.result); const arr=Array.isArray(d)?d:(d.views||[]);
       if(!Array.isArray(arr)||!arr.length) throw 0;
       const a=anPrefs(); a.views=a.views||[]; let n=0;
-      arr.forEach(v=>{ if(!v||!v.source) return; a.views.push({id:uid(), name:v.name||'Imported view', source:v.source, group:v.group||'day', chart:v.chart||'line', tags:Array.isArray(v.tags)?v.tags:[], types:Array.isArray(v.types)?v.types:[], metricId:v.metricId||null}); n++; });
+      arr.forEach(v=>{ if(!v||!v.source) return; a.views.push({id:uid(), name:v.name||'Imported view', source:v.source, group:v.group||'day', chart:v.chart||'line', tags:Array.isArray(v.tags)?v.tags:[], types:Array.isArray(v.types)?v.types:[], metricId:v.metricId||null, createdAt:Date.now(), updatedAt:Date.now()}); n++; });
       if(n){ a.activeView=a.views[a.views.length-1].id; }
       save(); refreshAnalytics(); toast('Imported '+n+' view'+(n===1?'':'s'));
     } catch(e){ alertDialog('Error', 'That file does not look like Questa views.'); } };
@@ -1937,9 +2362,14 @@ function refreshAnalytics(){
   const body=document.getElementById('anBody'); if(!body)return;
   const oldDetails = document.querySelector('.anDetails');
   const wasOpen = oldDetails ? oldDetails.hasAttribute('open') : false;
+  const oldEventDetails = document.querySelector('.anEventDetails');
+  const eventWasOpen = oldEventDetails ? oldEventDetails.hasAttribute('open') : false;
   let h='';
   h+=anViewsUI(from,to);
   h+='<details class="anDetails"'+(wasOpen?' open':'')+'><summary>🔎 Full activity detail (reps, adherence, streaks, event log)</summary><div class="anDetailWrap">'+anDetailDashboard(from,to)+'</div></details>';
+  h+='<details class="anDetails anEventDetails"'+(eventWasOpen?' open':'')+'><summary>&#128203; Event log detail (live)</summary>'+
+     '<div id="anEventDetail" class="anCard full"><div class="k">From IndexedDB event log</div>'+
+     '<div class="anNote">Loading events&hellip;</div></div></details>';
   body.innerHTML=h;
   bindHeatTooltips();
   bindTips('.spkPt'); bindTips('.spkHit'); bindTips('.barHit');
@@ -2044,9 +2474,6 @@ function anDetailDashboard(from,to){
   // detail history arrays cannot: per-subtask completion (name + time of day),
   // individual habit-tap times, per-completion reward, miss-time partial state.
   h+=anLifecycleHTML(from,to);
-  h+='<div class="anSection">&#128203; Event log detail (live)</div>';
-  h+='<div id="anEventDetail" class="anCard full"><div class="k">From IndexedDB event log</div>'+
-     '<div class="anNote">Loading events&hellip;</div></div>';
   return h;
 }
 // Async, event-driven dashboard section. Proves the IDB read API end to end on
@@ -2085,8 +2512,8 @@ function evGoPage(n){
 }
 
 function getEventCategory(e) {
-  if (e.kind === 'habitTap' || e.taskType === 'habit') return 'habit';
-  if (e.kind === 'import' || e.kind === 'export') return 'system';
+  if (e.kind === 'habitTap' || e.kind === 'habitReps' || e.taskType === 'habit') return 'habit';
+  if (e.kind === 'import' || e.kind === 'export' || e.kind === 'devicename') return 'system';
   if (e.taskType === 'daily' || e.kind === 'miss') return 'daily';
   if (e.taskType === 'todo') return 'todo';
   if (e.kind === 'subtask') {
@@ -2097,6 +2524,38 @@ function getEventCategory(e) {
   }
   return 'system';
 }
+function _evCatBadgeName(cat){ return {habit:'Habit',daily:'Daily',todo:'To-do',system:'System'}[cat]||'Event'; }
+function _evCatBadgeClass(cat){ return {habit:'evBadge-habit',daily:'evBadge-daily',todo:'evBadge-todo',system:'evBadge-system'}[cat]||'evBadge-default'; }
+function _evDeltaSpan(val,unit){
+  if(!val) return '';
+  const pos=val>0;
+  const num=(unit==='XP'||unit==='MP')?Math.round(Math.abs(val)):Math.abs(val).toFixed(1);
+  return '<span style="font-size:10px;font-weight:700;color:'+(pos?'#7ee787':'#f74e52')+'">'+(pos?'+':'-')+num+(unit==='G'?'G':' '+unit)+'</span>';
+}
+function _evDiffText(from,to){
+  const _c=s=>esc(String(s==null?'':s));
+  const hasFrom=from!=null&&String(from)!=='';
+  const hasTo=to!=null&&String(to)!=='';
+  const F='style="color:#f74e52;text-decoration:line-through"';
+  const T='style="color:#7ee787"';
+  if(!hasFrom&&hasTo) return '<span style="color:#8b96a8;font-style:italic">new</span> \u2192 <span '+T+'>'+_c(to)+'</span>';
+  if(hasFrom&&!hasTo) return '<span '+F+'>'+_c(from)+'</span> \u2192 <span style="color:#f74e52;font-style:italic">removed</span>';
+  return '<span '+F+'>'+_c(from)+'</span> \u2192 <span '+T+'>'+_c(to)+'</span>';
+}
+
+/* BEGIN_DEVICENAME_HELPERS */
+// Resolve a device's display name for the event log / Settings: prefer the
+// user-set name (S.devices entries, synced across devices the same way as
+// tasks/rewards/tags via mergeCollection), fall back to the same truncated
+// raw deviceId already shown in Settings so an unnamed device is still
+// distinguishable from others instead of showing nothing.
+function deviceDisplayName(devices, devId){
+  if(!devId) return '';
+  const d = (devices||[]).find(x=>x && x.id===devId);
+  const name = d && d.name ? String(d.name).trim() : '';
+  return name || String(devId).slice(0,6);
+}
+/* END_DEVICENAME_HELPERS */
 
 // Async, event-driven dashboard section. Redesigned to show a unified
 // Activity Feed where users can browse, search and filter ALL events.
@@ -2114,6 +2573,18 @@ function renderEventDetail(from,to){
 
     // Sort events newest first
     const sorted = all.slice().sort((a,b)=>b.ts - a.ts);
+
+    // Last-known device name per device, derived from the devicename events in
+    // this window. `sorted` is newest-first, so the first hit per deviceId is
+    // the most recent. Used as a fallback so a rename event alone is enough to
+    // label a row correctly even if the live S.devices name is missing/stale
+    // (plan §3A/§3B).
+    const devNameFromEvents = {};
+    all.forEach(ev => {
+      if(ev && ev.kind==='devicename' && ev.deviceId && ev.deviceName && ev.deviceName.trim() && !devNameFromEvents[ev.deviceId]){
+        devNameFromEvents[ev.deviceId] = ev.deviceName.trim();
+      }
+    });
 
     // Filter events
     const filtered = sorted.filter(e=>{
@@ -2203,15 +2674,72 @@ function renderEventDetail(from,to){
       const cat = getEventCategory(e);
       const titleHtml = e.taskTitle ? '<strong class="evTaskClick" onclick="evSetSearch(\'' + esc(e.taskTitle).replace(/'/g, "\\'") + '\')">' + esc(e.taskTitle) + '</strong>' : '';
 
-      if (cat === 'habit') {
+      const _NEWK={create:1,edit:1,delete:1,uncomplete:1,rewardCreate:1,rewardEdit:1,rewardDelete:1,purchase:1,restore:1};
+      if (e.kind === 'subtask') {
+        icon = '↳';
+        badgeName = cat === 'todo' ? 'To-do' : 'Daily';
+        badgeClass = cat === 'todo' ? 'evBadge-todo' : 'evBadge-daily';
+        const fromState = e.done ? 'unchecked' : 'checked';
+        const toState   = e.done ? 'checked'   : 'unchecked';
+        let note = '';
+        if (cat === 'daily') {
+          const _t = S.tasks.find(x => x.id === e.taskId);
+          note = ' &middot; <span class="evNote" style="opacity:.7">daily ' + (_t && _t.done ? 'complete' : 'not complete') + '</span>';
+        }
+        desc = 'Subtask <code>' + esc(e.subText || '') + '</code> on ' + titleHtml +
+               ' &middot; ' + _evDiffText(fromState, toState) + note;
+      }
+
+      else if (_NEWK[e.kind]) {
+        badgeName=_evCatBadgeName(cat); badgeClass=_evCatBadgeClass(cat);
+        if (e.kind==='create'){ icon='🆕'; desc='Created '+(e.taskType||'task')+' '+titleHtml; }
+        else if (e.kind==='edit'){ icon='✏️';
+          const _summ=[]; let _detail='';
+          if(Array.isArray(e.changes)){
+            e.changes.forEach(c=>{
+              if(c.field==='title' && c.from!=null){ _summ.push('title: '+esc(c.from)+'→'+esc(c.to)); }
+              else if(c.field==='difficulty' && c.from!=null){ _summ.push('difficulty: '+esc(c.from)+'→'+esc(c.to)); }
+              else if(c.field==='notes'){ _summ.push('notes');
+                if(c.from!=null||c.to!=null){ _detail+='<div style="margin-top:3px;font-size:11px;line-height:1.5"><span style="opacity:.7">notes:</span> '+_evDiffText(c.from,c.to)+'</div>'; }
+              }
+              else if(c.field==='checklist'){ _summ.push('subtasks');
+                if(Array.isArray(c.items)&&c.items.length){
+                  const _rows=c.items.map(it=>{
+                    if(it.type==='changed') return '<div style="padding-left:8px">&bull; '+_evDiffText(it.from,it.to)+'</div>';
+                    if(it.type==='added') return '<div style="padding-left:8px">&bull; '+_evDiffText(null,it.to)+'</div>';
+                    if(it.type==='removed') return '<div style="padding-left:8px">&bull; '+_evDiffText(it.from,null)+'</div>';
+                    if(it.type==='toggled') return '<div style="padding-left:8px">&bull; <span style="color:#7ee787">'+(it.done?'checked':'unchecked')+'</span> <span style="opacity:.8">'+esc(it.to||'')+'</span></div>';
+                    return '';
+                  }).join('');
+                  _detail+='<div style="margin-top:3px;font-size:11px;line-height:1.5"><span style="opacity:.7">subtasks:</span>'+_rows+'</div>';
+                }
+              }
+              else { _summ.push(esc(c.field)); }
+            });
+          }
+          desc='Edited '+titleHtml+(_summ.length?' &middot; <span class="evNotes">'+_summ.join(', ')+'</span>':'')+_detail;
+        }
+        else if (e.kind==='delete'){ icon='🗑️'; desc='Deleted '+(e.taskType||'task')+' '+titleHtml; }
+        else if (e.kind==='uncomplete'){ icon='↩️'; desc='Reverted '+titleHtml; }
+        else if (e.kind==='rewardCreate'){ icon='🎁'; desc='Created reward '+titleHtml; badgeName='System'; badgeClass='evBadge-system'; }
+        else if (e.kind==='rewardEdit'){ icon='🎁'; desc='Edited reward '+titleHtml; badgeName='System'; badgeClass='evBadge-system'; }
+        else if (e.kind==='rewardDelete'){ icon='🗑️'; desc='Deleted reward '+titleHtml; badgeName='System'; badgeClass='evBadge-system'; }
+        else if (e.kind==='purchase'){ icon='🛒'; desc='Bought '+titleHtml+(e.effect?' &middot; <span class="evNotes">'+esc(e.effect)+'</span>':''); badgeName='System'; badgeClass='evBadge-system'; }
+        else if (e.kind==='restore'){ icon='♻️'; desc='Restored from snapshot'+(e.notes?' &middot; <span class="evNotes">'+esc(e.notes)+'</span>':''); badgeName='System'; badgeClass='evBadge-system'; }
+      } else if (cat === 'habit') {
         icon = e.dir === -1 ? '➖' : '⚡';
         badgeClass = e.dir === -1 ? 'evBadge-habit-down' : 'evBadge-habit';
         badgeName = 'Habit';
-        const repText = e.reps && e.reps > 1 ? ' (' + e.reps + ' reps)' : '';
-        if (e.dir === -1) {
-          desc = 'Tapped negative on ' + titleHtml;
+        if (e.kind === 'habitReps') {
+          const repText = e.reps ? ' ' + Math.abs(e.reps) + ' rep' + (Math.abs(e.reps) === 1 ? '' : 's') : '';
+          desc = 'Logged' + repText + (e.dir < 0 ? ' (removed)' : '') + ' on ' + titleHtml;
         } else {
-          desc = 'Tapped ' + titleHtml + repText;
+          const repText = e.reps && e.reps > 1 ? ' (' + e.reps + ' reps)' : '';
+          if (e.dir === -1) {
+            desc = 'Tapped negative on ' + titleHtml;
+          } else {
+            desc = 'Tapped ' + titleHtml + repText;
+          }
         }
       } else if (cat === 'daily') {
         badgeName = 'Daily';
@@ -2223,18 +2751,21 @@ function renderEventDetail(from,to){
           icon = '📅';
           badgeClass = 'evBadge-daily';
           const lateStr = e.late ? ' <span class="evLate">late</span>' : '';
-          desc = 'Completed daily ' + titleHtml + lateStr;
+          let detail = '';
+          if (Array.isArray(e.checklist) && e.checklist.length) {
+            const _rows = e.checklist.map(c =>
+              '<div style="padding-left:8px">&bull; ' + (c.done ? '<span style="color:#7ee787">checked</span>' : '<span style="color:#f74e52">unchecked</span>') +
+              ' <span style="opacity:.8">' + esc(c.text || '') + '</span></div>'
+            ).join('');
+            detail = '<div style="margin-top:3px;font-size:11px;line-height:1.5"><span style="opacity:.7">subtasks:</span>' + _rows + '</div>';
+          }
+          desc = 'Completed daily ' + titleHtml + lateStr + detail;
         }
       } else if (cat === 'todo') {
         badgeName = 'To-do';
         badgeClass = 'evBadge-todo';
         icon = '☑️';
-        if (e.kind === 'subtask') {
-          icon = '↳';
-          desc = (e.done ? 'Checked' : 'Unchecked') + ' subtask <code>' + esc(e.subText || '') + '</code> on ' + titleHtml;
-        } else {
-          desc = 'Completed to-do ' + titleHtml;
-        }
+        desc = 'Completed to-do ' + titleHtml;
       } else if (cat === 'system') {
         badgeName = 'System';
         badgeClass = 'evBadge-system';
@@ -2246,19 +2777,42 @@ function renderEventDetail(from,to){
           icon = '📤';
           desc = 'Exported progress data';
           if (e.notes) desc += ' &middot; <span class="evNotes">' + esc(e.notes) + '</span>';
+        } else if (e.kind === 'devicename') {
+          icon = '🏷️';
+          desc = 'Device name updated';
+          if (e.notes) desc += ' &middot; <span class="evNotes">' + esc(e.notes) + '</span>';
         } else {
           icon = '⚙️';
           desc = esc(e.taskTitle || 'System action');
         }
       }
 
-      if (e.reward) {
+      if (e.kind === 'purchase') {
+        if (e.cost) rightSide = '<div class="evRewardRow">'+_evDeltaSpan(-(e.cost||0),'G')+'</div>';
+      } else if (e.kind === 'edit' && e.counter) {
+        const _c=e.counter, _pr=[];
+        if(_c.xp) _pr.push(_evDeltaSpan(_c.xp,'XP'));
+        if(_c.gold) _pr.push(_evDeltaSpan(_c.gold,'G'));
+        if(_c.mp) _pr.push(_evDeltaSpan(_c.mp,'MP'));
+        if(_c.hp) _pr.push(_evDeltaSpan(_c.hp,'HP'));
+        if(_pr.length) rightSide='<div class="evRewardRow">'+_pr.join(' ')+'</div>';
+      } else if (e.kind === 'uncomplete' && e.clawback) {
+        const _c=e.clawback, _pr=[];
+        if(_c.xp) _pr.push(_evDeltaSpan(-_c.xp,'XP'));
+        if(_c.gold) _pr.push(_evDeltaSpan(-_c.gold,'G'));
+        if(_c.mp) _pr.push(_evDeltaSpan(-_c.mp,'MP'));
+        if(_pr.length) rightSide='<div class="evRewardRow">'+_pr.join(' ')+'</div>';
+      } else if (e.reward) {
         const parts = [];
         if (e.reward.xp) parts.push('<span class="evGainXp">+' + Math.round(e.reward.xp) + ' XP</span>');
         if (e.reward.gold) parts.push('<span class="evGainGold">+' + (+e.reward.gold).toFixed(1) + 'G</span>');
         if (e.reward.mp) parts.push('<span class="evGainMp">+' + Math.round(e.reward.mp) + ' MP</span>');
         if (parts.length) rightSide = '<div class="evRewardRow">' + parts.join(' ') + '</div>';
-      } else if ((cat === 'daily' && e.kind === 'miss') || (cat === 'habit' && e.dir === -1)) {
+      } else if (cat === 'habit' && e.kind === 'habitReps') {
+        // bulk reps entry: no scoring, so just surface the rep total
+        const r = e.reps ? Math.abs(e.reps) : 0;
+        if (r) rightSide = '<div class="evRewardRow"><span class="evGainXp">' + (e.dir < 0 ? '-' : '+') + r + ' reps</span></div>';
+      } else if ((cat === 'daily' && e.kind === 'miss') || (e.kind === 'habitTap' && e.dir === -1)) {
         let lossVal = null;
         if (e.dmg !== undefined) {
           lossVal = e.dmg;
@@ -2278,6 +2832,11 @@ function renderEventDetail(from,to){
       const fullTime = dateStr + ' @ ' + timeStr;
 
       const mark = e.synthetic ? ' <span class="anEvSyn" title="Backfilled from Habitica">~ backfill</span>' : '';
+      const _devName0 = (typeof deviceDisplayName==="function")?deviceDisplayName(S.devices,e.dev):e.dev.slice(0,6);
+      // If the live lookup fell back to the short id, prefer the last-known name
+      // recorded in the event log for this device (plan §3A/§3B).
+      const _devLabelName = (_devName0===String(e.dev).slice(0,6) && devNameFromEvents[e.dev]) ? devNameFromEvents[e.dev] : _devName0;
+      const devLabel = e.dev ? ' <span class="evDevice" style="opacity:.65" title="Device ID: '+esc(e.dev)+'">&middot; '+esc(_devLabelName)+'</span>' : '';
 
       listHtml+='<div class="evRow">'+
          '  <div class="evColIcon">'+icon+'</div>'+
@@ -2286,7 +2845,7 @@ function renderEventDetail(from,to){
          '    <div class="evMetaRow">'+
          '      <span class="evBadge '+badgeClass+'">'+badgeName+'</span>'+
          '      <span class="evTime">'+fullTime+'</span>'+
-         '      '+mark+
+         '      '+mark+devLabel+
          '    </div>'+
          '  </div>'+
          '  <div class="evColRight">'+rightSide+'</div>'+
@@ -2439,6 +2998,10 @@ function enableTouchDrag(card){
       // start its own scroll/callout and flip subsequent moves non-cancelable.
       if(ev.cancelable) ev.preventDefault();
       const tt=ev.touches[0]; if(!tt) return;
+      // ABORT: if Chrome committed to a native scroll, moves become non-cancelable.
+      // If we're in an active drag and can't cancel, the gesture is lost — clean up
+      // immediately so the app doesn't freeze with a stuck ghost card.
+      if(_tActive && !ev.cancelable){ endTouchDrag(); return; }
       if(_tActive){                                // ACTIVE DRAG phase
         _tPointerY=tt.clientY;
         moveTouchDrag(tt.clientX,tt.clientY);
@@ -2460,14 +3023,14 @@ function enableTouchDrag(card){
     const onEnd=()=>{
       clearTimeout(_tTimer); _tTimer=null;
       card.removeEventListener('touchmove',onMove);
-      card.removeEventListener('touchend',onEnd);
-      card.removeEventListener('touchcancel',onEnd);
+      window.removeEventListener('touchend',onEnd);
+      window.removeEventListener('touchcancel',onEnd);
       if(_tActive){ endTouchDrag(); }              // finish an active drag (no fling)
       else if(_isScroll){ startInertia(_vel); }    // coast after a manual scroll flick
     };
     card.addEventListener('touchmove',onMove,{passive:false});
-    card.addEventListener('touchend',onEnd);
-    card.addEventListener('touchcancel',onEnd);
+    window.addEventListener('touchend',onEnd);
+    window.addEventListener('touchcancel',onEnd);
   },{passive:false});
 }
 
@@ -2497,7 +3060,7 @@ function moveTouchDrag(x,y){
   if(_tGhost) _tGhost.style.top=(y-_tGrabDY)+'px';
   const el=document.elementFromPoint(x,y);       // ghost is pointer-events:none
   const over=el && el.closest('.task[draggable="true"]');
-  if(over && over!==_tDrag && over.dataset.list===_dragList){
+  if(over && over!==_tDrag && over!==_tGhost && over.dataset.list===_dragList){
     const rr=over.getBoundingClientRect();
     const after=(y-rr.top)/rr.height > 0.5;
     flipReorder(()=>{ over.parentNode.insertBefore(_tDrag, after?over.nextSibling:over); });
@@ -2544,7 +3107,7 @@ function endTouchDrag(){
   // detach listeners + clear globals FIRST so the next gesture is never blocked,
   // even though we still animate the ghost snap below using local references.
   _tGhost=null;                                   // hand the ghost to the animation
-  if(dropTarget) commitOrder();                   // persist order before clearing _tDrag
+  if(dropTarget) { try{ commitOrder(); }catch(e){ console.error(e); } }
   resetDragState();                               // clears _tActive/_tDrag/classes/listeners
   // animate the (now-detached) ghost snapping into the card's final slot
   if(ghost && dropTarget){
@@ -2684,7 +3247,11 @@ function bindTips(selector){
 function bindHeatTooltips(){ bindTips('.anHeatCell'); }
 function toggle(id, ev){
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
-  if(t.type==='daily'){ t.done? uncompleteDaily(t) : completeTask(t, ev); }
+  if(t.type==='daily'){
+    if(t.done){ uncompleteDaily(t); return; }
+    if(!isDailyDueToday(t)){ toast('Not due until '+nextDueWeekday(t)); return; }
+    completeTask(t, ev);
+  }
   else if(t.type==='todo'){ t.done? uncompleteTodo(t) : completeTask(t, ev); }
   else { completeTask(t, ev); }
 }
@@ -2693,16 +3260,76 @@ function openEdit(id,type){
     : {id:null,type:type||'todo',title:'',notes:'',difficulty:'easy',value:0,done:false,
        checklist:[],repeat:[true,true,true,true,true,true,true],up:true,down:true,resetFreq:'daily',tags:[]};
   EDIT = JSON.parse(JSON.stringify(t));
+  const hasRem = EDIT.reminders && EDIT.reminders[0] && EDIT.reminders[0].enabled;
+  EDIT._reminderEnabled = hasRem;
+  if (hasRem) {
+    EDIT._tempReminderTime = EDIT.reminders[0].time;
+    EDIT._tempReminderDate = EDIT.reminders[0].date || new Date().getFullYear() + '-' + String(new Date().getMonth()+1).padStart(2,'0') + '-' + String(new Date().getDate()).padStart(2,'0');
+    EDIT._tempReminderDays = EDIT.reminders[0].days || [true,true,true,true,true,true,true];
+  } else {
+    EDIT._tempReminderTime = "09:00";
+    EDIT._tempReminderDate = new Date().getFullYear() + '-' + String(new Date().getMonth()+1).padStart(2,'0') + '-' + String(new Date().getDate()).padStart(2,'0');
+    EDIT._tempReminderDays = [true,true,true,true,true,true,true];
+  }
   drawSheet();
   document.getElementById('scrim').classList.add('show');
 }
+function drawReminderEditor(t) {
+  const dayLabels = ['S','M','T','W','T','F','S'];
+  const hasRem = t._reminderEnabled;
+  let h = '<label>Reminder</label>';
+  h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
+  h += '<input type="checkbox" id="eReminderEnabled" ' + (hasRem ? 'checked' : '') + ' onclick="EDIT._reminderEnabled=this.checked;drawSheet()" style="width:auto;margin:0;cursor:pointer">';
+  h += '<label for="eReminderEnabled" style="margin:0;cursor:pointer;font-weight:normal">Enable notification reminder</label>';
+  h += '</div>';
+  
+  if (hasRem) {
+    h += '<div id="eReminderControls" style="border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--panel);margin-bottom:12px">';
+    
+    // Time picker
+    h += '<div style="display:flex;gap:12px;align-items:center;margin-bottom:8px">';
+    h += '<label style="margin:0;white-space:nowrap;font-size:12px;width:60px">Time</label>';
+    h += '<input type="time" id="eReminderTime" value="' + (t._tempReminderTime || '09:00') + '" onchange="EDIT._tempReminderTime=this.value" style="margin:0;flex:1">';
+    h += '</div>';
+    
+    if (t.type === 'todo') {
+      // Date picker for to-dos
+      h += '<div style="display:flex;gap:12px;align-items:center">';
+      h += '<label style="margin:0;white-space:nowrap;font-size:12px;width:60px">Date</label>';
+      h += '<input type="date" id="eReminderDate" value="' + (t._tempReminderDate || '') + '" onchange="EDIT._tempReminderDate=this.value" style="margin:0;flex:1">';
+      h += '</div>';
+    } else if (t.type === 'habit') {
+      // Day selector for habits
+      h += '<label style="margin:0 0 6px 0;font-size:12px">Repeat reminder on</label>';
+      h += '<div class="days" id="eReminderDays" style="margin-top:4px">';
+      h += dayLabels.map((d, i) => {
+        const active = t._tempReminderDays && t._tempReminderDays[i];
+        return '<button type="button" style="border:1px solid var(--line);border-radius:8px;background:' + (active ? 'var(--panel2)' : 'var(--panel)') + ';color:var(--ink);cursor:pointer;padding:6px;font-size:11px" onclick="EDIT._tempReminderDays[' + i + ']=!EDIT._tempReminderDays[' + i + '];drawSheet()">' + d + '</button>';
+      }).join('');
+      h += '</div>';
+    } else if (t.type === 'daily') {
+      // Display info for dailies
+      const activeDays = t.repeat.map((r, i) => r ? dayLabels[i] : '').filter(Boolean).join(', ');
+      h += '<div class="small" style="margin-top:6px;color:var(--muted)">Reminder repeats on daily\'s repeat schedule: <b>' + (activeDays || 'Never') + '</b></div>';
+    }
+    
+    h += '</div>';
+  }
+  return h;
+}
+
 function drawSheet(){
   const t=EDIT; const dayLabels=['S','M','T','W','T','F','S'];
   const sheet=document.getElementById('sheet');
-  let h='<h3>'+(t.id?'Edit':'New')+' '+(t.type==='daily'?'Daily':t.type==='habit'?'Habit':'To-Do')+'</h3>';
+  let h='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">'+
+     '<h3 style="margin:0">'+(t.id?'Edit':'New')+' '+(t.type==='daily'?'Daily':t.type==='habit'?'Habit':'To-Do')+'</h3>';
+  if(S.prefs.saveBtnTop){
+    h+='<button class="btn primary" type="button" onclick="saveTask()" style="padding:6px 14px;height:auto">Save</button>';
+  }
+  h+='<button type="button" onclick="copyEditTask()" title="Copy title, checklist & notes" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.3;padding:0 4px;line-height:1;color:inherit">⧉</button></div>';
   h+='<label>Title</label><input type="text" id="eTitle" value="'+esc(t.title)+'" placeholder="What needs doing?">';
   h+='<label>Difficulty</label><div class="seg" id="eDiff">'+
-    ['trivial','easy','medium','hard'].map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
+    ['trivial','easy','medium','hard','log'].map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
   if(t.type==='habit'){
     h+='<label>Buttons</label><div class="seg">'+
       '<button class="'+(t.up!==false?'on':'')+'" onclick="EDIT.up=!(EDIT.up!==false);drawSheet()">+ Positive</button>'+
@@ -2737,11 +3364,12 @@ function drawSheet(){
         '<button class="del" onclick="EDIT.checklist.splice('+i+',1);drawSheet()">✕</button></div>').join('')+
       '<button class="btn ghost" style="padding:8px" onclick="EDIT.checklist.push({id:uid(),text:\'\',done:false});drawSheet()">+ Add subtask</button></div>';
   }
+  h+=drawReminderEditor(t);
   h+='<label>Notes / comments</label><textarea id="eNotes" placeholder="Notes, thoughts, log...">'+esc(t.notes)+'</textarea>';
   h+=tagEditorBlock(t);
   h+='<div class="rowBtns">'+(t.id?'<button class="btn danger" onclick="deleteTask()">Delete</button>':'')+
     '<button class="btn ghost" onclick="closeSheet()">Cancel</button>'+
-    '<button class="btn primary" onclick="saveTask()">Save</button></div>';
+    (S.prefs.saveBtnTop?'':'<button class="btn primary" onclick="saveTask()">Save</button>')+'</div>';
   sheet.innerHTML=h;
 }
 function saveTask(){
@@ -2749,6 +3377,30 @@ function saveTask(){
   EDIT.notes=document.getElementById('eNotes').value;
   document.querySelectorAll('#eCheck .ci input[type=text]').forEach((inp,i)=>{ if(EDIT.checklist[i]) EDIT.checklist[i].text=inp.value; });
   EDIT.checklist=(EDIT.checklist||[]).filter(c=>c.text.trim());
+  if (EDIT._reminderEnabled) {
+    const kind = EDIT.type === 'todo' ? 'once' : (EDIT.type === 'daily' ? 'daily' : 'weekly');
+    const r = {
+      id: EDIT.reminders && EDIT.reminders[0] ? EDIT.reminders[0].id : uid(),
+      enabled: true,
+      kind: kind,
+      time: EDIT._tempReminderTime || '09:00',
+      lastFiredKey: EDIT.reminders && EDIT.reminders[0] ? EDIT.reminders[0].lastFiredKey : ""
+    };
+    if (kind === 'once') {
+      r.date = EDIT._tempReminderDate || new Date().getFullYear() + '-' + String(new Date().getMonth()+1).padStart(2,'0') + '-' + String(new Date().getDate()).padStart(2,'0');
+    } else if (kind === 'weekly') {
+      r.days = EDIT._tempReminderDays || [true,true,true,true,true,true,true];
+    } else if (kind === 'daily') {
+      r.days = EDIT.repeat || [true,true,true,true,true,true,true];
+    }
+    EDIT.reminders = [r];
+  } else {
+    EDIT.reminders = [];
+  }
+  delete EDIT._reminderEnabled;
+  delete EDIT._tempReminderTime;
+  delete EDIT._tempReminderDate;
+  delete EDIT._tempReminderDays;
   if(EDIT.id){
     const idx=S.tasks.findIndex(x=>x.id===EDIT.id);
     const orig = S.tasks[idx];
@@ -2758,12 +3410,14 @@ function saveTask(){
     EDIT.updatedAt=Date.now();
     const t = S.tasks[idx];
     let gainParts=null, loseParts=null, doBump=false;
+    let _cXp=0,_cGold=0,_cMp=0,_cHp=0;
     if(upDelta > 0){
       let totalXp=0, totalGold=0;
       for(let i=0; i<upDelta; i++){
         const r=completionReward(t);
         totalXp+=r.xp; totalGold=+(totalGold+r.gold).toFixed(2);
         gainXp(r.xp); S.char.gold=+(S.char.gold+r.gold).toFixed(2); S.char.mp+=r.mp;
+        _cXp+=r.xp; _cGold=+(_cGold+r.gold).toFixed(2); _cMp+=r.mp;
         t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
       }
       gainParts=fxGain(totalXp,totalGold); doBump=true;
@@ -2775,6 +3429,7 @@ function saveTask(){
         S.char.xp=Math.max(0,S.char.xp-r.xp);
         S.char.gold=+Math.max(0,S.char.gold-r.gold).toFixed(2);
         S.char.mp=Math.max(0,S.char.mp-r.mp);
+        _cXp-=r.xp; _cGold=+(_cGold-r.gold).toFixed(2); _cMp-=r.mp;
         t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
       }
       const coin='<svg class="fxCoin" viewBox="0 0 24 24" width="20" height="20"><circle cx="12" cy="12" r="10" fill="#ffbe5c" stroke="#c8862f" stroke-width="1.5"/><circle cx="12" cy="12" r="6.5" fill="none" stroke="#c8862f" stroke-width="1.2" opacity="0.7"/><text x="12" y="16" text-anchor="middle" font-size="9" font-weight="700" fill="#7a4d12" font-family="serif">$</text></svg>';
@@ -2786,6 +3441,7 @@ function saveTask(){
         const dmg=missDamage(t);
         totalDmg=+(totalDmg+dmg).toFixed(2);
         takeDamage(dmg);
+        _cHp=+(_cHp-dmg).toFixed(2);
         t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
       }
       loseParts=(loseParts?loseParts+' ':'')+'-'+totalDmg.toFixed(1)+'HP';
@@ -2795,25 +3451,80 @@ function saveTask(){
         const heal=missDamage(t);
         totalHeal=+(totalHeal+heal).toFixed(2);
         S.char.hp=+Math.min(S.char.maxHp,(S.char.hp+heal)).toFixed(2);
+        _cHp=+(_cHp+heal).toFixed(2);
         t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
       }
       gainParts=(gainParts?gainParts+' ':'')+'+'+totalHeal.toFixed(1)+'HP';
     }
     if(gainParts){ floatFx(gainParts,'pos',null); if(doBump) bumpAvatar(); }
     if(loseParts) floatFx(loseParts,'neg',null);
-    if(gainParts) buzz([12,40,18]);
-    else if(downDelta>0) buzz([28,30,28]);
-    else if(upDelta<0||downDelta<0) buzz([20]);
+    if(gainParts) buzz(50);
+    else if(downDelta>0) buzz(100);
+    else if(upDelta<0||downDelta<0) buzz(50);
+    try{
+      const _ch=[];
+      if((orig.title||'')!==(EDIT.title||'')) _ch.push({field:'title',from:orig.title||'',to:EDIT.title||''});
+      if((orig.notes||'')!==(EDIT.notes||'')) _ch.push({field:'notes',from:orig.notes||'',to:EDIT.notes||''});
+      if((orig.difficulty||'')!==(EDIT.difficulty||'')) _ch.push({field:'difficulty',from:orig.difficulty||'',to:EDIT.difficulty||''});
+      const _oc=(orig&&orig.checklist)||[], _ec=(EDIT&&EDIT.checklist)||[];
+      const _items=[];
+      for(let _i=0;_i<Math.max(_oc.length,_ec.length);_i++){
+        const _o=_oc[_i], _e=_ec[_i];
+        if(_o&&_e){
+          if((_o.text||'')!==(_e.text||'')) _items.push({type:'changed',from:_o.text||'',to:_e.text||''});
+          else if((!!_o.done)!==(!!_e.done)) _items.push({type:'toggled',to:_e.text||'',done:!!_e.done});
+        } else if(!_o&&_e){ _items.push({type:'added',to:_e.text||''}); }
+        else if(_o&&!_e){ _items.push({type:'removed',from:_o.text||''}); }
+      }
+      if(_items.length) _ch.push({field:'checklist',items:_items});
+      if(JSON.stringify(orig.repeat||[])!==JSON.stringify(EDIT.repeat||[])) _ch.push({field:'schedule'});
+      if(JSON.stringify(orig.reminders||[])!==JSON.stringify(EDIT.reminders||[])) _ch.push({field:'reminders'});
+      if(upDelta||downDelta) _ch.push({field:'counter'});
+      if(_ch.length){
+        const _ev={kind:'edit', taskType:t.type, taskId:t.id, taskTitle:t.title, changes:_ch};
+        if(upDelta||downDelta) _ev.counter={xp:+(_cXp||0),gold:+(_cGold||0),mp:+(_cMp||0),hp:+(_cHp||0)};
+        logEvent(_ev);
+      }
+    }catch(e){}
   } else {
-    EDIT.id=uid(); EDIT.createdAt=Date.now(); EDIT.updatedAt=Date.now(); S.tasks.unshift(EDIT); buzz(20);
+    EDIT.id=uid(); EDIT.createdAt=Date.now(); EDIT.updatedAt=Date.now(); S.tasks.unshift(EDIT); buzz(50);
+    try{ logEvent({kind:'create', taskType:EDIT.type, taskId:EDIT.id, taskTitle:EDIT.title}); }catch(e){}
     setTimeout(() => window.scrollTo({top:0, behavior:'smooth'}), 50);
   }
   closeSheet(); save(); render();
 }
+function copyEditTask(){
+  const title = (document.getElementById('eTitle')||{}).value ?? EDIT.title ?? '';
+  const notes = (document.getElementById('eNotes')||{}).value ?? EDIT.notes ?? '';
+  const cl = (EDIT.checklist||[]).filter(c=>c && (c.text||'').trim());
+  let text = title;
+  if(cl.length > 0){
+    text += '\n\nChecklist:\n' + cl.map(c => '- [' + (c.done ? 'x' : ' ') + '] ' + c.text).join('\n');
+  }
+  if(notes.trim()){
+    text += '\n\nNotes:\n' + notes;
+  }
+  function copyToClipboard(t){
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(t).then(() => toast('Copied')).catch(() => fallbackCopy(t));
+    } else { fallbackCopy(t); }
+  }
+  function fallbackCopy(t){
+    const ta = document.createElement('textarea');
+    ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); toast('Copied'); } catch(e) { toast('Copy failed'); }
+    document.body.removeChild(ta);
+  }
+  copyToClipboard(text);
+}
 function deleteTask(){
   confirmDialog('Delete Task', 'Delete this task?').then(ok => {
     if(!ok) return;
-    S.tasks=S.tasks.filter(x=>x.id!==EDIT.id); closeSheet(); save(); render();
+    const _dt=S.tasks.find(x=>x.id===EDIT.id);
+    S.tasks=S.tasks.filter(x=>x.id!==EDIT.id);
+    if(_dt) try{ logEvent({kind:'delete', taskType:_dt.type, taskId:_dt.id, taskTitle:_dt.title}); }catch(e){}
+    closeSheet(); save(); render();
   });
 }
 function closeSheet(){ document.getElementById('scrim').classList.remove('show'); EDIT=null; if(VDRAFT){ VDRAFT=null; MEDIT=null; MBUILD=false; if(TAB==='analytics') refreshAnalytics(); } }
@@ -2821,13 +3532,21 @@ let REDIT=null;
 function openReward(id){
   REDIT = id? JSON.parse(JSON.stringify(S.rewards.find(r=>r.id===id))) : {id:null,title:'',cost:10,notes:''};
   const sheet=document.getElementById('sheet');
-  sheet.innerHTML='<h3>'+(REDIT.id?'Edit':'New')+' Reward</h3>'+
-    '<label>Reward</label><input type="text" id="rTitle" value="'+esc(REDIT.title)+'" placeholder="e.g. 30 min of gaming">'+
+  let h='';
+  if(S.prefs.saveBtnTop){
+    h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">'+
+       '<h3 style="margin:0">'+(REDIT.id?'Edit':'New')+' Reward</h3>'+
+       '<button class="btn primary" type="button" onclick="saveReward()" style="padding:6px 14px;height:auto">Save</button></div>';
+  } else {
+    h+='<h3>'+(REDIT.id?'Edit':'New')+' Reward</h3>';
+  }
+  h+='<label>Reward</label><input type="text" id="rTitle" value="'+esc(REDIT.title)+'" placeholder="e.g. 30 min of gaming">'+
     '<label>Cost (gold)</label><input type="text" id="rCost" value="'+REDIT.cost+'">'+
     '<label>Notes</label><textarea id="rNotes">'+esc(REDIT.notes)+'</textarea>'+
     '<div class="rowBtns">'+(REDIT.id?'<button class="btn danger" onclick="delReward()">Delete</button>':'')+
     '<button class="btn ghost" onclick="closeSheet()">Cancel</button>'+
-    '<button class="btn primary" onclick="saveReward()">Save</button></div>';
+    (S.prefs.saveBtnTop?'':'<button class="btn primary" onclick="saveReward()">Save</button>')+'</div>';
+  sheet.innerHTML=h;
   document.getElementById('scrim').classList.add('show');
 }
 function saveReward(){
@@ -2835,15 +3554,18 @@ function saveReward(){
   REDIT.cost=Math.max(0,parseFloat(document.getElementById('rCost').value)||0);
   REDIT.notes=document.getElementById('rNotes').value;
   REDIT.updatedAt=Date.now();
+  const _rwNew=!REDIT.id;
   if(REDIT.id){ const i=S.rewards.findIndex(r=>r.id===REDIT.id); S.rewards[i]=REDIT; }
   else { REDIT.id=uid(); REDIT.createdAt=Date.now(); S.rewards.push(REDIT); }
+  try{ logEvent({kind:_rwNew?'rewardCreate':'rewardEdit', rewardId:REDIT.id, taskTitle:REDIT.title, cost:REDIT.cost}); }catch(e){}
   closeSheet(); save(); render();
 }
-function delReward(){ S.rewards=S.rewards.filter(r=>r.id!==REDIT.id); closeSheet(); save(); render(); }
+function delReward(){ try{ logEvent({kind:'rewardDelete', rewardId:REDIT.id, taskTitle:REDIT.title, cost:REDIT.cost}); }catch(e){} S.rewards=S.rewards.filter(r=>r.id!==REDIT.id); closeSheet(); save(); render(); }
 function buyReward(id){
   const r=S.rewards.find(x=>x.id===id); if(!r)return;
   if(S.char.gold < r.cost){ toast('Not enough gold'); return; }
   S.char.gold=+(S.char.gold-r.cost).toFixed(2);
+  try{ logEvent({kind:'purchase', taskTitle:r.title, cost:r.cost}); }catch(e){}
   toast('Bought: '+r.title); save(); render();
 }
 const SHOP_ITEMS = [
@@ -2858,44 +3580,140 @@ function buyShopItem(id){
   if(S.char.gold < item.cost){ toast('Not enough gold'); return; }
   S.char.gold = +(S.char.gold-item.cost).toFixed(2);
   item.use();
+  try{ logEvent({kind:'purchase', taskTitle:item.title, cost:item.cost, effect:item.desc}); }catch(e){}
   save(); render();
+}
+// Small "ⓘ" info icon that surfaces a tooltip (reuses the hoverTip system via
+// data-tip; call bindTips('.infoTip') after injecting the markup). First line of
+// the tip is the bold title, the rest is the body.
+function infoIcon(tip){
+  return '<span class="infoTip" tabindex="0" role="img" aria-label="More info" data-tip="'+esc(tip)+'">&#9432;</span>';
 }
 function openSettings(){
   const sheet=document.getElementById('sheet');
-  let h='<h3>Settings</h3>';
-  h+='<label>Character name</label><input type="text" id="setName" value="'+esc(S.char.name)+'">';
-  h+='<label>Avatar</label>';
-  h+='<div class="avatarSetRow">'+
-     '<input type="text" id="setFace" value="'+esc(S.char.face)+'" maxlength="2" placeholder="emoji">'+
-     '<button class="btn ghost" type="button" onclick="document.getElementById(\'faceFile\').click()">Browse image\u2026</button>'+
+  // Fix 4 (plan §4): a background sync can trigger render()/openSettings() while
+  // the user is mid-edit in the device-name field. Capture the in-progress value
+  // so a re-render doesn't discard typed text before the field's onchange fires.
+  const _dnEl = document.getElementById('setDeviceName');
+  const _dnFocused = !!(_dnEl && document.activeElement===_dnEl);
+  const _dnVal = _dnFocused ? _dnEl.value : null;
+  let h='<div class="settingsHead"><h3>Settings</h3><button class="btn primary" type="button" onclick="closeSheet()">Close</button></div>';
+  const avatarTip='Avatar\nType an emoji, or upload a PNG, JPEG or GIF (max 1 MB) to use as your avatar. An uploaded image takes priority over the emoji.';
+  h+='<div class="charAvatarRow">'+
+       '<div class="caCol caName">'+
+         '<div class="caLabelRow"><label>Character name</label></div>'+
+         '<input type="text" id="setName" value="'+esc(S.char.name)+'" onchange="setCharName(this.value)">'+
+       '</div>'+
+       '<div class="caCol caAvatar">'+
+         '<div class="caLabelRow">'+
+           '<label id="avatarLbl">Avatar</label>'+
+           '<div class="caLabelActions">'+
+             (S.char.faceImg?'<a href="#" class="caRemove" onclick="removeFace();return false">Remove</a>':'')+
+             infoIcon(avatarTip)+
+           '</div>'+
+         '</div>'+
+         '<div class="caAvatarCtl">'+
+           '<input type="text" id="setFace" class="caFace" value="'+esc(S.char.face)+'" maxlength="2" placeholder="emoji" onchange="setCharFace(this.value)">'+
+           '<div class="browseGroup">'+
+             '<button class="btn ghost" type="button" onclick="document.getElementById(\'faceFile\').click()">Browse image</button>'+
+           '</div>'+
+         '</div>'+
+       '</div>'+
      '</div>';
   h+='<input type="file" id="faceFile" accept="image/jpeg,image/png,image/gif,.jpg,.jpeg,.png,.gif" style="display:none" onchange="uploadFace(event)">';
-  if(S.char.faceImg){ h+='<div class="small" style="margin-top:6px;display:flex;align-items:center;gap:8px">'+
-     '<img src="'+S.char.faceImg+'" alt="" style="width:32px;height:32px;border-radius:8px;object-fit:cover;border:1px solid var(--line)">'+
-     'Custom image in use. <a href="#" onclick="removeFace();return false">Remove</a> to use the emoji instead.</div>'; }
-  else { h+='<div class="small" style="margin-top:6px">Type an emoji, or upload a PNG, JPEG or GIF (max 1\u00a0MB) to use as your avatar. An uploaded image takes priority over the emoji.</div>'; }
-  h+='<div class="settingsRow"><button class="btn primary" onclick="saveSettings()">Save</button><button class="btn ghost" onclick="closeSheet()">Close</button></div>';
+
   // Display preferences as tappable rows; each opens a foreground options menu (openOpt).
   const widthLabels={430:'Slim',560:'Medium',720:'Wide',3000:'Full'};
   const wv=(S.prefs.width||480);
   const nl=(S.prefs.notesLines==null?3:S.prefs.notesLines);
-  const ddv=(S.prefs.dragDelay==null?DRAG_DELAY_DEFAULT:S.prefs.dragDelay);
   h+='<div class="setList">';
   h+=settingRow('width','Width','Caps the width on a monitor and keeps it centered.',(widthLabels[wv]||'Custom'));
   h+=settingRow('notes','Note lines','Lines of a task\'s notes shown in the list preview.',(nl===0?'Off':(''+nl)));
-  h+=settingRow('drag','Drag delay','Hold time before a card lifts for reordering on touch.',(ddv+' ms'));
   h+=settingRow('haptics','Haptics','Vibration on taps and completions.',(S.prefs.haptics===false?'Off':'On'));
+  h+=settingRow('cardThick','Card thickness','Minimum height of each card. Short cards grow first; taller cards are only affected at higher values.',(S.prefs.cardThick||0)===0?'Default':('+'+(S.prefs.cardThick||0)+' px'));
+  h+=settingRow('saveBtnTop','Save button position','Put the Save button at the top of the edit sheet, centered next to the title, instead of at the bottom.',(S.prefs.saveBtnTop?'Top':'Bottom'));
+  h+=settingRow('notifications','Notifications','Browser-based notification permission and status.',(S.prefs.notificationsEnabled?'On':'Off'));
   h+='</div>';
-  h+='<div class="colTitle"><h2 style="font-size:13px">Backup & transfer</h2></div>';
-  h+='<div class="small">Your progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.</div>';
+  const syncTip='Sync via Dropbox (your account, no server) keeps this device and your other devices up to date automatically.';
+  h+='<div class="colTitle"><h2 style="font-size:13px">Sync</h2>'+infoIcon('Sync\n'+syncTip)+'</div>';
+  if(typeof syncCfg==="function"){
+    const scfg=syncCfg();
+    if(!scfg.enabled){
+      h+='<div class="settingsRow"><button class="btn ghost" onclick="syncConnect()">Connect Dropbox</button></div>';
+    } else {
+      const rel=(typeof syncRelativeTime==="function")?syncRelativeTime(scfg.lastSyncAt):(scfg.lastSyncAt?new Date(scfg.lastSyncAt).toLocaleString():'never');
+      const devId=scfg.deviceId||'';
+      const devShort=devId.slice(0,6);
+      const myDevEntry=(S.devices||[]).find(x=>x&&x.id===devId);
+      const myDevName=(myDevEntry&&myDevEntry.name)?myDevEntry.name:'';
+      const myDevLabel=(typeof deviceDisplayName==="function")?deviceDisplayName(S.devices,devId):(myDevName||devShort);
+      h+='<div class="devNameWrap">'+
+           '<div class="devNameHeader">'+
+             '<div class="devSyncStatus">Last sync: '+esc(rel)+' &middot; Device '+esc(myDevLabel)+
+               (scfg.lastError?(' &middot; <span style="color:#f74e52">'+esc(scfg.lastError)+'</span>'):'')+'</div>'+
+             '<label class="devNameLbl">Device name</label>'+
+             '<div></div>'+
+           '</div>'+
+           '<div class="devNameRow">'+
+             '<button class="btn ghost" onclick="syncNow()">Sync now</button>'+
+             '<input type="text" id="setDeviceName" placeholder="'+esc(devShort)+'" value="'+esc(myDevName)+'" onchange="setDeviceName(this.value)">'+
+             '<button class="btn ghost" onclick="confirmSyncDisconnect()">Disconnect</button>'+
+           '</div>'+
+         '</div>';
+      if(typeof confirmForcePush==="function" || typeof confirmForcePull==="function"){
+        h+='<div class="settingsRow">'+
+           (typeof confirmForcePush==="function"?'<button class="btn danger" onclick="confirmForcePush()">Force push</button>':'')+
+           (typeof confirmForcePull==="function"?'<button class="btn danger" onclick="confirmForcePull()">Force pull</button>':'')+
+           '</div>';
+      }
+      const _eid=(S.prefs.exportIntervalDays||0);
+      h+='<div class="setList">'+settingRow('exportInterval','Auto-backup to Dropbox','Uploads a full backup file (same as Export) on this schedule, in addition to normal sync.',(_eid?('every '+_eid+'d'):'Off'))+'</div>';
+    }
+  } else {
+    h+='<div class="small">Sync module not loaded.</div>';
+  }
+  h+='<div class="colTitle"><h2 style="font-size:13px">Backup &amp; transfer</h2>'+infoIcon('Backup & transfer\nYour progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.')+'</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
-    '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button></div>';
-  h+='<input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importData(event)">';
-  h+='<div class="small" style="margin-top:8px">Questa - local build. Styled after Habitica; uses original assets, not affiliated with Habitica.</div>';
-  h+='<div class="appVersion">'+APP_VERSION+'</div>';
-  h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button></div>';
+    '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button>'+
+    '<button class="btn ghost" onclick="openRestorePicker()">Restore Snapshot</button></div>';
+  h+='<input type="file" id="importFile" accept="application/json,.json,text/plain,.txt" style="display:none" onchange="importData(event)">';
+  h+='<div class="backupMeta small"><span id="lastFullBackupDate"></span><span id="lastExportDate"></span></div>';
+  h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button><div class="appVersion">'+APP_VERSION+'</div></div>';
+  if(IS_DIRTY){
+    _flushPromise = listSnapshots().then(snapshots => {
+      const hasBaseline = snapshots.some(s => s.type === "full");
+      return writeSnapshot(hasBaseline ? "delta" : "full");
+    }).catch(() => writeSnapshot("full")).then(id => {
+      if(id) IS_DIRTY = false;
+    }).finally(() => { _flushPromise = null; });
+  }
   sheet.innerHTML=h;
+  if(_dnFocused){
+    const _newDn = document.getElementById('setDeviceName');
+    if(_newDn){ _newDn.value = _dnVal; _newDn.focus(); }
+  }
+  bindTips('.infoTip');
+  setTimeout(() => updateLastFullBackupText(), 100);
+  setTimeout(() => updateLastExportText(), 100);
+  checkExportStaleness();
   document.getElementById('scrim').classList.add('show');
+  // Measured AFTER the scrim gets display:flex (was display:none until here) --
+  // offsetWidth on a display:none ancestor tree is always 0, which previously
+  // collapsed this box to just its CSS padding/border (~20px). Must measure
+  // once the sheet is actually laid out.
+  const _al=document.getElementById('avatarLbl');
+  const _fi=document.getElementById('setFace');
+  if(_al&&_fi) _fi.style.width=(_al.offsetWidth+6)+'px';
+}
+function checkExportStaleness(){
+  const btn = document.getElementById('gearBtn');
+  if(!btn) return;
+  const lastExport = S.prefs.lastExportTs;
+  if(!lastExport || (Date.now() - lastExport) > 7*86400000){
+    btn.classList.add('stale');
+  } else {
+    btn.classList.remove('stale');
+  }
 }
 function resetEverything() {
   confirmDialog('Reset Everything', 'Erase ALL progress on this device? This cannot be undone.').then(ok => {
@@ -2904,6 +3722,7 @@ function resetEverything() {
     S=freshState();
     save();
     applyWidth();
+    applyCardThick();
     closeSheet();
     render();
   });
@@ -2912,6 +3731,37 @@ function resetEverything() {
 function setWidth(px){ S.prefs.width=px; applyWidth(); save(); closeOpt(); openSettings(); }
 function setNotesLines(n){ S.prefs.notesLines=n; save(); closeOpt(); openSettings(); }
 function setHaptics(n){ S.prefs.haptics=!!n; save(); closeOpt(); openSettings(); }
+function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.min(60,Math.max(0,n)); S.prefs.cardThick=n; applyCardThick(); save(); closeOpt(); openSettings(); }
+function setSaveBtnTop(n){ S.prefs.saveBtnTop=!!n; save(); closeOpt(); if(EDIT) drawSheet(); else if(REDIT) openReward(REDIT.id); openSettings(); }
+function setExportIntervalDays(n){ let d=parseInt(n,10); if(!isFinite(d)||d<0) d=0; S.prefs.exportIntervalDays=d; save(); closeOpt(); openSettings(); }
+function setCharName(v){ S.char.name=(v||'').trim()||'Adventurer'; save(); renderStats(); }
+function setDeviceName(v){
+  if(typeof syncDeviceId!=="function") return;
+  const devId=syncDeviceId();
+  const name=(v||'').trim();
+  S.devices=Array.isArray(S.devices)?S.devices:[];
+  let d=S.devices.find(x=>x&&x.id===devId);
+  const prevName=d?(d.name||''):'';
+  // No real change (e.g. blur without editing, or clearing a name that was
+  // never set) — bail WITHOUT creating a junk {name:'',updatedAt:0} placeholder.
+  // Fix: run the no-op check BEFORE pushing any placeholder so a stray empty
+  // onchange/blur can never manufacture a blank entry that later sync-clobbers
+  // a real name on another device (plan §3D).
+  if(prevName===name) return;
+  if(!d){
+    if(!name) return; // clearing a name that doesn't exist yet — nothing to do
+    d={id:devId,name:'',updatedAt:0};
+    S.devices.push(d);
+  }
+  d.name=name;
+  d.updatedAt=Date.now();
+  save();
+  logEvent({kind:'devicename', taskTitle:'Device name',
+    notes:'Device '+devId.slice(0,6)+' \u2192 "'+(name||'(cleared)')+'"'+(prevName?' (was "'+prevName+'")':''),
+    deviceId:devId, deviceName:name, prevDeviceName:prevName});
+  openSettings();
+}
+function setCharFace(v){ S.char.face=(v||'🧙'); save(); renderStats(); }
 // --- Settings rows + foreground options menu -------------------------------
 // Build one tappable row: a label + short description on the left, current
 // value + chevron on the right. Tapping opens the matching options menu.
@@ -2921,6 +3771,46 @@ function settingRow(key,label,desc,val){
     '<span class="setVal">'+esc(val)+'<span class="chev">\u203a</span></span></button>';
 }
 function closeOpt(){ document.getElementById('optScrim').classList.remove('show'); document.getElementById('optMenu').innerHTML=''; }
+function setNotificationsPref(enabled){
+  S.prefs.notificationsEnabled = !!enabled;
+  save();
+  openSettings();
+  openOpt('notifications');
+}
+function requestNotificationPermission(){
+  if(!('Notification' in window)){
+    toast('Notifications not supported by this browser');
+    return;
+  }
+  Notification.requestPermission().then(perm=>{
+    if(perm==='granted'){
+      toast('Permission granted!');
+      setNotificationsPref(true);
+    } else {
+      toast('Permission: '+perm);
+      setNotificationsPref(false);
+    }
+  }).catch(()=>{
+    toast('Permission request failed');
+  });
+}
+function testNotification(){
+  if(typeof Notification==='undefined' || Notification.permission!=='granted'){
+    toast('Notification permission not granted');
+    return;
+  }
+  if(navigator.serviceWorker && navigator.serviceWorker.controller){
+    navigator.serviceWorker.controller.postMessage({
+      type: 'SHOW_NOTIFICATION',
+      title: 'Questa Test',
+      body: 'Notifications are working! ⚔️',
+      tag: 'questa-test'
+    });
+  } else {
+    new Notification('Questa Test', { body: 'Notifications are working! ⚔️' });
+  }
+  toast('Test notification sent');
+}
 // Render the foreground menu for a given setting key over a dim backdrop.
 function openOpt(key){
   let h='';
@@ -2940,6 +3830,21 @@ function openOpt(key){
       [['Off',0],['1 line',1],['2 lines',2],['3 lines',3],['5 lines',5]].map(o=>
         '<button type="button" class="'+(nl===o[1]?'on':'')+'" onclick="setNotesLines('+o[1]+')"><span>'+o[0]+'</span></button>').join('')+
       '</div>';
+  } else if(key==='notifications'){
+    const ne=S.prefs.notificationsEnabled;
+    const perm=typeof Notification!=='undefined'?Notification.permission:'default';
+    h+='<h4>Notifications</h4>';
+    h+='<p class="optHint">Browser-based persistent local reminders for habits, dailies, and to-dos. On Android, requires Chrome/Firefox to be installed as a PWA.</p>';
+    h+='<div class="optChoices">';
+    h+='<button type="button" class="'+(ne?'on':'')+'" onclick="setNotificationsPref(true)">On</button>';
+    h+='<button type="button" class="'+(ne?'':'on')+'" onclick="setNotificationsPref(false)">Off</button>';
+    h+='</div>';
+    h+='<p class="optHint" style="margin-top:8px">System Permission: <b>'+perm+'</b></p>';
+    if(perm!=='granted'){
+      h+='<button type="button" class="btn primary" style="margin-top:10px;width:100%" onclick="requestNotificationPermission()">Request Permission</button>';
+    } else {
+      h+='<button type="button" class="btn ghost" style="margin-top:10px;width:100%" onclick="testNotification()">Send Test Notification</button>';
+    }
   } else if(key==='drag'){
     const ddv=(S.prefs.dragDelay==null?DRAG_DELAY_DEFAULT:Math.min(300,Math.max(100,S.prefs.dragDelay)));
     h+='<h4>Card drag delay</h4>';
@@ -2950,6 +3855,35 @@ function openOpt(key){
         'oninput="document.getElementById(\'ddVal\').textContent=this.value" '+
         'onchange="setDragDelay(this.value)">'+
       '<div class="sEnds"><span>100</span><span>300</span></div>'+
+      '</div>';
+  } else if(key==='cardThick'){
+    const cp=(S.prefs.cardThick==null?0:Math.min(60,Math.max(0,S.prefs.cardThick)));
+    h+='<h4>Card thickness</h4>';
+    h+='<p class="optHint">Minimum height of each card. Short cards grow first; taller cards (with streaks, counters) are only affected at higher values.</p>';
+    h+='<div class="optSlide">'+
+      '<div class="sVal"><span id="cpVal">'+(cp===0?'Default':('+'+cp+' px'))+'</span></div>'+
+      '<input type="range" id="cpRange" min="0" max="60" step="1" value="'+cp+'" '+
+        'oninput="S.prefs.cardThick=+this.value;applyCardThick();document.getElementById(\'cpVal\').textContent=(this.value===\'0\'?\'Default\':(\'+\'+this.value+\' px\'))" '+
+        'onchange="setCardThick(+this.value)">'+
+      '<div class="sEnds"><span>Default</span><span>+60 px</span></div>'+
+      '</div>';
+    h+='<button type="button" class="btn ghost" style="margin-top:10px" onclick="setCardThick(0)">Reset to default</button>';
+  }
+  if(key==='saveBtnTop'){
+    const sv=S.prefs.saveBtnTop;
+    h+='<h4>Save button position</h4>';
+    h+='<p class="optHint">Where the Save button sits in the edit sheet. "Top" centers it next to the title ("Edit To-Do" / "Edit Daily" / "Edit Habit"); "Bottom" keeps it at the foot of the sheet next to Cancel.</p>';
+    h+='<div class="optChoices">';
+    h+='<button type="button" class="'+(sv?'on':'')+'" onclick="setSaveBtnTop(true)">Top</button>';
+    h+='<button type="button" class="'+(sv?'':'on')+'" onclick="setSaveBtnTop(false)">Bottom</button>';
+    h+='</div>';
+  } else if(key==='exportInterval'){
+    const eid=(S.prefs.exportIntervalDays||0);
+    h+='<h4>Auto-backup to Dropbox</h4>';
+    h+='<p class="optHint">Uploads a full backup file (the same one Settings \u2192 Export produces \u2014 everything, including your device settings) to Dropbox on this schedule, on top of normal sync. Off by default.</p>';
+    h+='<div class="optChoices">'+
+      [['Off',0],['Daily',1],['Every 3 days',3],['Weekly',7],['Every 2 weeks',14],['Monthly',30]].map(o=>
+        '<button type="button" class="'+(eid===o[1]?'on':'')+'" onclick="setExportIntervalDays('+o[1]+')"><span>'+o[0]+'</span></button>').join('')+
       '</div>';
   }
   if(key==='haptics'){
@@ -2963,6 +3897,7 @@ function openOpt(key){
     h+='<p class="optHint" style="margin-top:8px">If buzz() returns "accepted" but no vibration is felt: Android DND / Silent mode suppresses vibration silently. The API has no way to detect this.</p>';
     var _bd=getBuzzDiag();
     h+='<div class="small" style="margin-top:6px">API: <b>'+_bd.type+'</b> &middot; Last: <b>'+( _bd.lastResult===null?'(none)':''+_bd.lastResult)+'</b> &middot; Count: <b>'+_bd.count+'</b></div>';
+    h+='<button type="button" class="btn ghost" style="margin-top:10px" onclick="var r=buzz(50);toast(\'Vibrate returned: \'+r);openOpt(\'haptics\')">Test vibration</button>';
   }
   h+='<button class="btn ghost optClose" type="button" onclick="closeOpt()">Done</button>';
   document.getElementById('optMenu').innerHTML=h;
@@ -2974,66 +3909,281 @@ function setDragDelay(v){
   n=Math.min(300,Math.max(100,n));
   S.prefs.dragDelay=n; save(); openSettings();
 }
-function saveSettings(){
-  S.char.name=document.getElementById('setName').value.trim()||'Adventurer';
-  S.char.face=document.getElementById('setFace').value||'🧙';
-  // Card drag delay is set live by its slider (setDragDelay); nothing to read here.
-  S.prefs.tipDelay=0; // tooltip delay is fixed at Instant
-  save(); render(); closeSheet(); toast('Saved');
-}
 // Complete single-file backup: the localStorage S object PLUS the IndexedDB
 // event log, embedded under an `events` key. Async because reading IDB is async;
 // localStorage stays lean (events are only added to the export blob, never back
 // into S — migrate() strips `events` on import). Falls back to S-only if IDB is
 // unavailable so export never fails outright.
-function exportData(){
-  logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file'});
-  const finish=(eventsArr)=>{
-    // Build the backup from S without mutating S; attach events for portability.
-    const backup=Object.assign({}, S, {events: eventsArr||[]});
-    const _lastMs=function(arr){let mx=0;(arr||[]).forEach(x=>{const c=(x.createdAt||0),u=(x.updatedAt||0);if(c>mx)mx=c;if(u>mx)mx=u;});return mx;};
-    backup._backup={ exportedAt:new Date().toISOString(), appVersion:APP_VERSION,
-                     eventCount:(eventsArr||[]).length,
-                     items:{ tasks:(S.tasks||[]).length, rewards:(S.rewards||[]).length,
-                             tags:(S.tags||[]).length,
-                             views:((S.prefs&&S.prefs.an&&S.prefs.an.views)||[]).length,
-                             lastActivityAt:new Date(Math.max(_lastMs(S.tasks),_lastMs(S.rewards))||Date.now()).toISOString() } };
-    const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
-    const url=URL.createObjectURL(blob); const a=document.createElement('a');
-    const d=new Date(); const p=(n)=>String(n).padStart(2,'0'); const stamp=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
-    a.href=url; a.download='questa-backup-'+stamp+'.json'; a.click();
-    setTimeout(()=>URL.revokeObjectURL(url),1000);
-    toast('Exported'+((eventsArr&&eventsArr.length)?(' ('+eventsArr.length+' events)'):''));
+async function buildBackupFile(eventsArr){
+  const backup=Object.assign({}, S, {events: eventsArr||[]});
+  const _lastMs=function(arr){let mx=0;(arr||[]).forEach(x=>{const c=(x.createdAt||0),u=(x.updatedAt||0);if(c>mx)mx=c;if(u>mx)mx=u;});return mx;};
+  backup._backup={ exportedAt:new Date().toISOString(), appVersion:APP_VERSION,
+                   eventCount:(eventsArr||[]).length,
+                   items:{ tasks:(S.tasks||[]).length, rewards:(S.rewards||[]).length,
+                           tags:(S.tags||[]).length,
+                           views:((S.prefs&&S.prefs.an&&S.prefs.an.views)||[]).length,
+                           lastActivityAt:new Date(Math.max(_lastMs(S.tasks),_lastMs(S.rewards))||Date.now()).toISOString() } };
+  // Compute hash over the backup string (without hash field), then inject it
+  let hash = null;
+  try{
+    const preJson = JSON.stringify(backup);
+    hash = await computeHash(preJson);
+    backup._backup.hash = hash;
+  }catch(e){ /* hash optional; export proceeds without it */ }
+  const finalJson = JSON.stringify(backup, null, 2);
+  const blob = new Blob([finalJson], {type:'application/json'});
+  const d=new Date(); const p=(n)=>String(n).padStart(2,'0');
+  const stamp=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
+  const filename = 'questa-backup-'+stamp+'.json';
+  return {blob, filename, eventCount: (eventsArr||[]).length};
+}
+
+function showExportChooser(blob, filename, eventCount) {
+  const sheet = document.getElementById('sheet');
+  const shareName = filename.replace(/\.json$/, '.txt');
+  const shareFile = new File([blob], shareName, {type: 'text/plain'});
+  const canShareFiles = !!(navigator.canShare && navigator.canShare({files: [shareFile]}));
+
+  const dbxAvailable = (typeof syncCfg==="function" && typeof exportSaveDropbox==="function" && syncCfg().enabled);
+
+  let h = '<h3>Export backup</h3>';
+  h += '<div class="small" style="margin-bottom:12px">Choose where to save your backup.</div>';
+  h += '<div class="settingsRow">';
+  h += '<button class="btn ghost" id="exportShareBtn"' + (canShareFiles ? '' : ' disabled') + '>Share</button>';
+  h += '<button class="btn ghost" id="exportSaveBtn">Save to this device</button>';
+  if (dbxAvailable) {
+    h += '<button class="btn ghost" id="exportDropboxBtn">Save to Dropbox</button>';
+  }
+  h += '<button class="btn ghost" id="exportCancelBtn">Cancel</button>';
+  h += '</div>';
+  if (!canShareFiles) {
+    h += '<div class="small" style="margin-top:8px">Sharing isn\'t available in this browser (needs Android Chrome over HTTPS). Use \'Save to device\'.</div>';
+  }
+  
+  sheet.innerHTML = h;
+
+  document.getElementById('exportShareBtn').onclick = () => {
+    if (canShareFiles) exportShare(blob, filename, eventCount);
   };
-  getEvents({}).then(finish).catch(()=>finish([]));
+  document.getElementById('exportSaveBtn').onclick = () => {
+    exportSaveDevice(blob, filename, eventCount);
+  };
+  if (dbxAvailable) {
+    document.getElementById('exportDropboxBtn').onclick = () => {
+      exportSaveDropbox(blob, filename, eventCount);
+    };
+  }
+  document.getElementById('exportCancelBtn').onclick = () => {
+    closeSheet();
+  };
+
+  document.getElementById('scrim').classList.add('show');
+}
+
+async function exportShare(blob, filename, eventCount) {
+  const shareName = filename.replace(/\.json$/, '.txt');
+  const shareFile = new File([blob], shareName, {type: 'text/plain'});
+  let shared = false;
+  try {
+    await navigator.share({files: [shareFile]});
+    shared = true;
+  } catch(e) {
+    if (e.name === 'AbortError') {
+      closeSheet();
+    } else {
+      toast('Share failed: ' + e.name);
+      closeSheet();
+    }
+  }
+  if (shared) {
+    S.prefs.lastExportTs = Date.now();
+    save();
+    checkExportStaleness();
+    toast('Exported' + (eventCount ? (' (' + eventCount + ' events)') : ''));
+    closeSheet();
+    logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file via Share'});
+  }
+}
+
+function exportSaveDevice(blob, filename, eventCount) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+  S.prefs.lastExportTs = Date.now();
+  save();
+  checkExportStaleness();
+  toast('Exported' + (eventCount ? (' (' + eventCount + ' events)') : ''));
+  closeSheet();
+  logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file via Download'});
+}
+
+function exportData(){
+  getEvents({})
+    .then(buildBackupFile)
+    .then(({blob, filename, eventCount}) => showExportChooser(blob, filename, eventCount))
+    .catch(() => buildBackupFile([]).then(({blob, filename, eventCount}) => showExportChooser(blob, filename, eventCount)));
 }
 function importData(ev){
   const f=ev.target.files[0]; if(!f)return;
   const rd=new FileReader();
   rd.onload=()=>{ try{ const data=JSON.parse(rd.result);
       if(!data.char||!Array.isArray(data.tasks)) throw 0;
-      // Capture any embedded event log BEFORE migrate() (which strips `events`
-      // from S so it never re-enters localStorage). A full backup is a full
-      // restore: replace the IDB event log entirely (clear then bulk-add) so a
-      // re-import never duplicates. Done async; localStorage restore stays sync.
-      const embeddedEvents = Array.isArray(data.events) ? data.events : null;
-      confirmDialog('Import Progress', 'Replace current progress with the imported file?').then(ok => {
-        if(!ok) return;
-        S=migrate(data); save(); applyWidth(); closeSheet(); render();
-        if(embeddedEvents && typeof indexedDB!=="undefined"){
-          clearAllEvents().then(()=>bulkAddEvents(embeddedEvents)).then(n=>{
-            logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Restored ' + n + ' events'});
-            toast('Imported · '+n+' events restored');
+      const doImport = () => {
+        const embeddedEvents = Array.isArray(data.events) ? data.events : null;
+        confirmDialog('Import Progress', 'Replace current progress with the imported file?').then(ok => {
+          if(!ok) return;
+          S=migrate(data); save(); applyWidth(); applyCardThick(); closeSheet(); render();
+          if(embeddedEvents && typeof indexedDB!=="undefined"){
+            clearAllEvents().then(()=>bulkAddEvents(embeddedEvents)).then(n=>{
+              logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Restored ' + n + ' events'});
+              toast('Imported · '+n+' events restored');
+              if(TAB==='analytics') render();
+            });
+          } else {
+            logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Imported from backup'});
+            toast('Imported');
             if(TAB==='analytics') render();
-          });
-        } else {
-          logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Imported from backup'});
-          toast('Imported');
-          if(TAB==='analytics') render();
-        }
-      });
+          }
+        });
+      };
+      if(data._backup && data._backup.hash){
+        const expectedHash = data._backup.hash;
+        delete data._backup.hash;
+        const cleanStr = JSON.stringify(data);
+        data._backup.hash = expectedHash;
+        computeHash(cleanStr).then(check => {
+          if(check !== expectedHash){
+            alertDialog('Import Error', 'This file appears to be corrupted or tampered with (hash mismatch). Import cancelled.');
+            return;
+          }
+          doImport();
+        }).catch(() => doImport());
+      } else {
+        doImport();
+      }
     }catch(e){ alertDialog('Error', 'That file does not look like a valid Questa backup.'); } };
   rd.readAsText(f); ev.target.value='';
+}
+// --- Snapshot restore picker & logic ----------------------------------------
+async function updateLastFullBackupText(){
+  const el = document.getElementById('lastFullBackupDate');
+  if(!el) return;
+  try {
+    const snapshots = await listSnapshots();
+    const last = snapshots.find(s => s.type === "full" && s.verified);
+    if(last){
+      const d = new Date(last.ts);
+      el.textContent = 'Last full backup: ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    } else {
+      el.textContent = 'Last full backup: None';
+    }
+  } catch(e) {
+    el.textContent = 'Last full backup: (unavailable)';
+  }
+}
+
+async function updateLastExportText(){
+  const el = document.getElementById('lastExportDate');
+  if(!el) return;
+  const ts = S.prefs && S.prefs.lastExportTs;
+  if(ts){
+    const d = new Date(ts);
+    el.textContent = 'Last export: ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  } else {
+    el.textContent = 'Last export: None';
+  }
+}
+
+function openRestorePicker(){
+  (async () => {
+    if(_flushPromise) await _flushPromise;
+    try {
+      const snapshots = await listSnapshots();
+      const verified = snapshots.filter(s => s.verified);
+      if(verified.length === 0){
+        alertDialog('Restore', 'No verified local snapshots found. Save your progress first (it auto-saves), then snapshots are created when you close the app.');
+        return;
+      }
+      const sheet = document.getElementById('sheet');
+      let h = '<div class="colTitle"><h2>Select a snapshot to restore</h2></div>';
+      h += '<div style="max-height:300px;overflow-y:auto">';
+      verified.forEach(s => {
+        const d = new Date(s.ts);
+        const dateStr = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+        const sizeKB = (s.payload ? (s.payload.length / 1024).toFixed(1) : '?');
+        const typeLabel = s.type === 'full' ? 'Full' : 'Delta';
+        const items = s.counts ? ' &middot; ' + (s.counts.events||0) + ' events' : '';
+        h += '<div style="padding:8px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px">' +
+          '<span>&#x2705;</span>' +
+          '<span style="flex:1"><strong>' + dateStr + '</strong> &middot; ' + typeLabel + items + ' &middot; ' + sizeKB + 'KB</span>' +
+          '<button class="btn ghost" onclick="confirmRestore(' + s.id + ')">Restore</button>' +
+          '</div>';
+      });
+      h += '</div>';
+      h += '<div class="small" style="margin-top:8px">Select a snapshot to restore. Your current progress will be replaced.</div>';
+      h += '<button class="btn ghost" onclick="closeSheet()" style="margin-top:8px">Cancel</button>';
+      sheet.innerHTML = h;
+      document.getElementById('scrim').classList.add('show');
+    } catch(e) {
+      alertDialog('Restore', 'Could not read backup store.');
+    }
+  })();
+}
+async function confirmRestore(id){
+  try{
+    const snap = await readSnapshot(id);
+    if(!snap || !snap.verified){
+      alertDialog('Restore Error', 'Snapshot not found or not verified.');
+      return;
+    }
+    const ok = await confirmDialog('Confirm Restore', 'This will replace ALL current progress with the snapshot from ' + new Date(snap.ts).toLocaleString() + '. Continue?');
+    if(!ok) return;
+
+    let data;
+    try{ data = JSON.parse(snap.payload); } catch(e){ alertDialog('Restore Error', 'Snapshot data is corrupted.'); return; }
+
+    const stateSnapshot = data.stateSnapshot;
+    const events = data.events || [];
+
+    if(!stateSnapshot || !stateSnapshot.char || !Array.isArray(stateSnapshot.tasks)){
+      alertDialog('Restore Error', 'Snapshot does not contain valid state.');
+      return;
+    }
+
+    // Chain continuity check for delta snapshots
+    if(snap.type === 'delta'){
+      const allSnapshots = await listSnapshots();
+      const hasBaseline = allSnapshots.some(s => s.type === 'full' && s.ts < snap.ts);
+      if(!hasBaseline){
+        const proceed = await confirmDialog('Warning', 'This delta snapshot has no corresponding baseline. Only partial data may be restored. Continue?');
+        if(!proceed) return;
+      }
+    }
+
+    // Apply state
+    S = migrate(stateSnapshot);
+    save();
+    applyWidth();
+    applyCardThick();
+
+    // Restore events
+    if(events.length > 0 && typeof indexedDB !== "undefined"){
+      await clearAllEvents();
+      const n = await bulkAddEvents(events);
+      logEvent({kind: 'restore', taskTitle: 'Restore from snapshot', notes: 'Restored ' + n + ' events'});
+    }
+
+    closeSheet();
+    render();
+    toast('Restored snapshot from ' + new Date(snap.ts).toLocaleString());
+  } catch(e){
+    console.error('Restore failed:', e);
+    alertDialog('Restore Error', 'Restore failed: ' + e.message);
+  }
 }
 function uploadFace(ev){
   const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
@@ -3113,9 +4263,98 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
   view.addEventListener('touchcancel',()=>{ tracking=false; },{passive:true});
 })();
 
-document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim') closeSheet(); };
+// Tier 1 backup: snapshot on visibility change if dirty
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden && IS_DIRTY){
+    _flushPromise = listSnapshots().then(snapshots => {
+      const hasBaseline = snapshots.some(s => s.type === "full");
+      return writeSnapshot(hasBaseline ? "delta" : "full");
+    }).catch(() => writeSnapshot("full")).then(id => {
+      if(id) IS_DIRTY = false;
+    }).finally(() => { _flushPromise = null; });
+  }
+});
+window.addEventListener('pagehide', () => {
+  if(IS_DIRTY){
+    _flushPromise = listSnapshots().then(snapshots => {
+      const hasBaseline = snapshots.some(s => s.type === "full");
+      return writeSnapshot(hasBaseline ? "delta" : "full");
+    }).catch(() => writeSnapshot("full")).then(id => {
+      if(id) IS_DIRTY = false;
+    }).finally(() => { _flushPromise = null; });
+  }
+});
+
+document.getElementById('scrim').onclick=e=>{ if(e.target.id==='scrim'){ closeSheet(); closeRepSheet(); } };
+// Long-press on a habit's +/− button opens the bulk reps sheet (no scoring).
+(function(){
+  let timer=null, startX=0, startY=0, targetId=null, sign=0;
+  function clear(){ if(timer){ clearTimeout(timer); timer=null; } targetId=null; sign=0; }
+  function begin(el, x, y){
+    if(el.classList.contains('off')) return;            // disabled +/− button
+    const card=el.closest('.habit'); if(!card) return;
+    targetId=card.dataset.id; sign=el.classList.contains('down')?-1:1;
+    startX=x; startY=y;
+    timer=setTimeout(()=>{
+      timer=null;
+      if(!targetId) return;
+      _suppressHabitClick=targetId;                      // swallow the trailing click
+      buzz(15);
+      openRepSheet(targetId, sign);
+    }, REP_LONGPRESS_MS);
+  }
+  document.addEventListener('touchstart', e=>{
+    const el=e.target.closest('.habit .check.hbtn');
+    if(!el || e.touches.length!==1) return;
+    clear(); begin(el, e.touches[0].clientX, e.touches[0].clientY);
+  }, {passive:true});
+  document.addEventListener('touchmove', e=>{
+    if(!timer) return;
+    const t=e.touches[0]; if(!t) return;
+    if(Math.abs(t.clientX-startX)>10 || Math.abs(t.clientY-startY)>10) clear();
+  }, {passive:true});
+  document.addEventListener('touchend', clear, {passive:true});
+  document.addEventListener('touchcancel', clear, {passive:true});
+  document.addEventListener('mousedown', e=>{
+    const el=e.target.closest('.habit .check.hbtn');
+    if(!el) return;
+    clear(); begin(el, e.clientX, e.clientY);
+  });
+  document.addEventListener('mouseup', clear);
+  document.addEventListener('mouseleave', clear);
+  document.addEventListener('dragstart', clear);
+  document.addEventListener('contextmenu', e=>{ if(e.target.closest('.habit .check.hbtn')) e.preventDefault(); });
+})();
 window.addEventListener('resize', updateHeaderHeightVar);
+window.addEventListener('touchend', () => { if (typeof _tActive !== 'undefined' && _tActive) endTouchDrag(); }, { passive: true });
+window.addEventListener('touchcancel', () => { if (typeof _tActive !== 'undefined' && _tActive) endTouchDrag(); }, { passive: true });
 applyWidth();
+applyCardThick();
 startDay();
 updateHeaderHeightVar();
-if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').catch(()=>{}); }
+if(typeof syncInit==="function") syncInit();
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js')
+    .then(() => { startReminderScheduler(); })
+    .catch(()=>{ startReminderScheduler(); });
+} else {
+  startReminderScheduler();
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    checkReminders();
+  }
+});
+
+rotateSnapshots().catch(()=>{});
+checkExportStaleness();
+
+setTimeout(() => {
+  listSnapshots().then(snapshots => {
+    const now = Date.now();
+    const needsSnapshot = snapshots.length === 0 || (now - snapshots[0].ts) > 12*3600000;
+    if(needsSnapshot){
+      writeSnapshot("full").catch(()=>{});
+    }
+  }).catch(()=>{});
+}, 5000);

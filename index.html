@@ -40,6 +40,20 @@
   .avatarSetRow{display:flex;gap:8px;align-items:stretch}
   .avatarSetRow #setFace{flex:1 1 50%;min-width:0}
   .avatarSetRow .btn{flex:1 1 50%;white-space:nowrap}
+  .charAvatarRow{display:flex;gap:6px;align-items:flex-start;margin-top:4px;flex-wrap:nowrap}
+  .charAvatarRow .caCol{display:flex;flex-direction:column;min-width:0}
+  .charAvatarRow .caName{flex:1 1 auto;min-width:0}
+  .charAvatarRow .caAvatar{flex:0 0 auto}
+  .caLabelRow{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;min-height:18px}
+  .caLabelRow label{margin:0 !important;font-size:12px;color:var(--muted);align-self:auto;display:inline-block}
+  .caLabelActions{display:flex;align-items:center;gap:6px}
+  .caAvatarCtl{display:flex;gap:6px;align-items:center}
+  .caFace{flex:0 0 auto;box-sizing:border-box}
+  .browseGroup{position:relative;flex:0 0 auto;display:flex;flex-direction:column}
+  .browseGroup .btn{flex:none;width:auto;overflow:visible;text-overflow:clip}
+  .caRemove{font-size:11px;font-weight:600;color:var(--accent);text-decoration:none;white-space:nowrap;margin-right:2px}
+  .caRemove:hover{text-decoration:underline}
+  #setName,#setFace,.browseGroup .btn{height:38px !important}
   .who{flex:1;min-width:0}
   .who .lvl{font-size:12px;color:var(--muted)}
   .who .name{font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -48,6 +62,8 @@
   #gearBtn{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;
     padding:4px;line-height:1;flex:none;opacity:.7}
   #gearBtn:hover{opacity:1}
+  #gearBtn.stale{animation:gearStale 2s infinite;opacity:1}
+  @keyframes gearStale{0%,100%{color:var(--muted)}50%{color:var(--hp);text-shadow:0 0 8px var(--hp)}}
   .bars{margin-top:6px;display:flex;flex-direction:column;gap:4px}
   .bar{height:14px;border-radius:6px;background:#23143d;position:relative;overflow:hidden;
     border:1px solid #1a0f2e}
@@ -76,13 +92,17 @@
     background: #1d1233;
     padding: 6px 10px 4px;
     margin: 0 -10px 6px;
-    border-bottom: 1px solid var(--line);
     box-shadow: 0 4px 16px rgba(10,5,20,0.5);
   }
-  .stickyControls .colTitle { margin-top: 0 !important; margin-bottom: 4px !important; }
-  .colTitle{display:flex;align-items:center;gap:8px;margin:16px 4px 8px}
+  .stickyControls .colTitle { margin-top: 0 !important; margin-bottom: 6px !important; }
+  .colTitle{display:flex;align-items:center;gap:10px;margin:16px 4px 8px}
+  .colTitleActions{display:flex;align-items:center;gap:10px;flex:none}
   main .colTitle:first-child{margin-top:8px}
   .colTitle h2{margin:0;font-size:15px;letter-spacing:.3px;flex:1}
+  .infoTip{display:inline-flex;align-items:center;justify-content:center;
+    width:18px;height:18px;border-radius:50%;cursor:help;color:#1d0f38;
+    background:var(--accent);font:700 12px/1 serif;flex:0 0 auto;user-select:none}
+  .infoTip:hover,.infoTip:focus{outline:none;filter:brightness(1.12)}
   .filterIcon{background:var(--panel2);border:1px solid var(--line);color:var(--muted);
     border-radius:10px;width:34px;height:34px;font-size:14px;cursor:pointer;flex:none;
     display:flex;align-items:center;justify-content:center;padding:0;line-height:1;transition:all .15s}
@@ -97,11 +117,11 @@
     outline:none;box-shadow:none;}
   .searchBox input[type="text"]::placeholder{color:var(--muted)}
   .addBtn{background:var(--accent);border:none;color:#1a0f2e;
-    border-radius:10px;font-size:24px;font-weight:300;width:52px;height:34px;cursor:pointer;
+    border-radius:10px;font-size:24px;font-weight:300;width:38px;height:34px;cursor:pointer;
     display:flex;align-items:center;justify-content:center;padding:0;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,0.3);transition:transform .15s}
   .addBtn:active{transform:scale(0.92)}
   .task{background:var(--panel);border:1px solid var(--line);border-radius:10px;
-    margin-bottom:6px;overflow:hidden;display:flex;align-items:stretch;
+    margin-bottom:6px;overflow:hidden;display:flex;align-items:stretch;min-height:var(--card-min-h,0);
     transition:transform .12s, opacity .2s}
   .task.flash{animation:flash .5s}
   @keyframes flash{0%{transform:scale(1)}40%{transform:scale(.98)}100%{transform:scale(1)}}
@@ -109,6 +129,11 @@
     cursor:pointer;font-size:20px;border-right:1px solid var(--line);user-select:none}
   .task.daily .check{background:rgba(255,255,255,.03)}
   .task.done .check{background:var(--green);color:#fff}
+  .task.notdue{opacity:.5}
+  .task.notdue .ttl{color:var(--muted)}
+  .task.notdue .check{cursor:default;opacity:.55}
+  .task.notdue .ckbox{border-color:var(--muted);opacity:.6}
+  .railItem.notdue{color:var(--muted);border-color:var(--line);background:rgba(255,255,255,.03)}
   .ckbox{width:18px;height:18px;border:2px solid var(--muted);border-radius:5px;display:block}
   .ckmark{font-size:18px;font-weight:900;color:#fff;line-height:1}
   .task.shopitem .check{background:rgba(247,78,82,.12)}
@@ -118,6 +143,7 @@
      see enableTouchDrag / LONGPRESS_MS in app.js. */
   .task[draggable="true"]{cursor:grab;touch-action:none;transition:transform .18s ease,opacity .15s ease;
     -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+  .task[draggable="true"] * {touch-action:none}
   /* the original card becomes a dim placeholder gap while its ghost is dragged */
   .task.dragging{opacity:.25;outline:2px dashed var(--accent);transform:scale(.98)}
   /* floating clone that follows the finger while reordering on touch */
@@ -136,7 +162,7 @@
   .task.habit .check.up{color:var(--green);border-right:1px solid var(--line)}
   .task.habit .check.down{color:var(--red);border-left:1px solid var(--line);border-right:none}
   .task.habit .check.off{color:#4a3568;cursor:default}
-  .task .body{flex:1;min-width:0;padding:5px 8px;cursor:pointer}
+  .task .body{flex:1;min-width:0;padding:5px 8px;cursor:pointer;display:flex;flex-direction:column;justify-content:center}
   .task .ttl{font-weight:600;font-size:14px;word-break:break-word;display:block;line-height:1.25}
   .task.done .ttl{text-decoration:line-through;color:var(--muted)}
   .task .meta{margin-top:3px;font-size:11px;color:var(--muted);display:flex;gap:8px;flex-wrap:wrap;align-items:center}
@@ -155,6 +181,7 @@
   .railItem.diff-easy{color:var(--green);border-color:rgba(72,182,119,0.25);background:rgba(72,182,119,0.08)}
   .railItem.diff-medium{color:var(--orange);border-color:rgba(249,160,63,0.25);background:rgba(249,160,63,0.08)}
   .railItem.diff-hard{color:var(--red);border-color:rgba(247,78,82,0.25);background:rgba(247,78,82,0.08)}
+  .railItem.diff-log{color:var(--lblue);border-color:rgba(116,182,224,0.25);background:rgba(116,182,224,0.08)}
   .subFrac{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;
     min-width:32px;min-height:32px;padding:3px;border:1px solid var(--line);border-radius:6px;background:#2a1947;cursor:pointer}
   .subFrac b{font-size:12px;font-weight:700;line-height:1;color:var(--ink);font-variant-numeric:tabular-nums}
@@ -172,14 +199,14 @@
   .subbox.on{background:var(--green);border-color:var(--green)}
   .subtxt{font-size:13px;color:var(--ink)}
   .subtxt.sdone{text-decoration:line-through;color:var(--muted)}
-  .filterBar{display:flex;gap:8px;margin:0 4px 10px}
+  .filterBar{display:flex;gap:10px;margin:0 4px 10px}
   .filterBar button{flex:1;background:var(--panel);border:1px solid var(--line);color:var(--muted);
     border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer;transition:all .15s}
   .filterBar button:hover{background:var(--panel2)}
   .filterBar button.on{background:var(--accent);border-color:var(--accent);color:#1a0f2e;font-weight:700;box-shadow:0 2px 4px rgba(0,0,0,0.2)}
-  .filterBar.sortBar{margin-top:-4px;flex-wrap:wrap;align-items:center}
+  .filterBar.sortBar{margin-top:4px;flex-wrap:nowrap;align-items:center}
   .filterBar.sortBar .sortLbl{font-size:11px;color:var(--muted);align-self:center;padding:0 2px;flex:0 0 auto}
-  .filterBar.sortBar button{flex:1 1 auto;min-width:52px}
+  .filterBar.sortBar button{flex:1;min-width:0}
 
   /* ---- tags ---- */
   .tagChips{display:inline-flex;gap:4px;flex-wrap:wrap;vertical-align:middle}
@@ -282,6 +309,20 @@
   .adj span{flex:1;font-size:14px;font-weight:700;font-variant-numeric:tabular-nums}
   .adj button{width:30px;height:30px;border:1px solid var(--line);background:var(--panel2);color:var(--ink);
     border-radius:6px;font-size:16px;cursor:pointer;flex:none}
+  /* Bulk reps sheet (long-press +/− on a habit) */
+  .repRow{display:flex;align-items:stretch;gap:8px;margin:6px 0 14px}
+  .repSide{width:46px;flex:none;border:1px solid var(--line);background:var(--panel2);color:var(--ink);
+    border-radius:8px;font-size:22px;font-weight:700;cursor:pointer}
+  .repSide:active{background:var(--panel)}
+  .repInput{flex:1;min-width:0;text-align:center;font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;
+    border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);padding:8px}
+  .repQuickRow{display:flex;gap:8px;margin-bottom:16px}
+  .repQuick{flex:1;border:1px solid var(--line);background:var(--panel);color:var(--ink);
+    border-radius:8px;padding:12px 0;font-size:16px;font-weight:700;cursor:pointer}
+  .repQuick:active{background:var(--panel2)}
+  .repActions{display:flex;gap:8px}
+  .repActions .btn{flex:1}
+  .repActions .btn[disabled]{opacity:.4;cursor:default}
   .valdot{width:10px;flex:none;align-self:stretch}
   .pill{font-size:10px;padding:1px 6px;border-radius:6px;background:#2a1947;border:1px solid var(--line)}
   .scrim{position:fixed;inset:0;background:rgba(10,5,20,.66);display:none;z-index:50;
@@ -290,11 +331,14 @@
   .sheet{background:var(--bg);width:100%;max-width:560px;border-radius:16px 16px 0 0;
     border-top:1px solid var(--line);max-height:92vh;overflow:auto;padding:16px 16px 26px}
   .sheet h3{margin:2px 0 12px}
+  .settingsHead{display:flex;align-items:center;justify-content:space-between;margin:2px 0 12px}
+  .settingsHead h3{margin:0}
+  .settingsHead .btn{flex:0 0 auto;width:33%;padding:8px 10px;font-size:13px}
   label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
   input[type=text],input[type=number],textarea,select{width:100%;background:var(--panel);color:var(--ink);
     border:1px solid var(--line);border-radius:8px;padding:9px 10px;font-size:14px;font-family:inherit}
   /* small, left-aligned destructive action, kept away from the common buttons */
-  .resetRow{display:flex;justify-content:flex-start;margin:18px 0 4px}
+  .resetRow{display:flex;align-items:center;justify-content:flex-start;position:relative;margin:12px 0 4px}
   .btn.resetMini{flex:0 0 auto;width:auto;background:transparent;color:var(--red);
     border:1px solid var(--red);border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600;opacity:.7}
   .btn.resetMini:active{opacity:1}
@@ -460,9 +504,17 @@
     75%{opacity:1}100%{opacity:0;transform:scale(1.2)}}
   .settingsRow{display:flex;gap:8px;margin:10px 0}
   .settingsRow .btn{font-size:13px;padding:10px}
+  .devNameWrap{margin:10px 0}
+  .devNameHeader{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:baseline;margin:0 0 6px}
+  .devSyncStatus{font-size:11px;color:var(--muted);margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .devNameLbl{font-size:12px;color:var(--muted);margin:0;text-align:center;white-space:nowrap}
+  .devNameRow{display:flex;gap:8px;align-items:stretch}
+  .devNameRow .btn{flex:1 1 33%;font-size:13px;padding:10px}
+  .devNameRow input{flex:1 1 33%;width:100%;box-sizing:border-box}
   .small{font-size:11px;color:var(--muted);line-height:1.5}
-  .appVersion{margin:14px 2px 4px;text-align:center;font-size:10px;letter-spacing:.05em;
-    color:var(--muted);opacity:.6;font-variant-numeric:tabular-nums}
+  .backupMeta{display:flex;justify-content:space-between;gap:12px;margin-top:8px}
+  .appVersion{position:absolute;left:50%;transform:translateX(-50%);margin:0;
+    font-size:10px;letter-spacing:.05em;color:var(--muted);opacity:.6;font-variant-numeric:tabular-nums}
   .deathOverlay{position:fixed;inset:0;background:rgba(40,5,20,.92);z-index:70;display:none;
     align-items:center;justify-content:center;text-align:center;padding:30px}
   .deathOverlay.show{display:flex}
@@ -480,15 +532,10 @@
     background: #1d1233;
     padding: 6px 12px 6px;
     margin: -10px -10px 6px;
-    border-bottom: 1px solid var(--line);
     box-shadow: 0 4px 16px rgba(10,5,20,0.5);
   }
   body.tab-analytics .scrim {
-    padding-top: calc(var(--header-height, 105px) + var(--sticky-header-height, 60px) + 8px);
-    align-items: flex-start;
-  }
-  body.tab-analytics .sheet {
-    max-height: calc(100vh - var(--header-height, 105px) - var(--sticky-header-height, 60px) - 24px);
+    z-index: 65;
   }
   .anWrap{padding:4px 2px 30px}
   .anHeaderRow {
@@ -847,5 +894,6 @@
 </div>
 
 <script src="app.js"></script>
+<script src="sync.js"></script>
 </body>
 </html>

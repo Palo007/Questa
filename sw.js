@@ -1,7 +1,7 @@
 /* Questa service worker - network-first for the app shell so updates appear
    on the next launch; cache fallback keeps it working fully offline. */
-const CACHE = "questa-v52";
-const ASSETS = ["./", "./index.html", "./app.js", "./manifest.json", "./icon.svg",
+const CACHE = "questa-v109";
+const ASSETS = ["./", "./index.html", "./app.js", "./sync.js", "./manifest.json", "./icon.svg",
                 "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
@@ -20,6 +20,7 @@ self.addEventListener("fetch", e => {
     || url.pathname.endsWith("/")
     || url.pathname.endsWith("index.html")
     || url.pathname.endsWith("app.js")
+    || url.pathname.endsWith("sync.js")
     || url.pathname.endsWith("manifest.json");
   if (isShell) {
     /* network-first: always try GitHub, fall back to cache when offline */
@@ -40,4 +41,36 @@ self.addEventListener("fetch", e => {
       }).catch(() => {}))
     );
   }
+});
+self.addEventListener("message", e => {
+  if (e.data && e.data.type === "SHOW_NOTIFICATION") {
+    const { title, body, tag, data } = e.data;
+    e.waitUntil(
+      self.registration.showNotification(title, {
+        body: body,
+        icon: "./icon-192.png",
+        badge: "./icon-192.png",
+        tag: tag || "questa-reminder",
+        data: data || {},
+        vibrate: [100, 50, 100],
+        renotify: true
+      })
+    );
+  }
+});
+
+self.addEventListener("notificationclick", e => {
+  e.notification.close();
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(clients => {
+      for (const client of clients) {
+        if (client.url && "focus" in client) {
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow("./");
+      }
+    })
+  );
 });

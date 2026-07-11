@@ -224,9 +224,13 @@ async function dbxDownload(path, _retriedAuth){
     return dbxDownload(path, true);
   }
   if(res.status === 409){
-    // Dropbox 409 on download covers "path/not_found" and similar — treat all
-    // as "nothing uploaded yet", which is the only 409 case we expect here.
-    return null;
+    // F6 (2026-07-11): only path/not_found means "nothing uploaded yet". Any
+    // other 409 (e.g. restricted_content) must surface as an error, not be
+    // misread as an empty remote. Unreadable body keeps legacy behavior.
+    let summary = "";
+    try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
+    if(!summary || summary.indexOf("not_found") !== -1) return null;
+    throw new HttpError("download failed: 409 " + summary.slice(0, 200), 409);
   }
   if(!res.ok){
     // Surface Dropbox's actual error body (e.g. "missing_scope",
@@ -351,6 +355,11 @@ function syncApply(subset){
   const _before = (typeof syncSubset === "function") ? stableStringify(syncSubset()) : null;
   SYNC_APPLYING = true;
   try{
+    // FIX 2026-07-11: deep-copy the incoming subset so S never shares object
+    // identity with the caller's merged state. Without this, user edits during
+    // an in-flight upload mutate the pending base snapshot (base poisoning —
+    // see .omo/plans/2026-07-11-todo-completion-revert-analysis.md §2).
+    subset = JSON.parse(JSON.stringify(subset));
     S.char = subset.char || S.char;
     S.tasks = subset.tasks;
     S.rewards = Array.isArray(subset.rewards) ? subset.rewards : [];
@@ -392,11 +401,15 @@ function syncBaseGet(){
   })).catch(() => null);
 }
 function syncBasePut(subset){
+  // Accepts an object OR a pre-serialized JSON string (fix 2026-07-11).
+  // Serializing HERE, before the idbOpen await, also closes the small window
+  // where object callers could be mutated during that await.
+  const payload = (typeof subset === "string") ? subset : JSON.stringify(subset);
   if(typeof idbOpen !== "function") return Promise.resolve(false);
   return idbOpen().then(db => new Promise((resolve) => {
     try{
       const tx = db.transaction("syncmeta", "readwrite");
-      tx.objectStore("syncmeta").put(JSON.stringify(subset), "base");
+      tx.objectStore("syncmeta").put(payload, "base");
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => resolve(false);
       tx.onabort = () => resolve(false);
@@ -586,7 +599,11 @@ function merge(base, local, remote, remoteSavedAt){
       if(!localChanged && !remoteChanged) return b;
       if(localChanged && !remoteChanged) return l;
       if(!localChanged && remoteChanged) return r;
-      return (Date.now() > (remoteSavedAt || 0)) ? l : r; // see JUDGMENT CALL note above
+      // F2 (2026-07-11): the old expression `Date.now() > remoteSavedAt` was
+      // always true for any past savedAt, so both-changed char ALWAYS took
+      // local in practice. Made explicit — local wins. (This also removes the
+      // pathological case where a future-skewed remote clock silently won.)
+      return l;
     })()
   };
   return merged;
@@ -644,18 +661,24 @@ async function _syncNowAttempt(transientRetryCount){
 
     syncApply(merged);
 
+    // FIX 2026-07-11: freeze ONE serialization of merged before any await.
+    // This exact string is the single source for BOTH the upload body and the
+    // base snapshot, so base ≡ uploaded remote content by construction.
+    const mergedJson = JSON.stringify(merged);
+
     const baseStr = base ? stableStringify(base) : null;
     const remoteStr = remote ? stableStringify(remote.state) : null;
     const mergedStr = stableStringify(merged);
     const nothingToPush = (mergedStr === remoteStr) && (mergedStr === baseStr);
 
     if(nothingToPush){
-      await syncBasePut(merged);
-      syncCfgSave({ lastSyncAt: Date.now(), lastError: null, lastRev: remote ? remote.rev : cfgRevOrNull() });
+      const baseOk = await syncBasePut(mergedJson);
+      syncCfgSave({ lastSyncAt: Date.now(), lastRev: remote ? remote.rev : cfgRevOrNull(),
+                    lastError: baseOk ? null : "base snapshot write failed — sync degraded" });
       return;
     }
 
-    await _pushWithConflictRetry(merged, remote ? remote.rev : null, 0);
+    await _pushWithConflictRetry(mergedJson, remote ? remote.rev : null, 0);
   }catch(e){
     if(e && e.status && (e.status === 429 || e.status >= 500) && transientRetryCount < SYNC_TRANSIENT_RETRY_DELAYS_MS.length){
       await new Promise(r => setTimeout(r, SYNC_TRANSIENT_RETRY_DELAYS_MS[transientRetryCount]));
@@ -667,11 +690,15 @@ async function _syncNowAttempt(transientRetryCount){
 
 function cfgRevOrNull(){ return syncCfg().lastRev || null; }
 
-async function _pushWithConflictRetry(merged, knownRev, attempt){
+async function _pushWithConflictRetry(mergedJson, knownRev, attempt){
   try{
-    const up = await dbxUpload(STATE_PATH, wrap(merged), knownRev);
-    await syncBasePut(merged);
-    syncCfgSave({ lastRev: up.rev || null, lastSyncAt: Date.now(), lastError: null });
+    // mergedJson is a FROZEN string (fix 2026-07-11). The upload body wraps a
+    // detached parse of it, and the base snapshot stores the string verbatim —
+    // nothing the user does mid-upload can make the two diverge.
+    const up = await dbxUpload(STATE_PATH, wrap(JSON.parse(mergedJson)), knownRev);
+    const baseOk = await syncBasePut(mergedJson);
+    syncCfgSave({ lastRev: up.rev || null, lastSyncAt: Date.now(),
+                  lastError: baseOk ? null : "base snapshot write failed — sync degraded" });
   }catch(e){
     if(e instanceof ConflictError && attempt < SYNC_CONFLICT_RETRY_LIMIT){
       const fresh = await dbxDownload(STATE_PATH);
@@ -679,7 +706,7 @@ async function _pushWithConflictRetry(merged, knownRev, attempt){
       const local = syncSubset();
       const reMerged = fresh ? merge(base, local, fresh.state, fresh.savedAt) : local;
       syncApply(reMerged);
-      return _pushWithConflictRetry(reMerged, fresh ? fresh.rev : null, attempt + 1);
+      return _pushWithConflictRetry(JSON.stringify(reMerged), fresh ? fresh.rev : null, attempt + 1);
     }
     if(e instanceof ConflictError){
       syncCfgSave({ lastError: "sync conflict — retry later" });
@@ -951,7 +978,12 @@ async function dbxDownloadRaw(path, _retriedAuth){
     headers: { "Authorization": "Bearer " + tok, "Dropbox-API-Arg": dbxArgHeader({ path: path }) }
   });
   if(res.status === 401 && !_retriedAuth){ await syncToken(true); return dbxDownloadRaw(path, true); }
-  if(res.status === 409) return null;
+  if(res.status === 409){
+    let summary = "";
+    try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
+    if(!summary || summary.indexOf("not_found") !== -1) return null;
+    throw new HttpError("download failed: 409 " + summary.slice(0, 200), 409);
+  }
   if(!res.ok){
     let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
     throw new HttpError("download failed: " + res.status + (detail ? " " + detail : ""), res.status);
@@ -974,7 +1006,12 @@ async function dbxListFolder(path, _retriedAuth){
       body: JSON.stringify(body)
     });
     if(res.status === 401 && !_retriedAuth){ await syncToken(true); return dbxListFolder(path, true); }
-    if(res.status === 409) return []; // path/not_found — no events uploaded yet
+    if(res.status === 409){
+      let summary = "";
+      try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
+      if(!summary || summary.indexOf("not_found") !== -1) return []; // no events uploaded yet
+      throw new HttpError("list failed: 409 " + summary.slice(0, 200), 409);
+    }
     if(!res.ok){
       let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
       throw new HttpError("list failed: " + res.status + (detail ? " " + detail : ""), res.status);

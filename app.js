@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.11-0825";
+const APP_VERSION = "v2026.07.11-0953";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -732,6 +732,7 @@ function uncompleteDaily(t){
   unlogToday(t);
   t.done = false;
   if(t.type==='daily' && t.streak){ t.streak = Math.max(0, t.streak - 1); }
+  t.updatedAt = Date.now(); // F1 (2026-07-11): unchecking is an edit — without this it loses every both-changed merge tiebreak
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();
 }
@@ -740,6 +741,7 @@ function uncompleteTodo(t){
   reverseGrant(t);
   unlogToday(t);
   t.done = false;
+  t.updatedAt = Date.now(); // F1 (2026-07-11): see uncompleteDaily
   toast('Reverted');
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();

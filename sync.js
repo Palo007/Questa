@@ -328,7 +328,8 @@ function syncSubset(){
     lastCron: S.lastCron || 0,
     history: S.history || [],
     charHistory: S.charHistory || [],
-    an: an
+    an: an,
+    monthlyBackups: S.monthlyBackups || []
   };
   return JSON.parse(JSON.stringify(raw)); // deep copy, strips functions/undefined
 }
@@ -368,6 +369,7 @@ function syncApply(subset){
     if(subset.lastCron) S.lastCron = subset.lastCron;
     S.history = Array.isArray(subset.history) ? subset.history : [];
     S.charHistory = Array.isArray(subset.charHistory) ? subset.charHistory : [];
+    S.monthlyBackups = Array.isArray(subset.monthlyBackups) ? subset.monthlyBackups : [];
     S.prefs = S.prefs || {};
     S.prefs.an = S.prefs.an || {};
     S.prefs.an.views = (subset.an && Array.isArray(subset.an.views)) ? subset.an.views : [];
@@ -662,6 +664,11 @@ function merge(base, local, remote, remoteSavedAt){
     },
     history: mergeDayArray(local.history, remote.history),
     charHistory: mergeDayArray(local.charHistory, remote.charHistory),
+    monthlyBackups: (function(){
+      const l = local.monthlyBackups || [];
+      const r = remote.monthlyBackups || [];
+      return Array.from(new Set([...l, ...r])).sort();
+    })(),
     lastCron: mergedLastCron,
     char: (function(){
       const b = base.char || {}, l = local.char || {}, r = remote.char || {};
@@ -971,12 +978,48 @@ function syncMaybeAutoExport(){
     const days = (typeof S !== "undefined" && S.prefs && S.prefs.exportIntervalDays) || 0;
     if(!days) return;
     if(typeof buildBackupFile !== "function") return; // app.js not loaded/ready
+
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const monthKey = `${year}-${month}`;
+    S.monthlyBackups = S.monthlyBackups || [];
+
+    const monthlyBackupNeeded = !S.monthlyBackups.includes(monthKey);
     const last = (S.prefs && S.prefs.lastExportTs) || 0;
-    if(Date.now() - last < days * 86400000) return;
-    const eventsP = (typeof getEvents === "function") ? getEvents({}).catch(() => []) : Promise.resolve([]);
-    eventsP.then(buildBackupFile).then(({blob}) => syncUploadBackupBlob(blob)).catch(e => {
-      syncCfgSave({ lastError: "auto backup failed: " + ((e && e.message) || String(e)) });
-    });
+    const regularBackupNeeded = Date.now() - last >= days * 86400000;
+
+    if (monthlyBackupNeeded) {
+      const p = (n) => String(n).padStart(2, '0');
+      const stamp = '' + now.getFullYear() + p(now.getMonth() + 1) + p(now.getDate()) + '-' + p(now.getHours()) + p(now.getMinutes());
+      const filename = 'questa-backup-' + stamp + '.json';
+      const path = '/' + filename;
+
+      const eventsP = (typeof getEvents === "function") ? getEvents({}).catch(() => []) : Promise.resolve([]);
+      eventsP.then(buildBackupFile).then(({blob}) => {
+        return blob.text().then(text => dbxUploadText(path, text));
+      }).then(() => {
+        if (typeof S !== "undefined") {
+          S.prefs = S.prefs || {};
+          S.prefs.lastExportTs = Date.now();
+          S.monthlyBackups = S.monthlyBackups || [];
+          if (!S.monthlyBackups.includes(monthKey)) {
+            S.monthlyBackups.push(monthKey);
+          }
+          if (typeof save === "function") save();
+        }
+        if (typeof logEvent === "function") {
+          logEvent({ kind: "export", taskTitle: "Monthly Auto Backup", notes: "Saved monthly backup " + filename + " to Dropbox" });
+        }
+      }).catch(e => {
+        syncCfgSave({ lastError: "monthly backup failed: " + ((e && e.message) || String(e)) });
+      });
+    } else if (regularBackupNeeded) {
+      const eventsP = (typeof getEvents === "function") ? getEvents({}).catch(() => []) : Promise.resolve([]);
+      eventsP.then(buildBackupFile).then(({blob}) => syncUploadBackupBlob(blob)).catch(e => {
+        syncCfgSave({ lastError: "auto backup failed: " + ((e && e.message) || String(e)) });
+      });
+    }
   }catch(e){ /* best-effort only, never throw into syncNow()'s chain */ }
 }
 

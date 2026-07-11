@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.11-0131";
+const APP_VERSION = "v2026.07.11-1110";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -95,7 +95,9 @@ function freshState(){
            lvl:1, xp:0, hp:50, maxHp:50, mp:0, gold:0 },
     tasks:[], rewards:[], tags:[], devices:[],
     lastCron: dayStamp(new Date()),
-    history:[], charHistory:[],     prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false }
+    history:[], charHistory:[],
+    monthlyBackups: [],
+    prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false }
   };
 }
 let S = load();
@@ -124,6 +126,7 @@ function migrate(s){ const f=freshState();
   // localStorage blob or be mistaken for a live source.
   if(!Array.isArray(out.tags)) out.tags=[];
   if(!Array.isArray(out.devices)) out.devices=[];
+  if(!Array.isArray(out.monthlyBackups)) out.monthlyBackups=[];
   delete out.events;
   if(Array.isArray(out.tasks)){ out.tasks.forEach(normalizeTaskReminders); }
   // Sync groundwork: every synced entity needs a deterministic updatedAt so
@@ -1120,7 +1123,16 @@ function applySearch(list, tabKey) {
   if (!q) return list;
   return list.filter(t => (t.title||'').toLowerCase().includes(q) || (t.notes||'').toLowerCase().includes(q));
 }
-function toggleFilter(){ FILTEROPEN=!FILTEROPEN; S.prefs.filterOpen=FILTEROPEN; save(); render(); }
+function toggleFilter(){
+  FILTEROPEN=!FILTEROPEN;
+  if (!FILTEROPEN && TAB === 'habits' && FILTER.habits === 'log') {
+    FILTER.habits = 'all';
+    S.prefs.filter = FILTER;
+  }
+  S.prefs.filterOpen=FILTEROPEN;
+  save();
+  render();
+}
 function toggleSort(){ SORTOPEN=!SORTOPEN; S.prefs.sortOpen=SORTOPEN; save(); render(); }
 const EXPANDED={}; // taskId -> bool (checklist expanded on card)
 function toggleExpand(id){ EXPANDED[id]=!EXPANDED[id]; render(); }

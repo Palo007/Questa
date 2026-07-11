@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-2340";
+const APP_VERSION = "v2026.07.11-0131";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -690,6 +690,8 @@ function completeTask(t, ev){
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
   t.updatedAt = Date.now();
+  t.doneAt = Date.now(); // F3 (2026-07-11): completion-day channel for cron-aware merge; see sync.js resolveDailyConflict/.omo/plans/2026-07-11-cron-merge-recency.md
+  delete t.missedOn;
   buzz(50);
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };  // remember exactly what was granted
   if(t.type==='daily'){ t.streak = (t.streak||0) + 1;
@@ -731,7 +733,9 @@ function uncompleteDaily(t){
   reverseGrant(t);
   unlogToday(t);
   t.done = false;
+  delete t.doneAt; // F3 (2026-07-11): unchecking retracts the completion-day claim
   if(t.type==='daily' && t.streak){ t.streak = Math.max(0, t.streak - 1); }
+  t.updatedAt = Date.now(); // F1 (2026-07-11): unchecking is an edit — without this it loses every both-changed merge tiebreak
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();
 }
@@ -740,6 +744,8 @@ function uncompleteTodo(t){
   reverseGrant(t);
   unlogToday(t);
   t.done = false;
+  delete t.doneAt; // F3 (2026-07-11): see uncompleteDaily
+  t.updatedAt = Date.now(); // F1 (2026-07-11): see uncompleteDaily
   toast('Reverted');
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();
@@ -824,7 +830,11 @@ function repAdjust(delta){
   else           REP.value=Math.min(0, REP.value+delta);
   drawRepSheet();
 }
-function repQuick(n){ repAdjust(n); }
+function repQuick(n){
+  if(!REP) return;
+  REP.value = n;
+  drawRepSheet();
+}
 function repInput(v){
   if(!REP) return;
   let n=parseInt(v,10); if(isNaN(n)) n=0;
@@ -840,20 +850,38 @@ function drawRepSheet(){
   const sheet=document.getElementById('sheet'); if(!sheet||!REP) return;
   const t=S.tasks.find(x=>x.id===REP.id); if(!t){ REP=null; return; }
   const pos=REP.sign>0;
-  const q=pos?[{l:'+3',v:3},{l:'+6',v:6},{l:'+8',v:8}]:[{l:'−3',v:-3},{l:'−6',v:-6},{l:'−8',v:-8}];
-  const quick=q.map(o=>'<button type="button" class="repQuick" onclick="repQuick('+o.v+')">'+o.l+'</button>').join('');
-  let h='<h3 style="margin:0 0 4px">Log reps</h3>';
-  h+='<div class="small" style="margin-bottom:12px">'+esc(t.title)+'</div>';
-  h+='<div class="repRow">';
-  h+='<button type="button" class="repSide" onclick="repAdjust(-1)" aria-label="remove one">−</button>';
-  h+='<input type="number" id="repInput" class="repInput" value="'+(REP.value||0)+'" oninput="repInput(this.value)">';
-  h+='<button type="button" class="repSide" onclick="repAdjust(1)" aria-label="add one">+</button>';
-  h+='</div>';
-  h+='<div class="repQuickRow">'+quick+'</div>';
-  h+='<div class="repActions">';
-  h+='<button type="button" class="btn ghost" onclick="closeRepSheet()">✕ Cancel</button>';
-  h+='<button type="button" class="btn primary" id="repConfirm" onclick="commitReps()"'+((REP.value===0)?' disabled':'')+'>✓ Confirm</button>';
-  h+='</div>';
+  
+  // Generate quick select buttons from +/- 2 up to +/- 10
+  const q = [];
+  for (let i = 2; i <= 10; i++) {
+    q.push({
+      l: pos ? '+' + i : '−' + i,
+      v: pos ? i : -i
+    });
+  }
+  
+  const quick = q.map(o => {
+    const isSelected = REP.value === o.v;
+    const cls = 'repQuick' + (isSelected ? ' on' : '');
+    return '<button type="button" class="' + cls + '" onclick="repQuick(' + o.v + ')">' + o.l + '</button>';
+  }).join('');
+  
+  let h = '<div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px">';
+  h += '  <div style="min-width:0; flex:1">';
+  h += '    <h3 style="margin:0 0 2px; font-size:16px; font-weight:700">Log reps</h3>';
+  h += '    <div class="small" style="margin:0; text-overflow:ellipsis; overflow:hidden; white-space:nowrap" title="' + esc(t.title) + '">' + esc(t.title) + '</div>';
+  h += '  </div>';
+  h += '  <button type="button" class="btn primary" id="repConfirm" onclick="commitReps()" style="flex:none; width:auto; padding:0 16px; height:32px; font-size:13px" ' + ((REP.value === 0) ? 'disabled' : '') + '>Confirm</button>';
+  h += '</div>';
+  
+  h += '<div class="repRow" style="margin-top:10px">';
+  h += '  <button type="button" class="repSide" onclick="repAdjust(-1)" aria-label="remove one">−</button>';
+  h += '  <input type="number" id="repInput" class="repInput" value="' + (REP.value || 0) + '" oninput="repInput(this.value)">';
+  h += '  <button type="button" class="repSide" onclick="repAdjust(1)" aria-label="add one">+</button>';
+  h += '</div>';
+  
+  h += '<div class="repQuickRow">' + quick + '</div>';
+  
   sheet.innerHTML=h;
 }
 // Adjust the habit counter from the editor sheet. Reward/penalty application
@@ -916,6 +944,8 @@ function creditYesterday(t){
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
   t.updatedAt = Date.now();
+  t.doneAt = Date.now() - 86400000; // F3: backdated to match the history point below (yMs) — this IS yesterday's completion
+  delete t.missedOn;
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };
   t.streak = (t.streak||0) + 1;
   const cl=(t.checklist||[]);
@@ -987,9 +1017,10 @@ function runCron(){
   const today = dayStamp(new Date());
   if(S.lastCron === today) return;
   const dow = new Date().getDay();
+  const yesterdayStamp = dayStamp(new Date(Date.now() - 86400000)); // F3: device-local calendar day before today, for t.missedOn
   let totalDmg = 0;
   S.tasks.forEach(t=>{
-    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; t.updatedAt=Date.now(); } return; }
+    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; } return; } // F3 (2026-07-11): cron no longer bumps updatedAt — see .omo/plans/2026-07-11-cron-merge-recency.md §3.1.4
     if(t.type!=='daily') return;
     const scheduledYesterday = isDailyDueOn(t, (dow+6)%7);  // intentional YESTERDAY test — do NOT use isDailyDueToday
     if(scheduledYesterday && !t.done){
@@ -997,6 +1028,7 @@ function runCron(){
       totalDmg += dmg;
       t.value = clamp(t.value - valueDelta(t.value), -47.27, 99);
       t.streak = 0;
+      t.missedOn = yesterdayStamp; // F3 (2026-07-11): recency channel for cron-aware merge — cleared on completion/credit
       logHistory(t,{value:t.value,completed:false,isDue:true,repeat:(t.repeat||[]).slice()});
       const cl=(t.checklist||[]);
       logEvent({kind:'miss', taskType:'daily', taskId:t.id, taskTitle:t.title,
@@ -1006,7 +1038,10 @@ function runCron(){
     }
     t.done = false;
     (t.checklist||[]).forEach(c=>c.done=false);
-    t.updatedAt = Date.now();
+    // F3 (2026-07-11): no updatedAt bump here any more — cron is a deterministic
+    // day-boundary transform, not a user edit; recency must encode user intent
+    // only, or it swallows same-day completions in mergeCollection's both-changed
+    // tiebreak (see .omo/plans/2026-07-11-cron-merge-recency.md §1-§3).
   });
   S.lastCron = today;
   if(totalDmg>0){ takeDamage(totalDmg); toast('-'+totalDmg.toFixed(1)+' HP (missed dailies)'); }
@@ -3328,8 +3363,9 @@ function drawSheet(){
   }
   h+='<button type="button" onclick="copyEditTask()" title="Copy title, checklist & notes" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.3;padding:0 4px;line-height:1;color:inherit">⧉</button></div>';
   h+='<label>Title</label><input type="text" id="eTitle" value="'+esc(t.title)+'" placeholder="What needs doing?">';
+  const diffOpts = t.type==='habit' ? ['trivial','easy','medium','hard','log'] : ['trivial','easy','medium','hard'];
   h+='<label>Difficulty</label><div class="seg" id="eDiff">'+
-    ['trivial','easy','medium','hard','log'].map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
+    diffOpts.map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
   if(t.type==='habit'){
     h+='<label>Buttons</label><div class="seg">'+
       '<button class="'+(t.up!==false?'on':'')+'" onclick="EDIT.up=!(EDIT.up!==false);drawSheet()">+ Positive</button>'+
@@ -4334,7 +4370,7 @@ startDay();
 updateHeaderHeightVar();
 if(typeof syncInit==="function") syncInit();
 if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('sw.js')
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
     .then(() => { startReminderScheduler(); })
     .catch(()=>{ startReminderScheduler(); });
 } else {

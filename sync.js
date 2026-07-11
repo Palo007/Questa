@@ -224,9 +224,13 @@ async function dbxDownload(path, _retriedAuth){
     return dbxDownload(path, true);
   }
   if(res.status === 409){
-    // Dropbox 409 on download covers "path/not_found" and similar — treat all
-    // as "nothing uploaded yet", which is the only 409 case we expect here.
-    return null;
+    // F6 (2026-07-11): only path/not_found means "nothing uploaded yet". Any
+    // other 409 (e.g. restricted_content) must surface as an error, not be
+    // misread as an empty remote. Unreadable body keeps legacy behavior.
+    let summary = "";
+    try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
+    if(!summary || summary.indexOf("not_found") !== -1) return null;
+    throw new HttpError("download failed: 409 " + summary.slice(0, 200), 409);
   }
   if(!res.ok){
     // Surface Dropbox's actual error body (e.g. "missing_scope",
@@ -351,6 +355,11 @@ function syncApply(subset){
   const _before = (typeof syncSubset === "function") ? stableStringify(syncSubset()) : null;
   SYNC_APPLYING = true;
   try{
+    // FIX 2026-07-11: deep-copy the incoming subset so S never shares object
+    // identity with the caller's merged state. Without this, user edits during
+    // an in-flight upload mutate the pending base snapshot (base poisoning —
+    // see .omo/plans/2026-07-11-todo-completion-revert-analysis.md §2).
+    subset = JSON.parse(JSON.stringify(subset));
     S.char = subset.char || S.char;
     S.tasks = subset.tasks;
     S.rewards = Array.isArray(subset.rewards) ? subset.rewards : [];
@@ -392,11 +401,15 @@ function syncBaseGet(){
   })).catch(() => null);
 }
 function syncBasePut(subset){
+  // Accepts an object OR a pre-serialized JSON string (fix 2026-07-11).
+  // Serializing HERE, before the idbOpen await, also closes the small window
+  // where object callers could be mutated during that await.
+  const payload = (typeof subset === "string") ? subset : JSON.stringify(subset);
   if(typeof idbOpen !== "function") return Promise.resolve(false);
   return idbOpen().then(db => new Promise((resolve) => {
     try{
       const tx = db.transaction("syncmeta", "readwrite");
-      tx.objectStore("syncmeta").put(JSON.stringify(subset), "base");
+      tx.objectStore("syncmeta").put(payload, "base");
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => resolve(false);
       tx.onabort = () => resolve(false);
@@ -419,6 +432,67 @@ function syncBasePut(subset){
 // pushed) vs Date.now() (this device, pushing now). In practice this means
 // "whichever device syncs most recently wins the tie" — a reasonable proxy
 // given the plan already classifies a few lost XP/gold here as acceptable.
+// ---- F3 (2026-07-11) daily-aware conflict resolution -----------------------
+// See .omo/plans/2026-07-11-cron-merge-recency.md. Cron (app.js runCron) no
+// longer bumps t.updatedAt on reset/miss -- it is a deterministic day-boundary
+// transform, not a user edit. That means updatedAt alone can no longer
+// arbitrate a completion-vs-reset conflict for dailies in mergeCollection's
+// both-changed branch; these two fields carry that signal instead:
+//   t.doneAt   -- ms timestamp of the last time this daily was marked done
+//                 (completeTask / creditYesterday backdated); cleared on uncheck.
+//   t.missedOn -- dayStamp() int of the last day runCron judged this daily
+//                 missed; cleared on completion/credit.
+function dayStampOf(ms){
+  if(!ms) return 0;
+  const d = new Date(ms);
+  return d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate();
+}
+function dailyEventDay(x){
+  if(!x) return 0;
+  return Math.max(dayStampOf(x.doneAt || 0), x.missedOn || 0);
+}
+// Both-changed-both-present tiebreak for type==='daily' entries only (called
+// from mergeCollection below). Pure function of (l, r) -- no S/base access --
+// so conflict-retry re-merges stay convergent (analysis Sec5/Sec8 invariant).
+function resolveDailyConflict(l, r){
+  const led = dailyEventDay(l), red = dailyEventDay(r);
+  if(led !== red) return led > red ? l : r; // rule 1: newer event day wins
+  // rule 2: same event day -- a completion beats a miss recorded for that same
+  // day (the miss was, by definition, computed from stale data on that side).
+  const lDoneToday = !!(l && led && dayStampOf(l.doneAt || 0) === led);
+  const rDoneToday = !!(r && red && dayStampOf(r.doneAt || 0) === red);
+  const lMissToday = !!(l && led && (l.missedOn || 0) === led);
+  const rMissToday = !!(r && red && (r.missedOn || 0) === red);
+  if(lDoneToday && rMissToday && !rDoneToday){
+    if(typeof logEvent === "function") logEvent({kind:'missReverted', taskType:'daily', taskId:l.id, taskTitle:l.title, day:led});
+    return l;
+  }
+  if(rDoneToday && lMissToday && !lDoneToday){
+    if(typeof logEvent === "function") logEvent({kind:'missReverted', taskType:'daily', taskId:r.id, taskTitle:r.title, day:red});
+    return r;
+  }
+  // rule 3: no day-level signal distinguishes them -- fall back to the original
+  // updatedAt tiebreak (remote wins on tie/missing), unchanged from before F3.
+  const lu = (l && l.updatedAt) || 0, ru = (r && r.updatedAt) || 0;
+  return lu > ru ? l : r;
+}
+// Idempotent post-decision overlay applied to EVERY merged daily regardless of
+// which mergeCollection branch produced it (one-sided branches can also carry
+// a stale done=true from a device that hasn't cronned past it yet). Pure: does
+// not mutate its input.
+function normalizeDailyResets(tasks, mergedLastCron){
+  if(!Array.isArray(tasks)) return tasks;
+  return tasks.map(t=>{
+    if(!t || t.type!=='daily' || !t.done) return t;
+    if(dayStampOf(t.doneAt || 0) < (mergedLastCron || 0)){
+      const nt = Object.assign({}, t, {done:false});
+      if(Array.isArray(t.checklist)) nt.checklist = t.checklist.map(c=>Object.assign({}, c, {done:false}));
+      return nt;
+    }
+    return t;
+  });
+}
+
 function mergeCollection(baseArr, localArr, remoteArr){
   const baseMap = new Map((baseArr || []).map(x => [x.id, x]));
   const localMap = new Map((localArr || []).map(x => [x.id, x]));
@@ -450,7 +524,15 @@ function mergeCollection(baseArr, localArr, remoteArr){
     if(localHad && !remoteHad){ resultMap.set(id, l); return; }   // remote deleted, local modified -> modification wins
     if(!localHad && remoteHad){ resultMap.set(id, r); return; }   // local deleted, remote modified -> modification wins
     if(!localHad && !remoteHad) return;                            // both deleted -> stays deleted
-    // both modified and both still present -> updatedAt tiebreak (remote wins on tie/missing)
+    // both modified and both still present -> daily-aware tiebreak (F3, 2026-07-11):
+    // cron no longer bumps updatedAt (app.js runCron), so a plain updatedAt race
+    // can't arbitrate completion-vs-reset conflicts for dailies any more; hand
+    // those off to resolveDailyConflict (doneAt/missedOn channel). Every other
+    // type (todos, habits, rewards, tags, an.views/metrics) is unaffected.
+    if((l && l.type==='daily') || (r && r.type==='daily')){
+      resultMap.set(id, resolveDailyConflict(l, r));
+      return;
+    }
     const lu = (l && l.updatedAt) || 0;
     const ru = (r && r.updatedAt) || 0;
     resultMap.set(id, lu > ru ? l : r);
@@ -564,8 +646,13 @@ function merge(base, local, remote, remoteSavedAt){
   remote = remote || {};
   const baseAn = base.an || {}, localAn = local.an || {}, remoteAn = remote.an || {};
 
+  const mergedLastCron = (function(){
+    const l = local.lastCron || 0, r = remote.lastCron || 0;
+    return l >= r ? l : r; // dayStamp() is a lexically-sortable integer (YYYYMMDD-ish) -> plain max
+  })();
+
   const merged = {
-    tasks: mergeCollection(base.tasks, local.tasks, remote.tasks),
+    tasks: normalizeDailyResets(mergeCollection(base.tasks, local.tasks, remote.tasks), mergedLastCron), // F3 (2026-07-11): reset overlay keyed to merged lastCron
     rewards: mergeCollection(base.rewards, local.rewards, remote.rewards),
     tags: mergeCollection(base.tags, local.tags, remote.tags),
     devices: mergeDevices(base.devices, local.devices, remote.devices),
@@ -575,10 +662,7 @@ function merge(base, local, remote, remoteSavedAt){
     },
     history: mergeDayArray(local.history, remote.history),
     charHistory: mergeDayArray(local.charHistory, remote.charHistory),
-    lastCron: (function(){
-      const l = local.lastCron || 0, r = remote.lastCron || 0;
-      return l >= r ? l : r; // dayStamp() is a lexically-sortable integer (YYYYMMDD-ish) -> plain max
-    })(),
+    lastCron: mergedLastCron,
     char: (function(){
       const b = base.char || {}, l = local.char || {}, r = remote.char || {};
       const localChanged = !deepEqual(l, b);
@@ -586,7 +670,11 @@ function merge(base, local, remote, remoteSavedAt){
       if(!localChanged && !remoteChanged) return b;
       if(localChanged && !remoteChanged) return l;
       if(!localChanged && remoteChanged) return r;
-      return (Date.now() > (remoteSavedAt || 0)) ? l : r; // see JUDGMENT CALL note above
+      // F2 (2026-07-11): the old expression `Date.now() > remoteSavedAt` was
+      // always true for any past savedAt, so both-changed char ALWAYS took
+      // local in practice. Made explicit — local wins. (This also removes the
+      // pathological case where a future-skewed remote clock silently won.)
+      return l;
     })()
   };
   return merged;
@@ -644,18 +732,24 @@ async function _syncNowAttempt(transientRetryCount){
 
     syncApply(merged);
 
+    // FIX 2026-07-11: freeze ONE serialization of merged before any await.
+    // This exact string is the single source for BOTH the upload body and the
+    // base snapshot, so base ≡ uploaded remote content by construction.
+    const mergedJson = JSON.stringify(merged);
+
     const baseStr = base ? stableStringify(base) : null;
     const remoteStr = remote ? stableStringify(remote.state) : null;
     const mergedStr = stableStringify(merged);
     const nothingToPush = (mergedStr === remoteStr) && (mergedStr === baseStr);
 
     if(nothingToPush){
-      await syncBasePut(merged);
-      syncCfgSave({ lastSyncAt: Date.now(), lastError: null, lastRev: remote ? remote.rev : cfgRevOrNull() });
+      const baseOk = await syncBasePut(mergedJson);
+      syncCfgSave({ lastSyncAt: Date.now(), lastRev: remote ? remote.rev : cfgRevOrNull(),
+                    lastError: baseOk ? null : "base snapshot write failed — sync degraded" });
       return;
     }
 
-    await _pushWithConflictRetry(merged, remote ? remote.rev : null, 0);
+    await _pushWithConflictRetry(mergedJson, remote ? remote.rev : null, 0);
   }catch(e){
     if(e && e.status && (e.status === 429 || e.status >= 500) && transientRetryCount < SYNC_TRANSIENT_RETRY_DELAYS_MS.length){
       await new Promise(r => setTimeout(r, SYNC_TRANSIENT_RETRY_DELAYS_MS[transientRetryCount]));
@@ -667,11 +761,15 @@ async function _syncNowAttempt(transientRetryCount){
 
 function cfgRevOrNull(){ return syncCfg().lastRev || null; }
 
-async function _pushWithConflictRetry(merged, knownRev, attempt){
+async function _pushWithConflictRetry(mergedJson, knownRev, attempt){
   try{
-    const up = await dbxUpload(STATE_PATH, wrap(merged), knownRev);
-    await syncBasePut(merged);
-    syncCfgSave({ lastRev: up.rev || null, lastSyncAt: Date.now(), lastError: null });
+    // mergedJson is a FROZEN string (fix 2026-07-11). The upload body wraps a
+    // detached parse of it, and the base snapshot stores the string verbatim —
+    // nothing the user does mid-upload can make the two diverge.
+    const up = await dbxUpload(STATE_PATH, wrap(JSON.parse(mergedJson)), knownRev);
+    const baseOk = await syncBasePut(mergedJson);
+    syncCfgSave({ lastRev: up.rev || null, lastSyncAt: Date.now(),
+                  lastError: baseOk ? null : "base snapshot write failed — sync degraded" });
   }catch(e){
     if(e instanceof ConflictError && attempt < SYNC_CONFLICT_RETRY_LIMIT){
       const fresh = await dbxDownload(STATE_PATH);
@@ -679,7 +777,7 @@ async function _pushWithConflictRetry(merged, knownRev, attempt){
       const local = syncSubset();
       const reMerged = fresh ? merge(base, local, fresh.state, fresh.savedAt) : local;
       syncApply(reMerged);
-      return _pushWithConflictRetry(reMerged, fresh ? fresh.rev : null, attempt + 1);
+      return _pushWithConflictRetry(JSON.stringify(reMerged), fresh ? fresh.rev : null, attempt + 1);
     }
     if(e instanceof ConflictError){
       syncCfgSave({ lastError: "sync conflict — retry later" });
@@ -951,7 +1049,12 @@ async function dbxDownloadRaw(path, _retriedAuth){
     headers: { "Authorization": "Bearer " + tok, "Dropbox-API-Arg": dbxArgHeader({ path: path }) }
   });
   if(res.status === 401 && !_retriedAuth){ await syncToken(true); return dbxDownloadRaw(path, true); }
-  if(res.status === 409) return null;
+  if(res.status === 409){
+    let summary = "";
+    try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
+    if(!summary || summary.indexOf("not_found") !== -1) return null;
+    throw new HttpError("download failed: 409 " + summary.slice(0, 200), 409);
+  }
   if(!res.ok){
     let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
     throw new HttpError("download failed: " + res.status + (detail ? " " + detail : ""), res.status);
@@ -974,7 +1077,12 @@ async function dbxListFolder(path, _retriedAuth){
       body: JSON.stringify(body)
     });
     if(res.status === 401 && !_retriedAuth){ await syncToken(true); return dbxListFolder(path, true); }
-    if(res.status === 409) return []; // path/not_found — no events uploaded yet
+    if(res.status === 409){
+      let summary = "";
+      try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
+      if(!summary || summary.indexOf("not_found") !== -1) return []; // no events uploaded yet
+      throw new HttpError("list failed: 409 " + summary.slice(0, 200), 409);
+    }
     if(!res.ok){
       let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
       throw new HttpError("list failed: " + res.status + (detail ? " " + detail : ""), res.status);
@@ -1176,6 +1284,9 @@ if(typeof window !== "undefined"){
     cfg: syncCfg,
     merge: merge, // exposed so it can be unit-tested from the browser console too
     mergeCollection: mergeCollection,
+    resolveDailyConflict: resolveDailyConflict, // F3 (2026-07-11): daily-aware both-changed tiebreak, exposed for unit tests
+    normalizeDailyResets: normalizeDailyResets, // F3 (2026-07-11): reset overlay, exposed for unit tests
+    dailyEventDay: dailyEventDay,
     mergeDevices: mergeDevices,
     cleanDevices: cleanDevices,
     mergeDayArray: mergeDayArray,

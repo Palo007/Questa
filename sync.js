@@ -432,6 +432,67 @@ function syncBasePut(subset){
 // pushed) vs Date.now() (this device, pushing now). In practice this means
 // "whichever device syncs most recently wins the tie" — a reasonable proxy
 // given the plan already classifies a few lost XP/gold here as acceptable.
+// ---- F3 (2026-07-11) daily-aware conflict resolution -----------------------
+// See .omo/plans/2026-07-11-cron-merge-recency.md. Cron (app.js runCron) no
+// longer bumps t.updatedAt on reset/miss -- it is a deterministic day-boundary
+// transform, not a user edit. That means updatedAt alone can no longer
+// arbitrate a completion-vs-reset conflict for dailies in mergeCollection's
+// both-changed branch; these two fields carry that signal instead:
+//   t.doneAt   -- ms timestamp of the last time this daily was marked done
+//                 (completeTask / creditYesterday backdated); cleared on uncheck.
+//   t.missedOn -- dayStamp() int of the last day runCron judged this daily
+//                 missed; cleared on completion/credit.
+function dayStampOf(ms){
+  if(!ms) return 0;
+  const d = new Date(ms);
+  return d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate();
+}
+function dailyEventDay(x){
+  if(!x) return 0;
+  return Math.max(dayStampOf(x.doneAt || 0), x.missedOn || 0);
+}
+// Both-changed-both-present tiebreak for type==='daily' entries only (called
+// from mergeCollection below). Pure function of (l, r) -- no S/base access --
+// so conflict-retry re-merges stay convergent (analysis Sec5/Sec8 invariant).
+function resolveDailyConflict(l, r){
+  const led = dailyEventDay(l), red = dailyEventDay(r);
+  if(led !== red) return led > red ? l : r; // rule 1: newer event day wins
+  // rule 2: same event day -- a completion beats a miss recorded for that same
+  // day (the miss was, by definition, computed from stale data on that side).
+  const lDoneToday = !!(l && led && dayStampOf(l.doneAt || 0) === led);
+  const rDoneToday = !!(r && red && dayStampOf(r.doneAt || 0) === red);
+  const lMissToday = !!(l && led && (l.missedOn || 0) === led);
+  const rMissToday = !!(r && red && (r.missedOn || 0) === red);
+  if(lDoneToday && rMissToday && !rDoneToday){
+    if(typeof logEvent === "function") logEvent({kind:'missReverted', taskType:'daily', taskId:l.id, taskTitle:l.title, day:led});
+    return l;
+  }
+  if(rDoneToday && lMissToday && !lDoneToday){
+    if(typeof logEvent === "function") logEvent({kind:'missReverted', taskType:'daily', taskId:r.id, taskTitle:r.title, day:red});
+    return r;
+  }
+  // rule 3: no day-level signal distinguishes them -- fall back to the original
+  // updatedAt tiebreak (remote wins on tie/missing), unchanged from before F3.
+  const lu = (l && l.updatedAt) || 0, ru = (r && r.updatedAt) || 0;
+  return lu > ru ? l : r;
+}
+// Idempotent post-decision overlay applied to EVERY merged daily regardless of
+// which mergeCollection branch produced it (one-sided branches can also carry
+// a stale done=true from a device that hasn't cronned past it yet). Pure: does
+// not mutate its input.
+function normalizeDailyResets(tasks, mergedLastCron){
+  if(!Array.isArray(tasks)) return tasks;
+  return tasks.map(t=>{
+    if(!t || t.type!=='daily' || !t.done) return t;
+    if(dayStampOf(t.doneAt || 0) < (mergedLastCron || 0)){
+      const nt = Object.assign({}, t, {done:false});
+      if(Array.isArray(t.checklist)) nt.checklist = t.checklist.map(c=>Object.assign({}, c, {done:false}));
+      return nt;
+    }
+    return t;
+  });
+}
+
 function mergeCollection(baseArr, localArr, remoteArr){
   const baseMap = new Map((baseArr || []).map(x => [x.id, x]));
   const localMap = new Map((localArr || []).map(x => [x.id, x]));
@@ -463,7 +524,15 @@ function mergeCollection(baseArr, localArr, remoteArr){
     if(localHad && !remoteHad){ resultMap.set(id, l); return; }   // remote deleted, local modified -> modification wins
     if(!localHad && remoteHad){ resultMap.set(id, r); return; }   // local deleted, remote modified -> modification wins
     if(!localHad && !remoteHad) return;                            // both deleted -> stays deleted
-    // both modified and both still present -> updatedAt tiebreak (remote wins on tie/missing)
+    // both modified and both still present -> daily-aware tiebreak (F3, 2026-07-11):
+    // cron no longer bumps updatedAt (app.js runCron), so a plain updatedAt race
+    // can't arbitrate completion-vs-reset conflicts for dailies any more; hand
+    // those off to resolveDailyConflict (doneAt/missedOn channel). Every other
+    // type (todos, habits, rewards, tags, an.views/metrics) is unaffected.
+    if((l && l.type==='daily') || (r && r.type==='daily')){
+      resultMap.set(id, resolveDailyConflict(l, r));
+      return;
+    }
     const lu = (l && l.updatedAt) || 0;
     const ru = (r && r.updatedAt) || 0;
     resultMap.set(id, lu > ru ? l : r);
@@ -577,8 +646,13 @@ function merge(base, local, remote, remoteSavedAt){
   remote = remote || {};
   const baseAn = base.an || {}, localAn = local.an || {}, remoteAn = remote.an || {};
 
+  const mergedLastCron = (function(){
+    const l = local.lastCron || 0, r = remote.lastCron || 0;
+    return l >= r ? l : r; // dayStamp() is a lexically-sortable integer (YYYYMMDD-ish) -> plain max
+  })();
+
   const merged = {
-    tasks: mergeCollection(base.tasks, local.tasks, remote.tasks),
+    tasks: normalizeDailyResets(mergeCollection(base.tasks, local.tasks, remote.tasks), mergedLastCron), // F3 (2026-07-11): reset overlay keyed to merged lastCron
     rewards: mergeCollection(base.rewards, local.rewards, remote.rewards),
     tags: mergeCollection(base.tags, local.tags, remote.tags),
     devices: mergeDevices(base.devices, local.devices, remote.devices),
@@ -588,10 +662,7 @@ function merge(base, local, remote, remoteSavedAt){
     },
     history: mergeDayArray(local.history, remote.history),
     charHistory: mergeDayArray(local.charHistory, remote.charHistory),
-    lastCron: (function(){
-      const l = local.lastCron || 0, r = remote.lastCron || 0;
-      return l >= r ? l : r; // dayStamp() is a lexically-sortable integer (YYYYMMDD-ish) -> plain max
-    })(),
+    lastCron: mergedLastCron,
     char: (function(){
       const b = base.char || {}, l = local.char || {}, r = remote.char || {};
       const localChanged = !deepEqual(l, b);
@@ -1213,6 +1284,9 @@ if(typeof window !== "undefined"){
     cfg: syncCfg,
     merge: merge, // exposed so it can be unit-tested from the browser console too
     mergeCollection: mergeCollection,
+    resolveDailyConflict: resolveDailyConflict, // F3 (2026-07-11): daily-aware both-changed tiebreak, exposed for unit tests
+    normalizeDailyResets: normalizeDailyResets, // F3 (2026-07-11): reset overlay, exposed for unit tests
+    dailyEventDay: dailyEventDay,
     mergeDevices: mergeDevices,
     cleanDevices: cleanDevices,
     mergeDayArray: mergeDayArray,

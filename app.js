@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.11-0953";
+const APP_VERSION = "v2026.07.11-1007";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -690,6 +690,8 @@ function completeTask(t, ev){
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
   t.updatedAt = Date.now();
+  t.doneAt = Date.now(); // F3 (2026-07-11): completion-day channel for cron-aware merge; see sync.js resolveDailyConflict/.omo/plans/2026-07-11-cron-merge-recency.md
+  delete t.missedOn;
   buzz(50);
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };  // remember exactly what was granted
   if(t.type==='daily'){ t.streak = (t.streak||0) + 1;
@@ -731,6 +733,7 @@ function uncompleteDaily(t){
   reverseGrant(t);
   unlogToday(t);
   t.done = false;
+  delete t.doneAt; // F3 (2026-07-11): unchecking retracts the completion-day claim
   if(t.type==='daily' && t.streak){ t.streak = Math.max(0, t.streak - 1); }
   t.updatedAt = Date.now(); // F1 (2026-07-11): unchecking is an edit — without this it loses every both-changed merge tiebreak
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
@@ -741,6 +744,7 @@ function uncompleteTodo(t){
   reverseGrant(t);
   unlogToday(t);
   t.done = false;
+  delete t.doneAt; // F3 (2026-07-11): see uncompleteDaily
   t.updatedAt = Date.now(); // F1 (2026-07-11): see uncompleteDaily
   toast('Reverted');
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
@@ -918,6 +922,8 @@ function creditYesterday(t){
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
   t.updatedAt = Date.now();
+  t.doneAt = Date.now() - 86400000; // F3: backdated to match the history point below (yMs) — this IS yesterday's completion
+  delete t.missedOn;
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };
   t.streak = (t.streak||0) + 1;
   const cl=(t.checklist||[]);
@@ -989,9 +995,10 @@ function runCron(){
   const today = dayStamp(new Date());
   if(S.lastCron === today) return;
   const dow = new Date().getDay();
+  const yesterdayStamp = dayStamp(new Date(Date.now() - 86400000)); // F3: device-local calendar day before today, for t.missedOn
   let totalDmg = 0;
   S.tasks.forEach(t=>{
-    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; t.updatedAt=Date.now(); } return; }
+    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; } return; } // F3 (2026-07-11): cron no longer bumps updatedAt — see .omo/plans/2026-07-11-cron-merge-recency.md §3.1.4
     if(t.type!=='daily') return;
     const scheduledYesterday = isDailyDueOn(t, (dow+6)%7);  // intentional YESTERDAY test — do NOT use isDailyDueToday
     if(scheduledYesterday && !t.done){
@@ -999,6 +1006,7 @@ function runCron(){
       totalDmg += dmg;
       t.value = clamp(t.value - valueDelta(t.value), -47.27, 99);
       t.streak = 0;
+      t.missedOn = yesterdayStamp; // F3 (2026-07-11): recency channel for cron-aware merge — cleared on completion/credit
       logHistory(t,{value:t.value,completed:false,isDue:true,repeat:(t.repeat||[]).slice()});
       const cl=(t.checklist||[]);
       logEvent({kind:'miss', taskType:'daily', taskId:t.id, taskTitle:t.title,
@@ -1008,7 +1016,10 @@ function runCron(){
     }
     t.done = false;
     (t.checklist||[]).forEach(c=>c.done=false);
-    t.updatedAt = Date.now();
+    // F3 (2026-07-11): no updatedAt bump here any more — cron is a deterministic
+    // day-boundary transform, not a user edit; recency must encode user intent
+    // only, or it swallows same-day completions in mergeCollection's both-changed
+    // tiebreak (see .omo/plans/2026-07-11-cron-merge-recency.md §1-§3).
   });
   S.lastCron = today;
   if(totalDmg>0){ takeDamage(totalDmg); toast('-'+totalDmg.toFixed(1)+' HP (missed dailies)'); }

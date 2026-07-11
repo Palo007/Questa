@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.11-2041";
+const APP_VERSION = "v2026.07.11-2146";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -178,6 +178,8 @@ let IS_DIRTY = false;
 let _flushPromise = null;
 var _prevCharSig = null;
 function _charSig(c){ if(!c) return ""; var o={}; for(var k in c){ if(k!=="updatedAt") o[k]=c[k]; } try{ return JSON.stringify(o); }catch(e){ return ""; } }
+/* BEGIN_DURABLE_STATE_HELPERS */
+let _stateWritePromise = null;
 function save(){
   var applying = (typeof syncIsApplying==="function" && syncIsApplying());
   // Stamp char.updatedAt only on a genuine user-driven char change (not while
@@ -190,9 +192,77 @@ function save(){
     _prevCharSig = _charSig(S.char);
   }
   IS_DIRTY = true;
-  localStorage.setItem(STORE_KEY, JSON.stringify(S));
+  // Durable-state stamps (2026-07-11 persistence-loss fix, Phase A): a
+  // monotonic __seq + wall-clock __savedAt on every S snapshot, so load()/
+  // reconcileDurableState() can tell a genuinely newer copy (IndexedDB) from a
+  // stale one (a localStorage write whose disk flush the OS never got to run
+  // before a kill), and Phase B's merge guard can recognize a whole-state-
+  // stale local. syncSubset() builds its own whitelisted-field object and
+  // never copies these two keys, so they never leak into base/remote/Dropbox.
+  S.__seq = (S.__seq || 0) + 1;
+  S.__savedAt = Date.now();
+  var _json = JSON.stringify(S);
+  if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'save:setItem:before', seq:S.__seq});
+  localStorage.setItem(STORE_KEY, _json);
+  if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'save:setItem:after', seq:S.__seq});
+  // Fire-and-forget durable mirror. IDB commits (oncomplete) far more
+  // reliably than localStorage's batched flush; this is the actual fix, not
+  // a backup of one. Exposed as _stateWritePromise so lifecycle handlers can
+  // best-effort wait on it.
+  _stateWritePromise = _idbWriteState(_json).catch(function(){ /* best-effort mirror */ });
   if(typeof scheduleSync==="function" && !applying) scheduleSync();
 }
+// ---- durable IDB mirror of S (Phase A, 2026-07-11 persistence-loss fix) ----
+function _idbWriteState(json){
+  return idbOpen().then(function(db){
+    return new Promise(function(resolve, reject){
+      try{
+        var tx = db.transaction("state", "readwrite");
+        tx.objectStore("state").put(json, "S");
+        tx.oncomplete = function(){ resolve(); };
+        tx.onerror = function(){ reject(tx.error || new Error("state write failed")); };
+        tx.onabort = function(){ reject(tx.error || new Error("state write aborted")); };
+      }catch(e){ reject(e); }
+    });
+  });
+}
+function _idbReadState(){
+  return idbOpen().then(function(db){
+    return new Promise(function(resolve){
+      try{
+        var tx = db.transaction("state", "readonly");
+        var req = tx.objectStore("state").get("S");
+        req.onsuccess = function(){ resolve(req.result || null); };
+        req.onerror = function(){ resolve(null); };
+      }catch(e){ resolve(null); }
+    });
+  }).catch(function(){ return null; });
+}
+// Reconciles the synchronous localStorage-based boot (load(), already run
+// above) against the durable IDB mirror. MUST resolve before syncInit()'s
+// first sync round captures `local` -- otherwise a stale reverted local can
+// be uploaded and permanently overwrite good remote/base data (the amplifier
+// documented in .omo/plans/2026-07-11-persistence-loss-fix-plan.md §1.2).
+// Never resurrects an OLDER IDB copy over a newer localStorage one (equal
+// __seq is a cheap no-op -- localStorage stays authoritative, no spurious
+// re-render on the common path).
+function reconcileDurableState(){
+  return _idbReadState().then(function(raw){
+    if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'reconcile:read', found: !!raw});
+    if(!raw) return;
+    var idbS;
+    try{ idbS = migrate(JSON.parse(raw)); }catch(e){ return; }
+    var idbSeq = Number(idbS.__seq) || 0;
+    var liveSeq = Number(S.__seq) || 0;
+    if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'reconcile:compare', idbSeq:idbSeq, liveSeq:liveSeq});
+    if(idbSeq > liveSeq){
+      S = idbS;
+      if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'reconcile:idb-won', idbSeq:idbSeq, liveSeq:liveSeq});
+      if(typeof render==="function") render();
+    }
+  }).catch(function(){ /* best-effort; boot proceeds on the localStorage copy */ });
+}
+/* END_DURABLE_STATE_HELPERS */
 // --- TEMP debug overlay (2026-07-11 recency-guard on-device diagnosis) -----
 // 5 taps on the version number in Settings within 3s opens an on-screen dump
 // of BASE (IndexedDB syncmeta.base) vs LIVE (S) task/device state, so this can
@@ -280,7 +350,7 @@ function showSyncDebugOverlay(){
 // One database ("questa"), one object store ("events"), keyed by an
 // auto-increment id, with indexes on ts, kind and taskId.
 const IDB_NAME = "questa";
-const IDB_VERSION = 3;
+const IDB_VERSION = 4;
 const EVENTS_STORE = "events";
 // Prune policy (see HISTORY-TRACKING.md): drop events older than this many
 // months, with a generous hard-count backstop. localStorage's old 5 MB quota
@@ -316,6 +386,11 @@ function idbOpen(){
       }
       if(!db.objectStoreNames.contains("syncmeta")){
         db.createObjectStore("syncmeta");
+      }
+      // Phase A (2026-07-11 persistence-loss fix): durable mirror of S. See
+      // .omo/plans/2026-07-11-persistence-loss-fix-plan.md §2.
+      if(!db.objectStoreNames.contains("state")){
+        db.createObjectStore("state");
       }
     };
     req.onsuccess = ()=>{ const db=req.result; resolve(db); schedulePrune(db); };
@@ -3090,7 +3165,12 @@ window.addEventListener('scroll',()=>{ if(_scrollT)return; _scrollT=setTimeout((
 // tap-triggered localStorage write is committed, reverting to an older snapshot on
 // relaunch (e.g. filter re-opens). Force a synchronous flush on the durable
 // 'page is going away' signals: visibilitychange->hidden and pagehide.
-function flushState(){ if(_scrollT){ clearTimeout(_scrollT); _scrollT=null; } saveScroll(); save(); }
+function flushState(){
+  if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'flushState', visibilityState:(typeof document!=="undefined"?document.visibilityState:'?')});
+  if(_scrollT){ clearTimeout(_scrollT); _scrollT=null; }
+  saveScroll();
+  save();
+}
 document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden') flushState(); });
 window.addEventListener('pagehide', flushState);
 // ---- drag & drop reordering (tasks + rewards), persisted to S ----
@@ -4762,6 +4842,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
 
 // Tier 1 backup: snapshot on visibility change if dirty
 document.addEventListener('visibilitychange', () => {
+  if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'tier1:visibilitychange', hidden:document.hidden, dirty:IS_DIRTY});
   if(document.hidden && IS_DIRTY){
     _flushPromise = listSnapshots().then(snapshots => {
       const hasBaseline = snapshots.some(s => s.type === "full");
@@ -4772,6 +4853,7 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 window.addEventListener('pagehide', () => {
+  if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'tier1:pagehide', dirty:IS_DIRTY});
   if(IS_DIRTY){
     _flushPromise = listSnapshots().then(snapshots => {
       const hasBaseline = snapshots.some(s => s.type === "full");

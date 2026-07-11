@@ -593,7 +593,7 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
 // so a future-skewed clock cannot win a guard or mint an undeletable record.
 function _ua(x){ var v = (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; return v > Date.now() + 120000 ? 0 : v; }
 function _ca(x){ var v = (x && Number(x.createdAt)) || 0; return v > Date.now() + 120000 ? 0 : v; }
-function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt){
+function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSavedAt){
   const baseMap = new Map((baseArr || []).map(x => [x.id, x]));
   const localMap = new Map((localArr || []).map(x => [x.id, x]));
   const remoteMap = new Map((remoteArr || []).map(x => [x.id, x]));
@@ -613,6 +613,24 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt){
       return;
     }
     if(localChanged && !remoteChanged){
+      // GUARD 3 (2026-07-11 persistence-loss fix, Phase B): `local` here is
+      // the WHOLE captured S snapshot, which on Android can be a stale
+      // localStorage revert (the disk flush the OS never got to run before a
+      // kill -- see .omo/plans/2026-07-11-persistence-loss-fix-plan.md §1).
+      // Without this guard, a reverted local looks exactly like a genuine
+      // edit/deletion and this branch happily propagates it -- including
+      // uploading it to Dropbox, i.e. permanent cross-device loss (the
+      // "amplifier" in the plan §1.2). Only fires when the caller supplies a
+      // real localSavedAt AND base's own record is at least as new as that
+      // whole-snapshot timestamp, i.e. local could not possibly have known
+      // about this record's current state -- so its disagreement is stale,
+      // not authoritative. A genuine edit/deletion always comes from a local
+      // snapshot saved AFTER the record it touched, so this never suppresses
+      // real user changes.
+      if(b && localSavedAt != null){
+        const staleLocal = localHad ? (_ua(b) >= Number(localSavedAt)) : (_ca(b) >= Number(localSavedAt));
+        if(staleLocal){ resultMap.set(id, b); return; }
+      }
       if(localHad) resultMap.set(id, l);
       return; // local edited/added or deleted; remote untouched -> local wins (incl. deletion)
     }
@@ -779,7 +797,7 @@ function mergeDayArray(localArr, remoteArr){
   return [...buckets.values()].sort((a, b) => (a.date || 0) - (b.date || 0));
 }
 
-function merge(base, local, remote, remoteSavedAt){
+function merge(base, local, remote, remoteSavedAt, localSavedAt){
   base = base || {};
   local = local || {};
   remote = remote || {};
@@ -791,13 +809,13 @@ function merge(base, local, remote, remoteSavedAt){
   })();
 
   const merged = {
-    tasks: normalizeDailyResets(mergeCollection(base.tasks, local.tasks, remote.tasks, remoteSavedAt), mergedLastCron), // F3 (2026-07-11): reset overlay keyed to merged lastCron
-    rewards: mergeCollection(base.rewards, local.rewards, remote.rewards, remoteSavedAt),
-    tags: mergeCollection(base.tags, local.tags, remote.tags, remoteSavedAt),
+    tasks: normalizeDailyResets(mergeCollection(base.tasks, local.tasks, remote.tasks, remoteSavedAt, localSavedAt), mergedLastCron), // F3 (2026-07-11): reset overlay keyed to merged lastCron
+    rewards: mergeCollection(base.rewards, local.rewards, remote.rewards, remoteSavedAt, localSavedAt),
+    tags: mergeCollection(base.tags, local.tags, remote.tags, remoteSavedAt, localSavedAt),
     devices: mergeDevices(base.devices, local.devices, remote.devices),
     an: {
-      views: mergeCollection(baseAn.views, localAn.views, remoteAn.views, remoteSavedAt),
-      metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics, remoteSavedAt)
+      views: mergeCollection(baseAn.views, localAn.views, remoteAn.views, remoteSavedAt, localSavedAt),
+      metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics, remoteSavedAt, localSavedAt)
     },
     history: mergeDayArray(local.history, remote.history),
     charHistory: mergeDayArray(local.charHistory, remote.charHistory),
@@ -869,8 +887,13 @@ async function _syncNowAttempt(transientRetryCount){
   try{
     const remote = await dbxDownload(STATE_PATH);
     const base = await syncBaseGet();
+    // Phase B (2026-07-11 persistence-loss fix): captured from the live S
+    // object (app.js global) BEFORE syncSubset() builds the whitelisted
+    // upload payload -- syncSubset() never copies __savedAt, by design, so it
+    // must be read here or not at all.
+    const localSavedAt = (typeof S !== "undefined" && S && S.__savedAt) || null;
     const local = syncSubset();
-    const merged = remote ? merge(base, local, remote.state, remote.savedAt) : local;
+    const merged = remote ? merge(base, local, remote.state, remote.savedAt, localSavedAt) : local;
 
     if(!merged || !Array.isArray(merged.tasks)){
       syncCfgSave({ lastError: "merge produced invalid state; sync aborted" });
@@ -921,8 +944,9 @@ async function _pushWithConflictRetry(mergedJson, knownRev, attempt){
     if(e instanceof ConflictError && attempt < SYNC_CONFLICT_RETRY_LIMIT){
       const fresh = await dbxDownload(STATE_PATH);
       const base = await syncBaseGet();
+      const localSavedAt = (typeof S !== "undefined" && S && S.__savedAt) || null;
       const local = syncSubset();
-      const reMerged = fresh ? merge(base, local, fresh.state, fresh.savedAt) : local;
+      const reMerged = fresh ? merge(base, local, fresh.state, fresh.savedAt, localSavedAt) : local;
       syncApply(reMerged);
       return _pushWithConflictRetry(JSON.stringify(reMerged), fresh ? fresh.rev : null, attempt + 1);
     }
@@ -1513,4 +1537,17 @@ if(typeof window !== "undefined"){
 // — by the time this file's own top-level code executes, app.js has already
 // finished running (same reason the app.js-side call was too early), so
 // everything either side needs is guaranteed to exist.
-syncInit();
+//
+/* BEGIN_BOOT_GATE */
+// Phase A ordering constraint (2026-07-11 persistence-loss fix): reconcile the
+// durable IndexedDB mirror of S against the possibly-stale localStorage boot
+// copy BEFORE syncInit()'s first sync round ever calls syncSubset() -- see
+// .omo/plans/2026-07-11-persistence-loss-fix-plan.md §2 step 4. If
+// reconcileDurableState (app.js) isn't available for any reason, fall back to
+// the old behavior rather than never booting sync at all.
+if(typeof reconcileDurableState === "function"){
+  reconcileDurableState().then(syncInit).catch(syncInit);
+} else {
+  syncInit();
+}
+/* END_BOOT_GATE */

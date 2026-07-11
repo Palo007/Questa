@@ -495,6 +495,98 @@ function normalizeDailyResets(tasks, mergedLastCron){
   });
 }
 
+// ---- F4 (2026-07-11) subtask-granular merge --------------------------------
+// Base-aware three-way per-subtask merge, keyed by stable item id. Called
+// from mergeCollection's both-changed-both-present branch (below) in place of
+// letting the whole-task winner silently discard the losing side's entire
+// checklist. Plan: .omo/plans/2026-07-11-subtask-granular-merge.md
+//
+// preferLocal: which side WON the enclosing task's whole-object tiebreak
+// (mergeCollection passes true iff its chosen winner === l). Used only (a) as
+// the last-resort tiebreak when a genuine same-field conflict has no usable
+// touchedAt evidence, and (b) to pick primary ordering. Defaults to false
+// (prefer remote) — matches the remote-wins-exact-ties convention used
+// throughout this file (resolveDailyConflict, mergeCollection, mergeDevices).
+function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
+  const baseMap = new Map((baseArr || []).filter(x => x && x.id != null).map(x => [x.id, x]));
+  const localArrSafe = (localArr || []).filter(x => x && x.id != null);
+  const remoteArrSafe = (remoteArr || []).filter(x => x && x.id != null);
+  const localMap = new Map(localArrSafe.map(x => [x.id, x]));
+  const remoteMap = new Map(remoteArrSafe.map(x => [x.id, x]));
+  // Union of LOCAL + REMOTE ids only -- base ids are never unioned in here,
+  // so an item deleted on both sides simply never appears (matches
+  // mergeCollection's own "both deleted -> stays deleted" rule).
+  const ids = new Set([...localMap.keys(), ...remoteMap.keys()]);
+
+  const resultMap = new Map();
+  ids.forEach(id => {
+    // null/undefined baseArr (first sync, post-force-push) -> baseMap is
+    // empty -> b is always null here -> every id below falls into "pure
+    // addition" (never "deletion"), per plan §1: no deletion inference
+    // without base evidence.
+    const b = baseMap.has(id) ? baseMap.get(id) : null;
+    const l = localMap.has(id) ? localMap.get(id) : null;
+    const r = remoteMap.has(id) ? remoteMap.get(id) : null;
+
+    if(l && r){
+      if(deepEqual(l, r)){ resultMap.set(id, l); return; }
+      const bText = b ? b.text : undefined;
+      const bDone = b ? !!b.done : undefined;
+      const lTextChanged = l.text !== bText, rTextChanged = r.text !== bText;
+      const lDoneChanged = !!l.done !== bDone, rDoneChanged = !!r.done !== bDone;
+      const lt = l.touchedAt || 0, rt = r.touchedAt || 0;
+      // text: exactly one side changed it from base -> take that side
+      // (matches mergeCollection's own one-sided-change rule, at field
+      // granularity); both changed it to the SAME value -> no conflict;
+      // both changed it to DIFFERENT values -> genuine conflict, resolved by
+      // touchedAt (higher wins; equal/missing falls back to preferLocal).
+      let text;
+      if(lTextChanged && !rTextChanged) text = l.text;
+      else if(!lTextChanged && rTextChanged) text = r.text;
+      else if(!lTextChanged && !rTextChanged) text = (bText !== undefined ? bText : (r.text != null ? r.text : l.text));
+      else if(l.text === r.text) text = l.text;
+      else if(lt !== rt) text = lt > rt ? l.text : r.text;
+      else text = preferLocal ? l.text : r.text;
+      // done: see the design note above -- a shared boolean base can't
+      // produce a genuine two-sided disagreement once both sides "changed"
+      // it; the touchedAt fallback below only fires for an inconsistent
+      // legacy/imported state, defensively.
+      let done;
+      if(lDoneChanged && !rDoneChanged) done = !!l.done;
+      else if(!lDoneChanged && rDoneChanged) done = !!r.done;
+      else if(!lDoneChanged && !rDoneChanged) done = (bDone !== undefined ? bDone : !!r.done);
+      else if(!!l.done === !!r.done) done = !!l.done;
+      else if(lt !== rt) done = lt > rt ? !!l.done : !!r.done;
+      else done = preferLocal ? !!l.done : !!r.done;
+      const touchedAt = Math.max(lt, rt);
+      const merged = Object.assign({}, preferLocal ? l : r, { id: id, text: text, done: done });
+      if(touchedAt) merged.touchedAt = touchedAt; else delete merged.touchedAt;
+      resultMap.set(id, merged);
+      return;
+    }
+
+    // present on exactly one side only
+    const survivor = l || r;
+    if(!b){ resultMap.set(id, survivor); return; } // pure addition, or null base -- never a deletion (plan §1)
+    // was in base, missing on the other side -> deletion, UNLESS the
+    // surviving side edited it strictly after the base snapshot -- edit wins.
+    const survivorTouchedAt = survivor.touchedAt || 0;
+    const baseTouchedAt = b.touchedAt || 0;
+    if(survivorTouchedAt > baseTouchedAt){ resultMap.set(id, survivor); return; }
+    // else: deletion wins -- item dropped, nothing added to resultMap
+  });
+
+  // Ordering: the winning parent's array order first, then the other side's
+  // pure additions appended in their original relative order.
+  const winnerArr = preferLocal ? localArrSafe : remoteArrSafe;
+  const otherArr = preferLocal ? remoteArrSafe : localArrSafe;
+  const out = [];
+  const placed = new Set();
+  winnerArr.forEach(x => { if(resultMap.has(x.id) && !placed.has(x.id)){ out.push(resultMap.get(x.id)); placed.add(x.id); } });
+  otherArr.forEach(x => { if(resultMap.has(x.id) && !placed.has(x.id)){ out.push(resultMap.get(x.id)); placed.add(x.id); } });
+  return out;
+}
+
 function mergeCollection(baseArr, localArr, remoteArr){
   const baseMap = new Map((baseArr || []).map(x => [x.id, x]));
   const localMap = new Map((localArr || []).map(x => [x.id, x]));
@@ -531,13 +623,27 @@ function mergeCollection(baseArr, localArr, remoteArr){
     // can't arbitrate completion-vs-reset conflicts for dailies any more; hand
     // those off to resolveDailyConflict (doneAt/missedOn channel). Every other
     // type (todos, habits, rewards, tags, an.views/metrics) is unaffected.
+    let winner;
     if((l && l.type==='daily') || (r && r.type==='daily')){
-      resultMap.set(id, resolveDailyConflict(l, r));
-      return;
+      winner = resolveDailyConflict(l, r);
+    } else {
+      const lu = (l && l.updatedAt) || 0;
+      const ru = (r && r.updatedAt) || 0;
+      winner = lu > ru ? l : r;
     }
-    const lu = (l && l.updatedAt) || 0;
-    const ru = (r && r.updatedAt) || 0;
-    resultMap.set(id, lu > ru ? l : r);
+    // F4 (2026-07-11): the whole-object winner above still discards the
+    // OTHER side's checklist wholesale. Splice in a per-subtask merge
+    // whenever either side carries a checklist array (todos and dailies;
+    // habits carry an always-empty one; rewards/tags/an.views/an.metrics have
+    // no checklist field at all, so Array.isArray guards them out here --
+    // this is intentionally NOT gated on task `type`).
+    if(Array.isArray(l && l.checklist) || Array.isArray(r && r.checklist)){
+      winner = Object.assign({}, winner, {
+        checklist: mergeChecklist(b && b.checklist, (l && l.checklist) || [], (r && r.checklist) || [], winner === l)
+      });
+    }
+    resultMap.set(id, winner);
+    return;
   });
 
   // Preserve LOCAL order; append remote-only entities at the end (plain end —
@@ -1329,6 +1435,7 @@ if(typeof window !== "undefined"){
     mergeCollection: mergeCollection,
     resolveDailyConflict: resolveDailyConflict, // F3 (2026-07-11): daily-aware both-changed tiebreak, exposed for unit tests
     normalizeDailyResets: normalizeDailyResets, // F3 (2026-07-11): reset overlay, exposed for unit tests
+    mergeChecklist: mergeChecklist, // F4 (2026-07-11): per-subtask merge, exposed for unit tests
     dailyEventDay: dailyEventDay,
     mergeDevices: mergeDevices,
     cleanDevices: cleanDevices,

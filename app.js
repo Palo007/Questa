@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.11-0255";
+const APP_VERSION = "v2026.07.11-1707";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -106,6 +106,21 @@ function load(){
     if(raw){ return migrate(JSON.parse(raw)); } }catch(e){}
   return freshState();
 }
+// F4 (2026-07-11): deterministic id for legacy checklist items that predate
+// per-item ids. MUST be pure (no Date.now()/Math.random()) so two devices
+// independently backfilling the SAME legacy item converge on the SAME id
+// instead of duplicating it at the next merge. Prefixed "lg-" so it can never
+// collide with a uid()-generated id (uid() never contains a hyphen: it is
+// Date.now().toString(36) concatenated directly with a base36 random suffix).
+// Keyed on (taskId, text, occurrence) rather than array index (AMENDMENT
+// 2026-07-11, after 452ad25 added subtask drag-reorder) so the id survives a
+// pure reorder: occurrence counts same-text duplicates, not position.
+function legacySubtaskId(taskId, text, occurrence){
+  const s = String(taskId) + '\x1f' + String(text || '') + '\x1f' + String(occurrence);
+  let h = 5381;
+  for(let i=0;i<s.length;i++){ h = ((h*33) ^ s.charCodeAt(i)) >>> 0; }
+  return 'lg-' + h.toString(36);
+}
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
   out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardThick:0, notificationsEnabled:false, saveBtnTop:false}, s.prefs||{});
@@ -129,6 +144,23 @@ function migrate(s){ const f=freshState();
   if(!Array.isArray(out.monthlyBackups)) out.monthlyBackups=[];
   delete out.events;
   if(Array.isArray(out.tasks)){ out.tasks.forEach(normalizeTaskReminders); }
+  // F4 (2026-07-11): backfill missing checklist-item ids deterministically so
+  // two devices converge on the same id for the same legacy item instead of
+  // duplicating it at the next sync (see .omo/plans/2026-07-11-subtask-granular-merge.md §3).
+  // occurrence = 0-based count of prior items with identical text in this
+  // checklist -- order-independent (a pure reorder of the checklist does not
+  // change the SET of (text, occurrence) pairs, only which physical item ends
+  // up holding which pair -- see the "same-text items swap ids" note below).
+  (out.tasks||[]).forEach(t=>{
+    const seenByText = new Map();
+    (t.checklist||[]).forEach(c=>{
+      if(!c) return;
+      const text = c.text || '';
+      const occurrence = seenByText.get(text) || 0;
+      seenByText.set(text, occurrence + 1);
+      if(!c.id) c.id = legacySubtaskId(t.id, text, occurrence);
+    });
+  });
   // Sync groundwork: every synced entity needs a deterministic updatedAt so
   // three-way merge (see sync.js) can tiebreak consistently, even for data
   // saved before this field existed.
@@ -1040,7 +1072,7 @@ function runCron(){
                 checklist:cl.map(c=>({id:c.id||null,text:c.text,done:!!c.done}))});
     }
     t.done = false;
-    (t.checklist||[]).forEach(c=>c.done=false);
+    (t.checklist||[]).forEach(c=>c.done=false); // F4 (2026-07-11): never stamps touchedAt here either — cron is not a user edit; see mergeChecklist (sync.js)
     // F3 (2026-07-11): no updatedAt bump here any more — cron is a deterministic
     // day-boundary transform, not a user edit; recency must encode user intent
     // only, or it swallows same-day completions in mergeCollection's both-changed
@@ -1136,10 +1168,14 @@ function toggleFilter(){
 function toggleSort(){ SORTOPEN=!SORTOPEN; S.prefs.sortOpen=SORTOPEN; save(); render(); }
 const EXPANDED={}; // taskId -> bool (checklist expanded on card)
 function toggleExpand(id){ EXPANDED[id]=!EXPANDED[id]; render(); }
-function toggleSub(taskId, idx){
-  const t=S.tasks.find(x=>x.id===taskId); if(!t||!t.checklist||!t.checklist[idx])return;
-  const c=t.checklist[idx];
+function toggleSub(taskId, subId, idxFallback){
+  const t=S.tasks.find(x=>x.id===taskId); if(!t||!t.checklist)return;
+  let c = (subId!=null) ? t.checklist.find(x=>x && x.id===subId) : null;
+  if(!c && idxFallback!=null) c = t.checklist[idxFallback]; // fallback: stale cached markup mid-deploy, or a subId that no longer exists
+  if(!c) return;
+  if(!c.id) c.id = uid(); // defensive backfill (F4 2026-07-11) — should not happen post-migration; see .omo/plans/2026-07-11-subtask-granular-merge.md §3
   c.done=!c.done;
+  c.touchedAt = Date.now(); // F4 (2026-07-11): per-subtask recency channel, consumed by mergeChecklist (sync.js)
   if(c.done) buzz(50);
   logEvent({kind:'subtask', taskId:t.id, taskTitle:t.title, taskType:t.type,
             subId:c.id||null, subText:c.text, done:c.done});
@@ -1151,7 +1187,7 @@ function checklistBlock(t){
   if(!EXPANDED[t.id]) return '';
   let h='<div class="sublist">';
   cl.forEach((c,i)=>{
-    h+='<div class="subitem" draggable="true" data-task-id="'+t.id+'" data-idx="'+i+'" onclick="event.stopPropagation();toggleSub(\''+t.id+'\','+i+')">'+
+    h+='<div class="subitem" draggable="true" data-task-id="'+t.id+'" data-idx="'+i+'" onclick="event.stopPropagation();toggleSub(\''+t.id+'\',\''+(c.id||'')+'\','+i+')">'+
        '<span class="subbox '+(c.done?'on':'')+'">'+(c.done?'✔':'')+'</span>'+
        '<span class="subtxt '+(c.done?'sdone':'')+'">'+esc(c.text)+'</span></div>';
   });
@@ -3763,6 +3799,18 @@ function saveTask(){
   if(EDIT.id){
     const idx=S.tasks.findIndex(x=>x.id===EDIT.id);
     const orig = S.tasks[idx];
+    // F4 (2026-07-11): id-based touchedAt stamping for mergeChecklist (sync.js).
+    // Independent of the index-based diff further below (that one only feeds
+    // the display-only edit-history event and stays untouched).
+    (function(){
+      const _origById = new Map((orig.checklist||[]).filter(c=>c&&c.id!=null).map(c=>[c.id,c]));
+      (EDIT.checklist||[]).forEach(c=>{
+        if(!c) return;
+        if(!c.id) c.id = uid(); // defensive backfill (F4 2026-07-11) — mirrors toggleSub, see .omo/plans/2026-07-11-subtask-granular-merge.md §3
+        const o = _origById.get(c.id);
+        if(!o || (o.text||'')!==(c.text||'') || !!o.done!==!!c.done) c.touchedAt = Date.now();
+      });
+    })();
     const upDelta = (EDIT.cUp||0) - (orig.cUp||0);
     const downDelta = (EDIT.cDown||0) - (orig.cDown||0);
     S.tasks[idx]=EDIT;

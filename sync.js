@@ -1212,14 +1212,18 @@ function evtParseFileName(name){
 // Own not-yet-uploaded events: stamped, mine, real (not synthetic), newer than
 // the watermark.
 function evtUploadable(events, myDev, sinceTs){
+  // 'lifecycle' is a local-only diagnostic kind (Phase C, 2026-07-11) and
+  // must never be pushed to Dropbox -- it would spam every other device's
+  // Activity Feed too (see app.js getEvents() for the read-side filter and
+  // the matching fix note).
   return (events || []).filter(e => e && e.uid && e.dev === myDev && !e.synthetic
-    && typeof e.ts === "number" && e.ts > sinceTs);
+    && e.kind !== "lifecycle" && typeof e.ts === "number" && e.ts > sinceTs);
 }
 // Full-month rebuild set for upload: same ownership rule, no watermark, local
 // IDB `id` stripped (meaningless on other devices).
 function evtOwnMonthRecords(events, myDev){
   return (events || [])
-    .filter(e => e && e.uid && e.dev === myDev && !e.synthetic && typeof e.ts === "number")
+    .filter(e => e && e.uid && e.dev === myDev && !e.synthetic && e.kind !== "lifecycle" && typeof e.ts === "number")
     .map(e => { const r = Object.assign({}, e); delete r.id; return r; });
 }
 // Filter a downloaded file's records down to what should be inserted locally:
@@ -1231,6 +1235,7 @@ function evtIncomingFilter(records, existingUidSet, myDev, nowMs, ageLimitMs){
     if(!r || typeof r !== "object") return;
     if(!r.uid || typeof r.ts !== "number") return;
     if(r.synthetic) return;
+    if(r.kind === "lifecycle") return; // defense-in-depth: reject even if an old build uploaded one
     if(r.dev === myDev) return;
     if(nowMs - r.ts > ageLimitMs) return;
     if(existingUidSet.has(r.uid) || seen.has(r.uid)) return;

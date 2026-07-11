@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.11-2146";
+const APP_VERSION = "v2026.07.11-2202";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -202,9 +202,7 @@ function save(){
   S.__seq = (S.__seq || 0) + 1;
   S.__savedAt = Date.now();
   var _json = JSON.stringify(S);
-  if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'save:setItem:before', seq:S.__seq});
   localStorage.setItem(STORE_KEY, _json);
-  if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'save:setItem:after', seq:S.__seq});
   // Fire-and-forget durable mirror. IDB commits (oncomplete) far more
   // reliably than localStorage's batched flush; this is the actual fix, not
   // a backup of one. Exposed as _stateWritePromise so lifecycle handlers can
@@ -412,6 +410,7 @@ function logEvent(ev){
     }catch(e){ /* swallow: fidelity layer is best-effort, never blocks scoring */ }
   }).catch(()=>{ /* IDB unavailable (e.g. private mode) — silently skip logging */ });
 }
+/* BEGIN_EVENTS_HELPERS */
 // Async read API: resolve to events in [from,to] (ms, inclusive) optionally
 // filtered by kind and/or taskId. Uses the ts index range so we never load the
 // whole store for a windowed query. Returns [] on any failure (never throws).
@@ -438,7 +437,10 @@ function getEvents(opts){
       const cur = cursorReq.result;
       if(!cur){ resolve(out); return; }
       const v = cur.value;
-      if((!wantKind || v.kind===wantKind) && (!wantTask || v.taskId===wantTask)) out.push(v);
+      const isDiag = v.kind === "lifecycle";
+      if(!isDiag || wantKind === "lifecycle"){
+        if((!wantKind || v.kind===wantKind) && (!wantTask || v.taskId===wantTask)) out.push(v);
+      }
       cur.continue();
     };
     cursorReq.onerror = ()=>resolve(out);
@@ -482,6 +484,29 @@ function clearSyntheticEvents(){
     tx.onabort = ()=>resolve(removed);
   })).catch(()=>0);
 }
+// One-time purge of 'lifecycle' diagnostic events written by an earlier
+// build of the Phase C instrumentation, which (bug, fixed 2026-07-11) logged
+// on every save() -- including the 400ms-debounced scroll-driven save() --
+// and flooded the user-facing Activity Feed with "System action" rows. Safe
+// to run unconditionally: getEvents() now filters these out of every normal
+// read regardless, so this is strictly a storage/hygiene cleanup, not a
+// correctness fix on its own.
+function clearLifecycleEvents(){
+  return idbOpen().then(db=>new Promise((resolve)=>{
+    let removed=0, tx;
+    try{ tx = db.transaction(EVENTS_STORE,"readwrite"); }catch(e){ resolve(0); return; }
+    const cur = tx.objectStore(EVENTS_STORE).openCursor();
+    cur.onsuccess = ()=>{ const c=cur.result;
+      if(!c){ return; }
+      if(c.value && c.value.kind==="lifecycle"){ try{c.delete();}catch(e){} removed++; }
+      c.continue();
+    };
+    tx.oncomplete = ()=>resolve(removed);
+    tx.onerror = ()=>resolve(removed);
+    tx.onabort = ()=>resolve(removed);
+  })).catch(()=>0);
+}
+/* END_EVENTS_HELPERS */
 function bulkAddEvents(list){
   return idbOpen().then(db=>new Promise((resolve)=>{
     let added=0, tx;
@@ -4925,6 +4950,17 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// One-time cleanup (2026-07-11, lifecycle-spam fix): purge any 'lifecycle'
+// diagnostic events an earlier build already wrote before getEvents()
+// learned to filter them out. Gated the same way as sync.js's
+// questa.baseReset.v1 one-time purge -- runs at most once per device.
+try{
+  if(localStorage.getItem("questa.lifecycleCleanup.v1") !== "done"){
+    clearLifecycleEvents().catch(()=>{}).then(()=>{
+      try{ localStorage.setItem("questa.lifecycleCleanup.v1", "done"); }catch(e){}
+    });
+  }
+}catch(e){ /* best-effort */ }
 rotateSnapshots().catch(()=>{});
 checkExportStaleness();
 

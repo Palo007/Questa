@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.10-2340";
+const APP_VERSION = "v2026.07.11-0825";
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -3328,8 +3328,9 @@ function drawSheet(){
   }
   h+='<button type="button" onclick="copyEditTask()" title="Copy title, checklist & notes" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.3;padding:0 4px;line-height:1;color:inherit">⧉</button></div>';
   h+='<label>Title</label><input type="text" id="eTitle" value="'+esc(t.title)+'" placeholder="What needs doing?">';
+  const diffOpts = t.type==='habit' ? ['trivial','easy','medium','hard','log'] : ['trivial','easy','medium','hard'];
   h+='<label>Difficulty</label><div class="seg" id="eDiff">'+
-    ['trivial','easy','medium','hard','log'].map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
+    diffOpts.map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
   if(t.type==='habit'){
     h+='<label>Buttons</label><div class="seg">'+
       '<button class="'+(t.up!==false?'on':'')+'" onclick="EDIT.up=!(EDIT.up!==false);drawSheet()">+ Positive</button>'+
@@ -4334,7 +4335,7 @@ startDay();
 updateHeaderHeightVar();
 if(typeof syncInit==="function") syncInit();
 if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('sw.js')
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
     .then(() => { startReminderScheduler(); })
     .catch(()=>{ startReminderScheduler(); });
 } else {

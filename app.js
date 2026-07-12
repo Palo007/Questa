@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.12-1647";
+const APP_VERSION = "v2026.07.12-2318";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -110,7 +110,11 @@ function freshState(){
     prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false }
   };
 }
+var lastIssued = 0;
 let S = load();
+lastIssued = (S && S.__hlcLast) || 0;
+function now(){ var p=Date.now(); lastIssued=Math.max(p, lastIssued+1); try{ if(S) S.__hlcLast=lastIssued; }catch(e){} return lastIssued; }
+function ratchetHlc(maxRemoteTs){ var p=Date.now(); if(maxRemoteTs > p + 3600000){ try{ logEvent({kind:'clockSkew', remoteTs:maxRemoteTs, localTs:p}); }catch(e){} return; } lastIssued = Math.max(lastIssued, maxRemoteTs); if(S) S.__hlcLast = lastIssued; }
 function load(){
   try{ const raw = localStorage.getItem(STORE_KEY);
     if(raw){ return migrate(JSON.parse(raw)); } }catch(e){}
@@ -126,7 +130,7 @@ function delMark(id){
   if(id==null) return;
   try{
     if(!Array.isArray(S.deletions)) S.deletions=[];
-    const at=Date.now();
+    const at=now();
     const e=S.deletions.find(d=>d&&d.id===id);
     if(e){ if(at>(Number(e.at)||0)) e.at=at; } else S.deletions.push({id:id, at:at});
   }catch(e){}
@@ -198,7 +202,7 @@ function migrate(s){ const f=freshState();
     (out.prefs.an.views||[]).forEach(v=>{ v.updatedAt = v.updatedAt || v.createdAt || 0; });
     (out.prefs.an.metrics||[]).forEach(m=>{ m.updatedAt = m.updatedAt || m.createdAt || 0; });
   }
-  if(out.char && (out.char.updatedAt == null)) out.char.updatedAt = Date.now();
+  if(out.char && (out.char.updatedAt == null)) out.char.updatedAt = now();
   return out; }
 let IS_DIRTY = false;
 let _flushPromise = null;
@@ -212,12 +216,16 @@ function save(){
   // sync is applying a merged state, which already carries its own updatedAt).
   if(!applying && S && S.char){
     var sig = _charSig(S.char);
-    if(_prevCharSig !== null && sig !== _prevCharSig){ S.char.updatedAt = Date.now(); }
+    if(_prevCharSig !== null && sig !== _prevCharSig){ S.char.updatedAt = now(); }
     _prevCharSig = sig;
   } else if(S && S.char){
     _prevCharSig = _charSig(S.char);
   }
   IS_DIRTY = true;
+  // #10 Multi-tab clobber protection: capture pre-bump __seq so the lock
+  // callback can detect whether another tab wrote a newer state while this
+  // save() was queued.
+  var preBumpSeq = (S.__seq || 0);
   // Durable-state stamps (2026-07-11 persistence-loss fix, Phase A): a
   // monotonic __seq + wall-clock __savedAt on every S snapshot, so load()/
   // reconcileDurableState() can tell a genuinely newer copy (IndexedDB) from a
@@ -225,16 +233,74 @@ function save(){
   // before a kill), and Phase B's merge guard can recognize a whole-state-
   // stale local. syncSubset() builds its own whitelisted-field object and
   // never copies these two keys, so they never leak into base/remote/Dropbox.
-  S.__seq = (S.__seq || 0) + 1;
-  S.__savedAt = Date.now();
-  var _json = JSON.stringify(S);
-  localStorage.setItem(STORE_KEY, _json);
-  // Fire-and-forget durable mirror. IDB commits (oncomplete) far more
-  // reliably than localStorage's batched flush; this is the actual fix, not
-  // a backup of one. Exposed as _stateWritePromise so lifecycle handlers can
-  // best-effort wait on it.
-  _stateWritePromise = _idbWriteState(_json).catch(function(){ /* best-effort mirror */ });
-  if(typeof scheduleSync==="function" && !applying) scheduleSync();
+  function _saveCommit(){
+    S.__seq = preBumpSeq + 1;
+    S.__savedAt = now();
+    var _json = JSON.stringify(S);
+    try{
+      localStorage.setItem(STORE_KEY, _json);
+    }catch(quotaErr){
+      // #11a: QuotaExceededError aborts setItem but __seq already bumped.
+      // IDB has its own larger quota; write the mirror so reconcileDurableState
+      // (which prefers higher __seq) recovers the state on next boot.
+      try{ if(typeof toast==="function") toast("Storage quota exceeded \u2014 data saved to backup"); }catch(_){}
+      try{ if(typeof logEvent==="function") logEvent({kind:"quotaError", message:String(quotaErr&&quotaErr.message||quotaErr)}); }catch(_){}
+    }
+    // Fire-and-forget durable mirror. IDB commits (oncomplete) far more
+    // reliably than localStorage's batched flush; this is the actual fix, not
+    // a backup of one. Exposed as _stateWritePromise so lifecycle handlers can
+    // best-effort wait on it.
+    _stateWritePromise = _idbWriteState(_json).catch(function(){ /* best-effort mirror */ });
+    if(typeof scheduleSync==="function" && !applying) scheduleSync();
+  }
+  // #10 Layer (a): Web Locks exclusive lock around read-check-write.
+  // Inside the lock, if stored __seq > preBumpSeq, another tab wrote first:
+  // adopt stored state, log multiTabClobberAvoided, drop this write, re-render.
+  if(typeof navigator!=='undefined' && navigator.locks && typeof navigator.locks.request==='function'){
+    navigator.locks.request('questa-sync', {mode:'exclusive'}, function(){
+      try{
+        var stored = localStorage.getItem(STORE_KEY);
+        if(stored){
+          var storedObj = JSON.parse(stored);
+          var storedSeq = Number(storedObj.__seq) || 0;
+          if(storedSeq > preBumpSeq){
+            // Another tab wrote a newer state — adopt it, drop this write.
+            S = migrate(storedObj);
+            if(typeof logEvent==='function') logEvent({kind:'multiTabClobberAvoided', preBumpSeq:preBumpSeq, storedSeq:storedSeq});
+            if(typeof render==='function') render();
+            return;
+          }
+        }
+      }catch(ex){ /* fall through to _saveCommit on parse/read error */ }
+      _saveCommit();
+    });
+  } else {
+    // Graceful fallback when navigator.locks unavailable (older browsers).
+    if(typeof logEvent==='function' && !save._locksWarned){
+      logEvent({kind:'webLocksUnavailable'});
+      save._locksWarned = true;
+    }
+    _saveCommit();
+  }
+}
+// #10 Layer (b): storage event listener — incoming __seq > live → adopt + render.
+// Keeps idle tabs current so layer (a) rarely fires.
+if(typeof window!=='undefined'){
+  try{
+    window.addEventListener('storage', function(e){
+      if(e.key !== STORE_KEY) return;
+      try{
+        if(!e.newValue) return;
+        var incoming = JSON.parse(e.newValue);
+        var incomingSeq = Number(incoming.__seq) || 0;
+        var liveSeq = Number(S.__seq) || 0;
+        if(incomingSeq > liveSeq){
+          S = migrate(incoming);
+          if(typeof render==='function') render();
+        }
+      }catch(ex){}
+    });
+  }catch(ex){}
 }
 // ---- durable IDB mirror of S (Phase A, 2026-07-11 persistence-loss fix) ----
 function _idbWriteState(json){
@@ -572,12 +638,14 @@ function logEvent(ev){
 // Async read API: resolve to events in [from,to] (ms, inclusive) optionally
 // filtered by kind and/or taskId. Uses the ts index range so we never load the
 // whole store for a windowed query. Returns [] on any failure (never throws).
+var DIAGNOSTIC_KINDS = ['lifecycle','storagePersist','webLocksUnavailable','clockSkew','multiTabClobberAvoided','quotaError'];
 function getEvents(opts){
   opts = opts || {};
   const from = (opts.from!=null) ? opts.from : -Infinity;
   const to   = (opts.to!=null)   ? opts.to   : Infinity;
   const wantKind = opts.kind || null;
   const wantTask = opts.taskId || null;
+  const includeDiag = !!opts.includeDiag;
   return idbOpen().then(db=>new Promise((resolve)=>{
     const out=[];
     let tx;
@@ -595,8 +663,8 @@ function getEvents(opts){
       const cur = cursorReq.result;
       if(!cur){ resolve(out); return; }
       const v = cur.value;
-      const isDiag = v.kind === "lifecycle";
-      if(!isDiag || wantKind === "lifecycle"){
+      const isDiag = DIAGNOSTIC_KINDS.indexOf(v.kind) >= 0;
+      if(!isDiag || includeDiag || wantKind === v.kind){
         if((!wantKind || v.kind===wantKind) && (!wantTask || v.taskId===wantTask)) out.push(v);
       }
       cur.continue();
@@ -728,18 +796,18 @@ async function writeSnapshot(type){
     const db = await idbOpen();
     let events = [];
     if(type === "full"){
-      const all = await getEvents({});
+      const all = await getEvents({includeDiag:true});
       events = all || [];
     } else {
       try{
         const snapshots = await listSnapshots();
         const lastBaseline = snapshots.find(s => s.type === "full");
         const since = lastBaseline ? lastBaseline.ts : 0;
-        const recent = await getEvents({from: since});
+        const recent = await getEvents({from: since, includeDiag:true});
         events = recent || [];
       }catch(e){
         console.warn("Delta snapshot fallback to full", e);
-        const all = await getEvents({});
+        const all = await getEvents({includeDiag:true});
         events = all || [];
         type = "full";
       }
@@ -904,6 +972,9 @@ function applyWidth(){ document.documentElement.style.setProperty('--appw',(S.pr
 function applyCardThick(){ document.documentElement.style.setProperty('--card-min-h',(32+(S.prefs.cardThick||0))+'px'); }
 
 const uid = ()=> Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+// dayStamp: LOCAL calendar day via JS Date (getFullYear/getMonth/getDate, not UTC).
+// missedOn and lastCron store these LOCAL YYYYMMDD ints. Cross-device TZ diffs
+// are cosmetic mismatches only, not data loss — see tests/daystamp.test.js.
 function dayStamp(d){ return d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate(); }
 /* BEGIN_REMINDER_HELPERS */
 function normalizeTaskReminders(t) {
@@ -1072,7 +1143,7 @@ function completeTask(t, ev){
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
-  t.updatedAt = Date.now();
+  t.updatedAt = now();
   t.doneAt = Date.now(); // F3 (2026-07-11): completion-day channel for cron-aware merge; see sync.js resolveDailyConflict/.omo/plans/2026-07-11-cron-merge-recency.md
   delete t.missedOn;
   buzz(50);
@@ -1118,7 +1189,7 @@ function uncompleteDaily(t){
   t.done = false;
   delete t.doneAt; // F3 (2026-07-11): unchecking retracts the completion-day claim
   if(t.type==='daily' && t.streak){ t.streak = Math.max(0, t.streak - 1); }
-  t.updatedAt = Date.now(); // F1 (2026-07-11): unchecking is an edit — without this it loses every both-changed merge tiebreak
+  t.updatedAt = now(); // F1 (2026-07-11): unchecking is an edit — without this it loses every both-changed merge tiebreak
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();
 }
@@ -1128,7 +1199,7 @@ function uncompleteTodo(t){
   unlogToday(t);
   t.done = false;
   delete t.doneAt; // F3 (2026-07-11): see uncompleteDaily
-  t.updatedAt = Date.now(); // F1 (2026-07-11): see uncompleteDaily
+  t.updatedAt = now(); // F1 (2026-07-11): see uncompleteDaily
   toast('Reverted');
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();
@@ -1154,7 +1225,7 @@ function scoreHabit(id, dir, ev){
       logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value, log:true});
     }
     buzz(50); floatFx('logged','pos',ev);
-    t.updatedAt=Date.now();
+    t.updatedAt=now();
     save(); render();
     return;
   }
@@ -1175,7 +1246,7 @@ function scoreHabit(id, dir, ev){
     logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, value:t.value, dmg:dmg});
     takeDamage(dmg); buzz(100); floatFx('-'+dmg.toFixed(1)+' HP','neg',ev);
   }
-  t.updatedAt=Date.now();
+  t.updatedAt=now();
   save(); render();
 }
 // ---- Bulk reps entry (long-press +/− on a habit card) ---------------------
@@ -1193,7 +1264,7 @@ function addReps(id, n){
   if(n>0) t.cUp=(t.cUp||0)+n; else t.cDown=(t.cDown||0)+(-n);
   logHistory(t,{value:t.value, reps:n, repCounted:true, scored:false});
   logEvent({kind:'habitReps', dir:Math.sign(n), taskId:t.id, taskTitle:t.title, reps:n, value:t.value});
-  t.updatedAt=Date.now();
+  t.updatedAt=now();
   save(); render();
   toast((n>0?'+':'') + n + ' reps · no reward');
 }
@@ -1326,7 +1397,7 @@ function creditYesterday(t){
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
   t.value = clamp(t.value + delta, -47.27, 99);
   t.done = true;
-  t.updatedAt = Date.now();
+  t.updatedAt = now();
   t.doneAt = Date.now() - 86400000; // F3: backdated to match the history point below (yMs) — this IS yesterday's completion
   delete t.missedOn;
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };
@@ -1396,6 +1467,10 @@ function startDay(){
   if(missed.length){ openYesterCheck(missed); }
   else { runCron(); render(); }
 }
+// LOCAL-DAY SEMANTICS: runCron uses dayStamp(new Date()) = device-local calendar day.
+// yesterdayStamp is also local. Cross-TZ merge arbitrates via resolveDailyConflict
+// (sync.js) — newer event-day wins. NOT vm-testable (DOM, C12 gap);
+// coverage: code review + tests/daystamp.test.js cross-TZ tests (T1-T4).
 function runCron(){
   const today = dayStamp(new Date());
   if(S.lastCron === today) return;
@@ -1523,11 +1598,11 @@ function toggleSub(taskId, subId, idxFallback){
   if(!c) return;
   if(!c.id) c.id = uid(); // defensive backfill (F4 2026-07-11) — should not happen post-migration; see .omo/plans/2026-07-11-subtask-granular-merge.md §3
   c.done=!c.done;
-  c.touchedAt = Date.now(); // F4 (2026-07-11): per-subtask recency channel, consumed by mergeChecklist (sync.js)
+  c.touchedAt = now(); // F4 (2026-07-11): per-subtask recency channel, consumed by mergeChecklist (sync.js)
   if(c.done) buzz(50);
   logEvent({kind:'subtask', taskId:t.id, taskTitle:t.title, taskType:t.type,
             subId:c.id||null, subText:c.text, done:c.done});
-  t.updatedAt=Date.now();
+  t.updatedAt=now();
   save(); render();
 }
 function checklistBlock(t){
@@ -1668,8 +1743,8 @@ function tagById(id){ ensureTags(); return S.tags.find(t=>t.id===id)||null; }
 function taskTags(t){ return (t&&Array.isArray(t.tags))?t.tags:[]; }
 function addTag(name){ name=(name||'').trim(); if(!name) return null; ensureTags();
   const ex=S.tags.find(t=>t.name.toLowerCase()===name.toLowerCase()); if(ex) return ex.id;
-  const col=TAG_COLORS[S.tags.length%TAG_COLORS.length]; const tg={id:uid(),name:name,color:col,createdAt:Date.now(),updatedAt:Date.now()}; S.tags.push(tg); return tg.id; }
-function renameTag(id,name){ const g=tagById(id); if(g){ g.name=(name||'').trim()||g.name; g.updatedAt=Date.now(); save(); } }
+  const col=TAG_COLORS[S.tags.length%TAG_COLORS.length]; const tg={id:uid(),name:name,color:col,createdAt:Date.now(),updatedAt:now()}; S.tags.push(tg); return tg.id; }
+function renameTag(id,name){ const g=tagById(id); if(g){ g.name=(name||'').trim()||g.name; g.updatedAt=now(); save(); } }
 function deleteTag(id){ ensureTags(); delMark(id); S.tags=S.tags.filter(t=>t.id!==id);
   (S.tasks||[]).forEach(t=>{ if(Array.isArray(t.tags)) t.tags=t.tags.filter(x=>x!==id); });
   Object.keys(TAGFILTER).forEach(k=>{ TAGFILTER[k]=(TAGFILTER[k]||[]).filter(x=>x!==id); });
@@ -2418,8 +2493,8 @@ function bSaveMetric(){
   else { m.keyword=(document.getElementById('mKw').value||'').trim(); if(!m.keyword){ toast('Keyword required'); return; } }
   const habits=m.habits.map(h=>({id:h.id, reps:(h.reps===''||h.reps==null)?null:Number(h.reps)}));
   let id;
-  if(m._mid){ const tgt=p.metrics.find(x=>x.id===m._mid); tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits; tgt.updatedAt=Date.now(); id=m._mid; }
-  else { const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits, createdAt:Date.now(), updatedAt:Date.now()}; p.metrics.push(nm); id=nm.id; }
+  if(m._mid){ const tgt=p.metrics.find(x=>x.id===m._mid); tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits; tgt.updatedAt=now(); id=m._mid; }
+  else { const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits, createdAt:Date.now(), updatedAt:now()}; p.metrics.push(nm); id=nm.id; }
   MEDIT=null; MBUILD=false;
   if(VDRAFT){ VDRAFT.source='metric'; VDRAFT.metricId=id; }
   save(); drawViewBuilder();
@@ -2427,7 +2502,7 @@ function bSaveMetric(){
 // clone the view currently open in the builder, inserting it just below
 function cloneView(){ if(!VDRAFT) return; const a=anPrefs(); a.views=a.views||[];
   if(a.views.length>=20){ toast('Max 20 view sections'); return; }
-  const copy=JSON.parse(JSON.stringify(VDRAFT)); copy.id=uid(); copy.name='clone - '+(VDRAFT.name||'view'); copy.createdAt=Date.now(); copy.updatedAt=Date.now();
+  const copy=JSON.parse(JSON.stringify(VDRAFT)); copy.id=uid(); copy.name='clone - '+(VDRAFT.name||'view'); copy.createdAt=Date.now(); copy.updatedAt=now();
   let idx=VDRAFT.id? a.views.findIndex(x=>x.id===VDRAFT.id) : -1; if(idx<0) idx=a.views.length-1;
   a.views.splice(idx+1,0,copy);
   VDRAFT=null; MEDIT=null; MBUILD=false; document.getElementById('scrim').classList.remove('show'); save(); refreshAnalytics();
@@ -2447,9 +2522,9 @@ function saveMetricEditor(){
   const habits=m.habits.map(h=>({id:h.id, reps:(h.reps===''||h.reps==null)?null:Number(h.reps)}));
   if(m._mid){
     const tgt=p.metrics.find(x=>x.id===m._mid);
-    tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits; tgt.updatedAt=Date.now();
+    tgt.name=name; tgt.keyword=m.keyword; tgt.exact=m.exact; tgt.habits=habits; tgt.updatedAt=now();
   } else {
-    const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits, createdAt:Date.now(), updatedAt:Date.now()};
+    const nm={id:uid(), name, keyword:m.keyword, exact:m.exact, habits, createdAt:Date.now(), updatedAt:now()};
     p.metrics.push(nm); p.activeMetric=nm.id;
   }
   MEDIT=null; save(); render();
@@ -2694,7 +2769,7 @@ function cancelView(){ VDRAFT=null; document.getElementById('scrim').classList.r
 function saveView(){ if(!VDRAFT)return; const inp=document.getElementById('vName'); if(inp)VDRAFT.name=inp.value.trim();
   if(!VDRAFT.name){ toast('Name required'); return; }
   const a=anPrefs(); a.views=a.views||[];
-  VDRAFT.updatedAt=Date.now();
+  VDRAFT.updatedAt=now();
   if(VDRAFT.id){ const i=a.views.findIndex(x=>x.id===VDRAFT.id); if(i>=0)a.views[i]=VDRAFT; else a.views.push(VDRAFT); }
   else { if(a.views.length>=20){ toast('Max 20 view sections'); return; } VDRAFT.id=uid(); VDRAFT.createdAt=Date.now(); a.views.push(VDRAFT); }
   a.activeView=VDRAFT.id; VDRAFT=null; document.getElementById('scrim').classList.remove('show'); save(); refreshAnalytics();
@@ -2782,7 +2857,7 @@ function importViews(ev){
   rd.onload=()=>{ try{ const d=JSON.parse(rd.result); const arr=Array.isArray(d)?d:(d.views||[]);
       if(!Array.isArray(arr)||!arr.length) throw 0;
       const a=anPrefs(); a.views=a.views||[]; let n=0;
-      arr.forEach(v=>{ if(!v||!v.source) return; a.views.push({id:uid(), name:v.name||'Imported view', source:v.source, group:v.group||'day', chart:v.chart||'line', tags:Array.isArray(v.tags)?v.tags:[], types:Array.isArray(v.types)?v.types:[], metricId:v.metricId||null, createdAt:Date.now(), updatedAt:Date.now()}); n++; });
+      arr.forEach(v=>{ if(!v||!v.source) return; a.views.push({id:uid(), name:v.name||'Imported view', source:v.source, group:v.group||'day', chart:v.chart||'line', tags:Array.isArray(v.tags)?v.tags:[], types:Array.isArray(v.types)?v.types:[], metricId:v.metricId||null, createdAt:Date.now(), updatedAt:now()}); n++; });
       if(n){ a.activeView=a.views[a.views.length-1].id; }
       save(); refreshAnalytics(); toast('Imported '+n+' view'+(n===1?'':'s'));
     } catch(e){ alertDialog('Error', 'That file does not look like Questa views.'); } };
@@ -3212,6 +3287,10 @@ function renderEventDetail(from,to){
           icon = '🏷️';
           desc = 'Device name updated';
           if (e.notes) desc += ' &middot; <span class="evNotes">' + esc(e.notes) + '</span>';
+        } else if (e.kind === 'conflictResolved') {
+          icon = '⚖️';
+          var _ct = e.taskTitle || e.charTitle || 'item';
+          desc = 'Sync conflict resolved \u00b7 ' + esc(_ct) + ' \u00b7 kept ' + (e.winner === 'remote' ? 'remote' : 'local');
         } else {
           icon = '⚙️';
           desc = esc(e.taskTitle || 'System action');
@@ -3719,7 +3798,7 @@ function commitSubOrder(taskId) {
   });
   
   task.checklist = newChecklist;
-  task.updatedAt = Date.now();
+  task.updatedAt = now();
   
   // Save, bump version, and re-render
   save();
@@ -4161,13 +4240,13 @@ function saveTask(){
         if(!c) return;
         if(!c.id) c.id = uid(); // defensive backfill (F4 2026-07-11) — mirrors toggleSub, see .omo/plans/2026-07-11-subtask-granular-merge.md §3
         const o = _origById.get(c.id);
-        if(!o || (o.text||'')!==(c.text||'') || !!o.done!==!!c.done) c.touchedAt = Date.now();
+        if(!o || (o.text||'')!==(c.text||'') || !!o.done!==!!c.done) c.touchedAt = now();
       });
     })();
     const upDelta = (EDIT.cUp||0) - (orig.cUp||0);
     const downDelta = (EDIT.cDown||0) - (orig.cDown||0);
     S.tasks[idx]=EDIT;
-    EDIT.updatedAt=Date.now();
+    EDIT.updatedAt=now();
     const t = S.tasks[idx];
     let gainParts=null, loseParts=null, doBump=false;
     let _cXp=0,_cGold=0,_cMp=0,_cHp=0;
@@ -4247,7 +4326,7 @@ function saveTask(){
       }
     }catch(e){}
   } else {
-    EDIT.id=uid(); EDIT.createdAt=Date.now(); EDIT.updatedAt=Date.now(); S.tasks.unshift(EDIT); buzz(50);
+    EDIT.id=uid(); EDIT.createdAt=Date.now(); EDIT.updatedAt=now(); S.tasks.unshift(EDIT); buzz(50);
     try{ logEvent({kind:'create', taskType:EDIT.type, taskId:EDIT.id, taskTitle:EDIT.title}); }catch(e){}
     setTimeout(() => window.scrollTo({top:0, behavior:'smooth'}), 50);
   }
@@ -4313,7 +4392,7 @@ function saveReward(){
   REDIT.title=document.getElementById('rTitle').value.trim()||'Reward';
   REDIT.cost=Math.max(0,parseFloat(document.getElementById('rCost').value)||0);
   REDIT.notes=document.getElementById('rNotes').value;
-  REDIT.updatedAt=Date.now();
+  REDIT.updatedAt=now();
   const _rwNew=!REDIT.id;
   if(REDIT.id){ const i=S.rewards.findIndex(r=>r.id===REDIT.id); S.rewards[i]=REDIT; }
   else { REDIT.id=uid(); REDIT.createdAt=Date.now(); S.rewards.push(REDIT); }
@@ -4409,7 +4488,7 @@ function openSettings(){
       const myDevLabel=(typeof deviceDisplayName==="function")?deviceDisplayName(S.devices,devId):(myDevName||devShort);
       h+='<div class="devNameWrap">'+
            '<div class="devNameHeader">'+
-             '<div class="devSyncStatus">Last sync: '+esc(rel)+' &middot; Device '+esc(myDevLabel)+
+              '<div class="devSyncStatus">Last sync: '+esc(rel)+
                (scfg.lastError?(' &middot; <span style="color:#f74e52">'+esc(scfg.lastError)+'</span>'):'')+'</div>'+
              '<label class="devNameLbl">Device name</label>'+
              '<div></div>'+
@@ -4417,7 +4496,10 @@ function openSettings(){
            '<div class="devNameRow">'+
              '<button class="btn ghost" onclick="syncNow()">Sync now</button>'+
              '<input type="text" id="setDeviceName" placeholder="'+esc(devShort)+'" value="'+esc(myDevName)+'" onchange="setDeviceName(this.value)">'+
+              '<div class="devDisconnectCol">'+
+             '<div class="devDisconnectLbl">Device '+esc(myDevLabel)+'</div>'+
              '<button class="btn ghost" onclick="confirmSyncDisconnect()">Disconnect</button>'+
+              '</div>'+
            '</div>'+
          '</div>';
       if(typeof confirmForcePush==="function" || typeof confirmForcePull==="function"){
@@ -4478,8 +4560,16 @@ function checkExportStaleness(){
 function resetEverything() {
   confirmDialog('Reset Everything', 'Erase ALL progress on this device? This cannot be undone.').then(ok => {
     if(!ok) return;
+    // #2 this-device-only reset: disconnect sync, wipe IDB syncmeta base +
+    // state mirror, reset __seq so the fresh state starts at seq 1 after
+    // save(). NO tombstone-all, NO destructive propagation to other devices.
+    // Reconnecting later pulls the world back via keep-by-default merge.
+    if(typeof syncDisconnect==='function') syncDisconnect();
+    if(typeof syncBasePut==='function') syncBasePut(null);
+    if(typeof _idbWriteState==='function') _idbWriteState(null).catch(function(){});
     localStorage.removeItem(STORE_KEY);
-    S=freshState();
+    S.__seq = 0;              // so save()'s (S.__seq||0)+1 yields 1
+    S = freshState();
     save();
     applyWidth();
     applyCardThick();
@@ -4514,7 +4604,7 @@ function setDeviceName(v){
     S.devices.push(d);
   }
   d.name=name;
-  d.updatedAt=Date.now();
+  d.updatedAt=now();
   save();
   logEvent({kind:'devicename', taskTitle:'Device name',
     notes:'Device '+devId.slice(0,6)+' \u2192 "'+(name||'(cleared)')+'"'+(prevName?' (was "'+prevName+'")':''),
@@ -5094,7 +5184,6 @@ applyWidth();
 applyCardThick();
 startDay();
 updateHeaderHeightVar();
-if(typeof syncInit==="function") syncInit();
 if('serviceWorker' in navigator){
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
     .then(() => { startReminderScheduler(); })
@@ -5121,6 +5210,10 @@ try{
 }catch(e){ /* best-effort */ }
 rotateSnapshots().catch(()=>{});
 checkExportStaleness();
+// #11b: Request persistent storage to reduce browser-eviction risk (Safari ITP
+// 7-day wipe, Chrome eviction under pressure). PWAs get this automatically;
+// browser-tab usage does not (MDN: all-or-nothing per origin).
+try{ if(navigator&&navigator.storage&&typeof navigator.storage.persist==="function"){ navigator.storage.persist().then(function(granted){ if(typeof logEvent==="function") logEvent({kind:"storagePersist", granted:!!granted}); }).catch(function(){}); } }catch(_){}
 
 setTimeout(() => {
   listSnapshots().then(snapshots => {

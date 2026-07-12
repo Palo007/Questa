@@ -21,6 +21,7 @@ const STATE_PATH = "/state.json";
 const SYNC_DEBOUNCE_MS = 5000;
 const SYNC_CONFLICT_RETRY_LIMIT = 3;
 const SYNC_TRANSIENT_RETRY_DELAYS_MS = [1000, 5000, 25000]; // 429/5xx backoff
+const SYNC_CONFLICT_BACKOFF_MS = 30000; // 30s backoff after conflict retry exhaustion
 
 // ---- 2.2 Config read/patch --------------------------------------------------
 function syncCfgDefaults(){
@@ -276,7 +277,18 @@ async function dbxUpload(path, wrapperObj, rev, _retriedAuth){
     await syncToken(true);
     return dbxUpload(path, wrapperObj, rev, true);
   }
-  if(res.status === 409) throw new ConflictError("upload conflict");
+  if(res.status === 409){
+    // F6 parity (upload, 2026-07-12): inspect the 409 body to distinguish
+    // a genuine rev conflict (update/conflict) from other 409 errors (e.g.
+    // restricted_content). Only rev mismatches feed the retry loop; anything
+    // else surfaces as an HttpError — no retry burn.
+    let summary = "";
+    try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
+    if(!summary || summary.indexOf("update/conflict") !== -1){
+      throw new ConflictError("upload conflict: rev");
+    }
+    throw new HttpError("upload failed: 409 " + summary.slice(0, 200), 409);
+  }
   if(!res.ok){
     let detail = "";
     try{ detail = (await res.text()).slice(0, 200); }catch(e){}
@@ -397,23 +409,35 @@ function syncBaseGet(){
       const tx = db.transaction("syncmeta", "readonly");
       const req = tx.objectStore("syncmeta").get("base");
       req.onsuccess = () => {
-        try{ resolve(req.result ? JSON.parse(req.result) : null); }
+        try{
+          if(!req.result){ resolve(null); return; }
+          const parsed = JSON.parse(req.result);
+          // New format (#5): {b: <json-string>, r: <rev-string>}
+          if(parsed && typeof parsed === "object" && "b" in parsed){
+            resolve({ base: JSON.parse(parsed.b), lastRev: parsed.r || null });
+          } else {
+            // Old format (backward compat): the parsed value IS the base
+            resolve({ base: parsed, lastRev: null });
+          }
+        }
         catch(e){ resolve(null); }
       };
       req.onerror = () => resolve(null);
     }catch(e){ resolve(null); }
   })).catch(() => null);
 }
-function syncBasePut(subset){
+function syncBasePut(subset, rev){
   // Accepts an object OR a pre-serialized JSON string (fix 2026-07-11).
   // Serializing HERE, before the idbOpen await, also closes the small window
   // where object callers could be mutated during that await.
+  // FIX 2026-07-12 (#5): store rev alongside base for poisoned-base self-check.
   const payload = (typeof subset === "string") ? subset : JSON.stringify(subset);
+  const envelope = JSON.stringify({b: payload, r: rev || null});
   if(typeof idbOpen !== "function") return Promise.resolve(false);
   return idbOpen().then(db => new Promise((resolve) => {
     try{
       const tx = db.transaction("syncmeta", "readwrite");
-      tx.objectStore("syncmeta").put(payload, "base");
+      tx.objectStore("syncmeta").put(envelope, "base");
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => resolve(false);
       tx.onabort = () => resolve(false);
@@ -425,17 +449,10 @@ function syncBasePut(subset){
 // Implements plan §2.2 per-id three-way merge for id-keyed collections, plus
 // the scalar/section rules from the §2.1 table.
 //
-// JUDGMENT CALL (flagged, not silently assumed): §2.1 says S.char uses
-// "changed-side wins; both-changed -> newer savedAt wins", but nothing in the
-// codebase stamps a per-edit savedAt on S.char (Phase 1 only added
-// updatedAt to tasks/rewards/tags/views/metrics, not char — the plan didn't
-// ask for it either). Rather than silently invent a new char.savedAt field
-// (more app.js surgery, more risk, for a case the plan's own §0 already
-// accepts as lossy), the both-changed char tiebreak below uses the *pushed
-// snapshot* timestamp: remote's wrapper savedAt (when that device last
-// pushed) vs Date.now() (this device, pushing now). In practice this means
-// "whichever device syncs most recently wins the tie" — a reasonable proxy
-// given the plan already classifies a few lost XP/gold here as acceptable.
+// char.updatedAt IS now reliably stamped on every stat change (app.js save()
+// chokepoint via _charSig, 2026-07-12). The F6 merge tiebreak (sync.js) uses
+// it: strictly-newer remote wins; ties use a deterministic deviceId tiebreak.
+// Residual clock-skew is char-lossy-accepted per plan §0.
 // ---- F3 (2026-07-11) daily-aware conflict resolution -----------------------
 // See .omo/plans/2026-07-11-cron-merge-recency.md. Cron (app.js runCron) no
 // longer bumps t.updatedAt on reset/miss -- it is a deterministic day-boundary
@@ -446,6 +463,9 @@ function syncBasePut(subset){
 //                 (completeTask / creditYesterday backdated); cleared on uncheck.
 //   t.missedOn -- dayStamp() int of the last day runCron judged this daily
 //                 missed; cleared on completion/credit.
+// dayStampOf: LOCAL calendar day from ms timestamp — same semantics as app.js dayStamp().
+// Cross-device: two TZs computing dayStampOf on the same ms may get different YYYYMMDD.
+// Cross-TZ merge correctness verified in tests/daystamp.test.js.
 function dayStampOf(ms){
   if(!ms) return 0;
   const d = new Date(ms);
@@ -484,6 +504,9 @@ function resolveDailyConflict(l, r){
 // which mergeCollection branch produced it (one-sided branches can also carry
 // a stale done=true from a device that hasn't cronned past it yet). Pure: does
 // not mutate its input.
+// Cross-TZ: if mergedLastCron > dayStampOf(t.doneAt) the daily is reset. This is
+// correct even when a completion happened behind — the other device's cron already
+// transitioned. The completing device's char stats (XP/gold) are preserved via HLC merge.
 function normalizeDailyResets(tasks, mergedLastCron){
   if(!Array.isArray(tasks)) return tasks;
   return tasks.map(t=>{
@@ -591,10 +614,12 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
 
 // recency helpers (2026-07-11 recency-guard). _ua = effective edit time,
 // _ca = creation time. Numeric-safe; missing fields -> 0. Clamped (D3): a
-// timestamp more than 2 min ahead of Date.now() is untrusted -> treated as 0
-// so a future-skewed clock cannot win a guard or mint an undeletable record.
-function _ua(x){ var v = (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; return v > Date.now() + 120000 ? 0 : v; }
-function _ca(x){ var v = (x && Number(x.createdAt)) || 0; return v > Date.now() + 120000 ? 0 : v; }
+// timestamp more than 2 min ahead of the local HLC is untrusted -> treated
+// as 0 so a future-skewed clock cannot win a guard or mint an undeletable
+// record. Uses app.js now() HLC when available, falls back to Date.now().
+var _hlcNow = (typeof now==='function') ? now : function(){ return Date.now(); };
+function _ua(x){ var v = (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; return v > _hlcNow() + 120000 ? 0 : v; }
+function _ca(x){ var v = (x && Number(x.createdAt)) || 0; return v > _hlcNow() + 120000 ? 0 : v; }
 function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSavedAt, tombstoneMap){
   const baseMap = new Map((baseArr || []).map(x => [x.id, x]));
   const localMap = new Map((localArr || []).map(x => [x.id, x]));
@@ -656,9 +681,6 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
         }
       } else {
         // Remote no longer has it (deletion) while local is unchanged vs base.
-        // GUARD 2: never drop a record CREATED AFTER the remote snapshot was
-        // written -- the remote simply never saw it, so its absence is not a
-        // deletion. Only applies when caller supplied a real remoteSavedAt.
         // TOMBSTONE MODEL (2026-07-12): a record merely absent from the remote
         // snapshot is NOT proof of deletion -- a stale/partial remote must never
         // silently drop it (this was the bug that lost 500+ day dailies). Keep
@@ -695,6 +717,7 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
         checklist: mergeChecklist(b && b.checklist, (l && l.checklist) || [], (r && r.checklist) || [], winner === l)
       });
     }
+    if(typeof logEvent === "function") logEvent({kind:'conflictResolved', taskType:(winner&&winner.type)||'task', taskId:id, taskTitle:(winner&&winner.title)||'', winner:(winner===l)?'local':'remote', loser:(winner===l)?'remote':'local'});
     resultMap.set(id, winner);
     return;
   });
@@ -745,7 +768,7 @@ function cleanDevices(arr){
   return [...byId.values()];
 }
 
-function mergeDevices(baseArr, localArr, remoteArr){
+function mergeDevices(baseArr, localArr, remoteArr, localDeviceId, remoteDeviceId){
   const baseMap = new Map((baseArr || []).map(x => [x.id, x]));
   const localMap = new Map((localArr || []).map(x => [x.id, x]));
   const remoteMap = new Map((remoteArr || []).map(x => [x.id, x]));
@@ -772,8 +795,16 @@ function mergeDevices(baseArr, localArr, remoteArr){
     if(sl > sr) winner = l;
     else if(sr > sl) winner = r;
     else {
-      const lu = (l && l.updatedAt) || 0, ru = (r && r.updatedAt) || 0;
-      winner = lu >= ru ? l : r;
+      // Exact tie (equal score). Use a deterministic deviceId tiebreak so the
+      // merge converges symmetrically instead of ping-ponging: the higher
+      // deviceId (the merging device vs the remote device that wrote this
+      // entry) wins. Falls back to local if the remote device id is unknown.
+      const _ld = (localDeviceId != null) ? localDeviceId : syncDeviceId();
+      const _rd = (remoteDeviceId != null) ? remoteDeviceId
+        : (((remoteArr||[]).map(function(d){return d && d.id;})
+             .filter(function(id){return id && id !== _ld;}))[0]) || null;
+      if(_rd != null && _ld !== _rd) winner = (_rd > _ld) ? r : l;
+      else winner = l;
     }
     if(winner) resultMap.set(id, winner);
   });
@@ -813,7 +844,7 @@ function mergeDayArray(localArr, remoteArr){
   return [...buckets.values()].sort((a, b) => (a.date || 0) - (b.date || 0));
 }
 
-function merge(base, local, remote, remoteSavedAt, localSavedAt){
+function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, remoteDeviceId){
   base = base || {};
   local = local || {};
   remote = remote || {};
@@ -836,18 +867,25 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt){
     });
     return acc; // Map(id -> at)
   })();
+  // Tombstone GC: drop tombstones older than 180 days to bound deletions growth.
+  // Accepted residual: a device offline >180d may resurrect a deleted entity.
+  const TOMBSTONE_MAX_AGE_MS = 180 * 86400000;
+  const _gcNow = Date.now();
+  for(const [_id, _at] of mergedDeletions){
+    if(_gcNow - Number(_at) > TOMBSTONE_MAX_AGE_MS) mergedDeletions.delete(_id);
+  }
   const _tomb = mergedDeletions;
 
   const merged = {
     tasks: normalizeDailyResets(mergeCollection(base.tasks, local.tasks, remote.tasks, remoteSavedAt, localSavedAt, _tomb), mergedLastCron), // F3 (2026-07-11): reset overlay keyed to merged lastCron
     rewards: mergeCollection(base.rewards, local.rewards, remote.rewards, remoteSavedAt, localSavedAt, _tomb),
     tags: mergeCollection(base.tags, local.tags, remote.tags, remoteSavedAt, localSavedAt, _tomb),
-    devices: mergeDevices(base.devices, local.devices, remote.devices),
+    devices: mergeDevices(base.devices, local.devices, remote.devices, localDeviceId, remoteDeviceId),
     an: {
       views: mergeCollection(baseAn.views, localAn.views, remoteAn.views, remoteSavedAt, localSavedAt, _tomb),
       metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics, remoteSavedAt, localSavedAt, _tomb)
     },
-    history: mergeDayArray(local.history, remote.history),
+    history: mergeDayArray(local.history, remote.history), // DEAD WORK: S.history is never populated by app.js (per-task history lives at t.history). Kept for schema compat; syncApply writes it back to S.history.
     charHistory: mergeDayArray(local.charHistory, remote.charHistory),
     monthlyBackups: (function(){
       const l = local.monthlyBackups || [];
@@ -879,11 +917,29 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt){
         // GUARD (recency): accept remote char only if it is not OLDER than local.
         return ((Number(r.updatedAt)||0) >= (Number(l.updatedAt)||0)) ? r : l;
       }
-      // F2 (2026-07-11): the old expression `Date.now() > remoteSavedAt` was
-      // always true for any past savedAt, so both-changed char ALWAYS took
-      // local in practice. Made explicit — local wins. (This also removes the
-      // pathological case where a future-skewed remote clock silently won.)
-      return l;
+      // F6 (2026-07-12): both sides are REAL characters edited since base — a
+      // genuine conflict. char.updatedAt is reliably stamped per stat change
+      // (app.js save() chokepoint via _charSig), so resolve by newest edit:
+      // remote wins ONLY if strictly newer. On an exact updatedAt tie, use a
+      // deterministic deviceId tiebreak (below) so two devices editing offline
+      // with equal timestamps converge in ONE round instead of ping-ponging.
+      // A future-skewed remote cannot win a tie (anti-skew bias preserved).
+      if((Number(r.updatedAt)||0) > (Number(l.updatedAt)||0)){
+        if(typeof logEvent === "function") logEvent({kind:'conflictResolved', taskType:'char', winner:'remote', loser:'local', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+        return r;
+      }
+      // Deterministic tiebreak: the higher deviceId string wins, on BOTH sides,
+      // so merge(b,L,R) and merge(b,R,L) pick the same winner (total order).
+      const _ld = (localDeviceId != null) ? localDeviceId : syncDeviceId();
+      const _rd = (remoteDeviceId != null) ? remoteDeviceId
+        : (((remote.devices||[]).map(function(d){return d && d.id;})
+             .filter(function(id){return id && id !== _ld;}))[0]) || null;
+      if(_rd != null && _ld !== _rd){
+        if(typeof logEvent === "function") logEvent({kind:'conflictResolved', taskType:'char', winner:(_rd>_ld)?'remote':'local', loser:(_rd>_ld)?'local':'remote', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+        return (_rd > _ld) ? r : l;
+      }
+      if(typeof logEvent === "function") logEvent({kind:'conflictResolved', taskType:'char', winner:'local', loser:'remote', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+      return l; // unresolved tie (no remote device id available) -> local (F2 bias)
     })()
   };
   return merged;
@@ -906,37 +962,78 @@ function syncNow(){
     _syncRerunQueued = true;
     return _syncInFlight;
   }
-  _syncInFlight = _syncNowAttempt(0)
-    .catch(e => {
-      syncCfgSave({ lastError: (e && e.message) || String(e) });
-    })
-    .then(() => {
-      _syncInFlight = null;
-      // Only piggyback the auto-export check onto a sync that actually
-      // succeeded — a failed sync's lastError would otherwise get clobbered
-      // by an unrelated "auto backup failed" if the same underlying
-      // connectivity problem hit both.
-      if(!syncCfg().lastError && typeof syncMaybeAutoExport==="function") syncMaybeAutoExport();
-      if(!syncCfg().lastError && typeof syncEventsSync==="function") syncEventsSync();
-      if(typeof syncRefreshSettingsUI==="function") syncRefreshSettingsUI();
-      if(_syncRerunQueued){
-        _syncRerunQueued = false;
-        syncNow();
-      }
+  // #10 Layer (c): Web Locks elect a single sync-runner per origin
+  // (prevents duplicate syncNow across tabs sharing the same origin).
+  function _doSync(){
+    _syncInFlight = _syncNowAttempt(0)
+      .catch(e => {
+        syncCfgSave({ lastError: (e && e.message) || String(e) });
+      })
+      .then(() => {
+        _syncInFlight = null;
+        // Only piggyback the auto-export check onto a sync that actually
+        // succeeded — a failed sync's lastError would otherwise get clobbered
+        // by an unrelated "auto backup failed" if the same underlying
+        // connectivity problem hit both.
+        if(!syncCfg().lastError && typeof syncMaybeAutoExport==="function") syncMaybeAutoExport();
+        if(!syncCfg().lastError && typeof syncEventsSync==="function") syncEventsSync();
+        if(typeof syncRefreshSettingsUI==="function") syncRefreshSettingsUI();
+        if(_syncRerunQueued){
+          _syncRerunQueued = false;
+          syncNow();
+        }
+      });
+    return _syncInFlight;
+  }
+  if(typeof navigator!=='undefined' && navigator.locks && typeof navigator.locks.request==='function'){
+    return navigator.locks.request('questa-sync', {mode:'exclusive'}, function(){
+      // Inside lock: skip if another tab's sync is already in flight on this tab.
+      if(_syncInFlight) return _syncInFlight;
+      return _doSync();
     });
-  return _syncInFlight;
+  }
+  return _doSync();
 }
 
+// HLC receive ratchet: compute the max ordering timestamp across a state
+// object so ratchetHlc (app.js) can pull the local clock forward.
+function _maxOrderingTs(st){
+  if(!st) return 0;
+  var mx = 0;
+  (st.tasks||[]).forEach(function(t){
+    var u = Number(t.updatedAt)||0; if(u>mx) mx=u;
+    (t.checklist||[]).forEach(function(c){ var ta = Number(c.touchedAt)||0; if(ta>mx) mx=ta; });
+  });
+  var ch = Number(st.char && st.char.updatedAt)||0; if(ch>mx) mx=ch;
+  (st.devices||[]).forEach(function(d){ var du = Number(d.updatedAt)||0; if(du>mx) mx=du; });
+  (st.deletions||[]).forEach(function(dl){ var da = Number(dl.at)||0; if(da>mx) mx=da; });
+  (st.tags||[]).forEach(function(tg){ var tu = Number(tg.updatedAt)||0; if(tu>mx) mx=tu; });
+  (st.rewards||[]).forEach(function(rw){ var ru = Number(rw.updatedAt)||0; if(ru>mx) mx=ru; });
+  var pv = st.prefs && st.prefs.an;
+  (pv && pv.views||[]).forEach(function(v){ var vu = Number(v.updatedAt)||0; if(vu>mx) mx=vu; });
+  (pv && pv.metrics||[]).forEach(function(m){ var mu = Number(m.updatedAt)||0; if(mu>mx) mx=mu; });
+  return mx;
+}
 async function _syncNowAttempt(transientRetryCount){
   try{
     const remote = await dbxDownload(STATE_PATH);
-    const base = await syncBaseGet();
+    if(remote && remote.state && typeof ratchetHlc==='function'){ ratchetHlc(_maxOrderingTs(remote.state)); }
+    const _baseResult = await syncBaseGet();
+    let base = _baseResult ? _baseResult.base : null;
+    const _storedRev = _baseResult ? _baseResult.lastRev : null;
     // Phase B (2026-07-11 persistence-loss fix): captured from the live S
     // object (app.js global) BEFORE syncSubset() builds the whitelisted
     // upload payload -- syncSubset() never copies __savedAt, by design, so it
     // must be read here or not at all.
     const localSavedAt = (typeof S !== "undefined" && S && S.__savedAt) || null;
     const local = syncSubset();
+    // FIX 2026-07-12 (#5, Fraser-lite): if remote.rev matches the rev stored
+    // with the base but the actual state differs, the base is poisoned/stale.
+    // Discard it — degrades to 2-way keep-by-default (tombstones make safe).
+    if(remote && _storedRev && remote.rev === _storedRev
+       && stableStringify(remote.state) !== stableStringify(base)){
+      base = null;
+    }
     const merged = remote ? merge(base, local, remote.state, remote.savedAt, localSavedAt) : local;
 
     if(!merged || !Array.isArray(merged.tasks)){
@@ -957,8 +1054,9 @@ async function _syncNowAttempt(transientRetryCount){
     const nothingToPush = (mergedStr === remoteStr) && (mergedStr === baseStr);
 
     if(nothingToPush){
-      const baseOk = await syncBasePut(mergedJson);
-      syncCfgSave({ lastSyncAt: Date.now(), lastRev: remote ? remote.rev : cfgRevOrNull(),
+      const _noopRev = remote ? remote.rev : cfgRevOrNull();
+      const baseOk = await syncBasePut(mergedJson, _noopRev);
+      syncCfgSave({ lastSyncAt: Date.now(), lastRev: _noopRev,
                     lastError: baseOk ? null : "base snapshot write failed — sync degraded" });
       return;
     }
@@ -981,21 +1079,31 @@ async function _pushWithConflictRetry(mergedJson, knownRev, attempt){
     // detached parse of it, and the base snapshot stores the string verbatim —
     // nothing the user does mid-upload can make the two diverge.
     const up = await dbxUpload(STATE_PATH, wrap(JSON.parse(mergedJson)), knownRev);
-    const baseOk = await syncBasePut(mergedJson);
+    const baseOk = await syncBasePut(mergedJson, up.rev || null);
     syncCfgSave({ lastRev: up.rev || null, lastSyncAt: Date.now(),
                   lastError: baseOk ? null : "base snapshot write failed — sync degraded" });
   }catch(e){
     if(e instanceof ConflictError && attempt < SYNC_CONFLICT_RETRY_LIMIT){
       const fresh = await dbxDownload(STATE_PATH);
-      const base = await syncBaseGet();
+      const _baseRes2 = await syncBaseGet();
+      let _base2 = _baseRes2 ? _baseRes2.base : null;
+      const _storedRev2 = _baseRes2 ? _baseRes2.lastRev : null;
+      // #5 self-check on retry path too
+      if(fresh && _storedRev2 && fresh.rev === _storedRev2
+         && stableStringify(fresh.state) !== stableStringify(_base2)){
+        _base2 = null;
+      }
       const localSavedAt = (typeof S !== "undefined" && S && S.__savedAt) || null;
       const local = syncSubset();
-      const reMerged = fresh ? merge(base, local, fresh.state, fresh.savedAt, localSavedAt) : local;
+      const reMerged = fresh ? merge(_base2, local, fresh.state, fresh.savedAt, localSavedAt) : local;
       syncApply(reMerged);
       return _pushWithConflictRetry(JSON.stringify(reMerged), fresh ? fresh.rev : null, attempt + 1);
     }
     if(e instanceof ConflictError){
       syncCfgSave({ lastError: "sync conflict — retry later" });
+      // Schedule a delayed retry so applied-but-unpushed state is bounded
+      // in time instead of silent until next user action / visibility event.
+      setTimeout(function(){ syncNow(); }, SYNC_CONFLICT_BACKOFF_MS);
       return;
     }
     throw e;
@@ -1044,7 +1152,7 @@ async function _syncForcePushAttempt(attempt){
       rev = remote ? remote.rev : null;
     }catch(e){ /* proceed with rev=null; an add-mode upload 409s harmlessly into the retry below if something actually exists */ }
     const up = await dbxUpload(STATE_PATH, wrap(local), rev);
-    await syncBasePut(local); // this device's data is now truthfully "the last synced state"
+    await syncBasePut(local, up.rev || null); // this device's data is now truthfully "the last synced state"
     syncCfgSave({ lastRev: up.rev || null, lastSyncAt: Date.now(), lastError: null });
   }catch(e){
     if(e instanceof ConflictError && attempt < SYNC_CONFLICT_RETRY_LIMIT){
@@ -1096,7 +1204,7 @@ async function _syncForcePullAttempt(){
       return;
     }
     syncApply(remote.state);           // local becomes remote's content, unconditionally
-    await syncBasePut(remote.state);   // remote's state is now truthfully "the last synced state"
+    await syncBasePut(remote.state, remote.rev);   // remote's state is now truthfully "the last synced state"
     syncCfgSave({ lastRev: remote.rev || null, lastSyncAt: Date.now(), lastError: null });
   }catch(e){
     syncCfgSave({ lastError: "force pull failed: " + ((e && e.message) || String(e)) });

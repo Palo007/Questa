@@ -858,6 +858,19 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt){
     deletions: Array.from(mergedDeletions, ([id, at]) => ({id: id, at: at})),
     char: (function(){
       const b = base.char || {}, l = local.char || {}, r = remote.char || {};
+      // F5 (2026-07-12) fresh-sync fix: a brand-new / just-"reset everything"
+      // browser has an EMPTY sync base, so BOTH its default char and the real
+      // remote char differ from base -> the both-changed branch below returned
+      // local and clobbered the synced character back to level 1. (Tasks were
+      // unaffected: they union by id via mergeCollection.) An UNTOUCHED default
+      // character carries no real progress and must always yield to a real one.
+      // death() keeps gold (>0) and elevated maxHp (>50), so a died character is
+      // NOT "untouched" and still goes through the normal three-way merge below.
+      const untouched = c => (Number(c.lvl)||0) <= 1 && (Number(c.xp)||0) <= 0
+                          && (Number(c.gold)||0) <= 0 && (Number(c.maxHp)||50) <= 50;
+      const lU = untouched(l), rU = untouched(r);
+      if(lU && !rU) return r;   // local is fresh/reset; remote is a real character
+      if(rU && !lU) return l;   // symmetric: protect real local from a stale default
       const localChanged = !deepEqual(l, b);
       const remoteChanged = !deepEqual(r, b);
       if(!localChanged && !remoteChanged) return b;

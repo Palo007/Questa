@@ -1,6 +1,15 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.11-2202";
+const APP_VERSION = "v2026.07.12-0930";
+// Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
+// capture uncaught errors + promise rejections into a bounded buffer that the
+// full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
+if(typeof window!=="undefined"){
+  window.__qDiag = window.__qDiag || { errors: [] };
+  var _qDiagPush = function(kind, data){ try{ window.__qDiag.errors.push(Object.assign({t:Date.now(), kind:kind}, data)); if(window.__qDiag.errors.length>50) window.__qDiag.errors.shift(); }catch(e){} };
+  window.addEventListener("error", function(e){ _qDiagPush("error", {message:e.message, src:e.filename, line:e.lineno, col:e.colno, stack:(e.error&&e.error.stack)||null}); });
+  window.addEventListener("unhandledrejection", function(e){ _qDiagPush("unhandledrejection", {reason:(e.reason&&(e.reason.stack||e.reason.message))||String(e.reason)}); });
+}
 
 // Long-press delay (ms) before a stationary touch on a card is treated as a drag
 // pickup rather than a scroll. Configurable in Settings (S.prefs.dragDelay), default 100.
@@ -97,6 +106,7 @@ function freshState(){
     lastCron: dayStamp(new Date()),
     history:[], charHistory:[],
     monthlyBackups: [],
+    deletions: [],
     prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false }
   };
 }
@@ -105,6 +115,21 @@ function load(){
   try{ const raw = localStorage.getItem(STORE_KEY);
     if(raw){ return migrate(JSON.parse(raw)); } }catch(e){}
   return freshState();
+}
+// Tombstone recorder (2026-07-12): deletion is a first-class, syncable fact.
+// Every removal of a synced id-keyed entity (task/reward/tag/view/metric)
+// records {id, at} in S.deletions so the sync merge can tell a REAL deletion
+// apart from an entity merely absent in a stale/partial remote snapshot.
+// Without this, mergeCollection could only guess from presence -- the bug that
+// silently dropped 500+ day dailies. See sync.js tombstone overlay.
+function delMark(id){
+  if(id==null) return;
+  try{
+    if(!Array.isArray(S.deletions)) S.deletions=[];
+    const at=Date.now();
+    const e=S.deletions.find(d=>d&&d.id===id);
+    if(e){ if(at>(Number(e.at)||0)) e.at=at; } else S.deletions.push({id:id, at:at});
+  }catch(e){}
 }
 // F4 (2026-07-11): deterministic id for legacy checklist items that predate
 // per-item ids. MUST be pure (no Date.now()/Math.random()) so two devices
@@ -142,6 +167,7 @@ function migrate(s){ const f=freshState();
   if(!Array.isArray(out.tags)) out.tags=[];
   if(!Array.isArray(out.devices)) out.devices=[];
   if(!Array.isArray(out.monthlyBackups)) out.monthlyBackups=[];
+  if(!Array.isArray(out.deletions)) out.deletions=[];
   delete out.events;
   if(Array.isArray(out.tasks)){ out.tasks.forEach(normalizeTaskReminders); }
   // F4 (2026-07-11): backfill missing checklist-item ids deterministically so
@@ -264,8 +290,14 @@ function reconcileDurableState(){
 // --- TEMP debug overlay (2026-07-11 recency-guard on-device diagnosis) -----
 // 5 taps on the version number in Settings within 3s opens an on-screen dump
 // of BASE (IndexedDB syncmeta.base) vs LIVE (S) task/device state, so this can
-// be read directly on a phone with no console/bookmarklet access. Remove once
-// the on-device revert investigation is closed.
+// be read directly on a phone with no console/bookmarklet access.
+// 2026-07-12: promoted to a permanent field-diagnostic tool. The "Download All"
+// button gathers EVERYTHING a desktop devtools session could inspect into one
+// JSON file -- all localStorage, every IndexedDB database+store (event log,
+// snapshots, sync base, durable mirror), Cache Storage, service-worker state, a
+// storage-quota estimate, the live in-memory S, runtime/environment facts, and a
+// ring buffer of uncaught errors -- for phones with no dev console. dump() also
+// carries type/streak/done so the on-screen copy shows daily streaks, not just ids.
 var _versionTapCount = 0, _versionTapTimer = null;
 function tapVersionDebug(){
   _versionTapCount++;
@@ -279,7 +311,7 @@ function tapVersionDebug(){
 }
 function showSyncDebugOverlay(){
   var cfg = {}; try{ cfg = JSON.parse(localStorage.getItem("questa.sync.v1") || "{}"); }catch(e){}
-  function dump(a){ return (a && a.tasks) ? a.tasks.map(function(t){ return {id:t.id, title:t.title, updatedAt:t.updatedAt, createdAt:t.createdAt}; }) : "n/a"; }
+  function dump(a){ return (a && a.tasks) ? a.tasks.map(function(t){ return {id:t.id, type:t.type, title:t.title, streak:t.streak, done:t.done, updatedAt:t.updatedAt, createdAt:t.createdAt}; }) : "n/a"; }
   function renderOverlay(base){
     var out = {
       APP_VERSION: (typeof APP_VERSION!=="undefined")?APP_VERSION:"?",
@@ -313,11 +345,15 @@ function showSyncDebugOverlay(){
         catch(e2){ copyBtn.textContent = "Copy failed - select manually"; }
       }
     };
+    var dlBtn = document.createElement("button");
+    dlBtn.textContent = "Download All";
+    dlBtn.style.cssText = "flex:1;padding:12px;font-size:16px;";
+    dlBtn.onclick = function(){ downloadFullDiagnostic(dlBtn); };
     var closeBtn = document.createElement("button");
     closeBtn.textContent = "Close";
     closeBtn.style.cssText = "flex:1;padding:12px;font-size:16px;";
     closeBtn.onclick = function(){ ov.remove(); };
-    btnRow.appendChild(copyBtn); btnRow.appendChild(closeBtn);
+    btnRow.appendChild(copyBtn); btnRow.appendChild(dlBtn); btnRow.appendChild(closeBtn);
     ov.appendChild(ta); ov.appendChild(btnRow);
     document.body.appendChild(ov);
     ta.focus(); ta.select();
@@ -333,6 +369,128 @@ function showSyncDebugOverlay(){
       }catch(e){ renderOverlay(null); }
     };
   }catch(e){ renderOverlay(null); }
+}
+// --- FULL on-device diagnostic export (2026-07-12) --------------------------
+// Everything a desktop devtools session could inspect, in one downloadable JSON.
+// Async because IndexedDB / Cache Storage / SW / storage-estimate are all async.
+function _diagIdbDumpAll(){
+  function listDbs(){
+    try{ if(indexedDB.databases) return indexedDB.databases().then(function(l){ return l.map(function(d){return d.name;}).filter(Boolean); }).catch(function(){ return ["questa"]; }); }catch(e){}
+    return Promise.resolve(["questa"]);
+  }
+  return listDbs().then(function(names){
+    return Promise.all(names.map(function(name){
+      return new Promise(function(resolve){
+        var out = {}; var req;
+        try{ req = indexedDB.open(name); }catch(e){ resolve([name, {__error:String(e)}]); return; }
+        req.onerror = function(){ resolve([name, {__error:"open failed"}]); };
+        req.onsuccess = function(){
+          var db = req.result;
+          var stores = Array.prototype.slice.call(db.objectStoreNames);
+          if(!stores.length){ try{db.close();}catch(e){} resolve([name, {}]); return; }
+          var pending = stores.length;
+          stores.forEach(function(sn){
+            try{
+              var g = db.transaction(sn,"readonly").objectStore(sn).getAll();
+              g.onsuccess = function(){ out[sn] = g.result; if(--pending===0){ try{db.close();}catch(e){} resolve([name, out]); } };
+              g.onerror = function(){ out[sn] = {__error:"getAll failed"}; if(--pending===0){ try{db.close();}catch(e){} resolve([name, out]); } };
+            }catch(e){ out[sn] = {__error:String(e)}; if(--pending===0){ try{db.close();}catch(e){} resolve([name, out]); } }
+          });
+        };
+      });
+    })).then(function(pairs){ var o={}; pairs.forEach(function(p){ o[p[0]]=p[1]; }); return o; });
+  }).catch(function(e){ return {__error:String(e)}; });
+}
+function _diagCacheDump(){
+  try{
+    if(!(window.caches && caches.keys)) return Promise.resolve("n/a");
+    return caches.keys().then(function(keys){
+      return Promise.all(keys.map(function(k){
+        return caches.open(k).then(function(c){ return c.keys().then(function(reqs){ return [k, reqs.map(function(r){return r.url;})]; }); });
+      })).then(function(pairs){ var o={}; pairs.forEach(function(p){o[p[0]]=p[1];}); return o; });
+    }).catch(function(){ return "error"; });
+  }catch(e){ return Promise.resolve("error"); }
+}
+function _diagSwDump(){
+  try{
+    if(!navigator.serviceWorker) return Promise.resolve("n/a");
+    var getRegs = navigator.serviceWorker.getRegistrations ? navigator.serviceWorker.getRegistrations() : Promise.resolve([]);
+    return getRegs.then(function(regs){
+      return { controller: (navigator.serviceWorker.controller && navigator.serviceWorker.controller.scriptURL)||null,
+        registrations: regs.map(function(r){ return {scope:r.scope, active:(r.active&&r.active.scriptURL)||null, waiting:(r.waiting&&r.waiting.scriptURL)||null, installing:(r.installing&&r.installing.scriptURL)||null}; }) };
+    }).catch(function(){ return "error"; });
+  }catch(e){ return Promise.resolve("error"); }
+}
+function _diagStorageEstimate(){
+  try{ if(navigator.storage && navigator.storage.estimate) return navigator.storage.estimate().catch(function(){return "error";}); }catch(e){}
+  return Promise.resolve("n/a");
+}
+function questaFullDiagnostic(){
+  var ls = {};
+  try{ for(var i=0;i<localStorage.length;i++){ var k=localStorage.key(i); ls[k]=localStorage.getItem(k); } }catch(e){ ls={__error:String(e)}; }
+  var meta = {
+    generatedAt: new Date().toISOString(),
+    appVersion: (typeof APP_VERSION!=="undefined")?APP_VERSION:"?",
+    userAgent: navigator.userAgent, platform: navigator.platform,
+    language: navigator.language, languages: navigator.languages, onLine: navigator.onLine,
+    displayMode: (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches)?"standalone":"browser",
+    viewport: {w:window.innerWidth, h:window.innerHeight, dpr:window.devicePixelRatio, screenW:(window.screen&&screen.width)||null, screenH:(window.screen&&screen.height)||null},
+    visibilityState: (typeof document!=="undefined")?document.visibilityState:null,
+    vibrate: typeof navigator.vibrate,
+    notificationPermission: (typeof Notification!=="undefined")?Notification.permission:"n/a"
+  };
+  return Promise.all([_diagIdbDumpAll(), _diagCacheDump(), _diagSwDump(), _diagStorageEstimate()]).then(function(r){
+    var idb = r[0], caches_ = r[1], sw = r[2], est = r[3];
+    var errors = (window.__qDiag && window.__qDiag.errors) ? window.__qDiag.errors : [];
+    var live = (typeof S!=="undefined") ? S : null;
+    function bytes(x){ try{ return JSON.stringify(x).length; }catch(e){ return -1; } }
+    var tbt = {daily:0, habit:0, todo:0, other:0};
+    try{ ((live && live.tasks) || []).forEach(function(t){ if(t && tbt[t.type]!==undefined) tbt[t.type]++; else tbt.other++; }); }catch(e){}
+    var idbCounts = {};
+    try{ Object.keys(idb||{}).forEach(function(db){ idbCounts[db] = {}; var stores = idb[db]||{}; Object.keys(stores).forEach(function(sn){ var v = stores[sn]; idbCounts[db][sn] = Array.isArray(v) ? v.length : ((v && v.__error) ? ("err:"+v.__error) : "?"); }); }); }catch(e){}
+    var manifest = {
+      schemaVersion: 1,
+      generatedAt: meta.generatedAt,
+      appVersion: meta.appVersion,
+      note: "Read this block first to triage. Then slice the section you need with jq/python -- do NOT load the whole file into an LLM context. See DIAGNOSTIC-FORMAT.md in the repo.",
+      sizesBytes: { meta:bytes(meta), localStorage:bytes(ls), indexedDB:bytes(idb), caches:bytes(caches_), serviceWorker:bytes(sw), storageEstimate:bytes(est), errors:bytes(errors), liveS:bytes(live) },
+      counts: {
+        tasksByType: tbt,
+        deletionsTombstones: (live && Array.isArray(live.deletions)) ? live.deletions.length : 0,
+        localStorageKeys: Object.keys(ls).length,
+        errors: (errors && errors.length) || 0,
+        indexedDB: idbCounts
+      },
+      keyDescriptions: {
+        manifest: "This block: schema version, per-section byte sizes and record counts.",
+        meta: "Runtime/environment: appVersion, userAgent, viewport, display-mode, online, permissions.",
+        localStorage: "Every localStorage key/value. questa.save.v1 = full persisted state S; questa.sync.v1 = sync config; questa.baseReset.v1 = one-time base-purge flag.",
+        indexedDB: "Every IndexedDB db+store. questa.backups = Tier-1 snapshots; questa.syncmeta (key 'base') = last synced baseline; the events store = append-only event log (streak/completion history); durable store = persistence mirror of S.",
+        caches: "Cache Storage: cache name -> cached URLs. Diagnoses stale-shell / SW-update issues (look for questa-vNNN).",
+        serviceWorker: "Active/waiting/installing SW script URLs + controller. Mismatch vs latest questa-vNNN => update did not take.",
+        storageEstimate: "Quota vs usage bytes.",
+        errors: "Ring buffer (<=50) of uncaught errors + unhandled promise rejections, newest last.",
+        liveS: "In-memory app state S at capture time (tasks incl. streak/done/repeat, char, prefs, deletions tombstones). Compare to localStorage.questa.save.v1 to spot divergence."
+      }
+    };
+    return Object.assign({ manifest: manifest }, {
+      meta: meta, storageEstimate: est, errors: errors,
+      liveS: live, localStorage: ls, serviceWorker: sw, caches: caches_, indexedDB: idb
+    });
+  });
+}
+function downloadFullDiagnostic(btn){
+  if(btn) btn.textContent = "Gathering...";
+  questaFullDiagnostic().then(function(bundle){
+    var json = JSON.stringify(bundle, null, 2);
+    var blob = new Blob([json], {type:"application/json"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = "questa-fulldiag-" + new Date().toISOString().replace(/[:.]/g,"-") + ".json";
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ try{ document.body.removeChild(a); }catch(e){} URL.revokeObjectURL(url); }, 2000);
+    if(btn) btn.textContent = "Downloaded!";
+  }).catch(function(e){ if(btn) btn.textContent = "Failed - use Copy"; });
 }
 // --- append-only event log (IndexedDB-backed) ------------------------
 // Unlike history (one merged point/day), events are NEVER merged: each tap,
@@ -1512,7 +1670,7 @@ function addTag(name){ name=(name||'').trim(); if(!name) return null; ensureTags
   const ex=S.tags.find(t=>t.name.toLowerCase()===name.toLowerCase()); if(ex) return ex.id;
   const col=TAG_COLORS[S.tags.length%TAG_COLORS.length]; const tg={id:uid(),name:name,color:col,createdAt:Date.now(),updatedAt:Date.now()}; S.tags.push(tg); return tg.id; }
 function renameTag(id,name){ const g=tagById(id); if(g){ g.name=(name||'').trim()||g.name; g.updatedAt=Date.now(); save(); } }
-function deleteTag(id){ ensureTags(); S.tags=S.tags.filter(t=>t.id!==id);
+function deleteTag(id){ ensureTags(); delMark(id); S.tags=S.tags.filter(t=>t.id!==id);
   (S.tasks||[]).forEach(t=>{ if(Array.isArray(t.tags)) t.tags=t.tags.filter(x=>x!==id); });
   Object.keys(TAGFILTER).forEach(k=>{ TAGFILTER[k]=(TAGFILTER[k]||[]).filter(x=>x!==id); });
   save(); }
@@ -2196,7 +2354,7 @@ function drawMetricEditor(){
   document.getElementById('mSave').onclick = MBUILD ? bSaveMetric : saveMetricEditor;
   if(m._mid){ document.getElementById('mDel').onclick=()=>{
     const p=anPrefs();
-    p.metrics=p.metrics.filter(x=>x.id!==m._mid);
+    delMark(m._mid); p.metrics=p.metrics.filter(x=>x.id!==m._mid);
     if(p.activeMetric===m._mid) p.activeMetric=p.metrics[0]?p.metrics[0].id:null;
     if(MBUILD){ if(VDRAFT && VDRAFT.metricId===m._mid) VDRAFT.metricId=(p.metrics[0]?p.metrics[0].id:null); MEDIT=null; MBUILD=false; save(); drawViewBuilder(); }
     else { MEDIT=null; save(); render(); }
@@ -2542,7 +2700,7 @@ function saveView(){ if(!VDRAFT)return; const inp=document.getElementById('vName
   a.activeView=VDRAFT.id; VDRAFT=null; document.getElementById('scrim').classList.remove('show'); save(); refreshAnalytics();
 }
 function delView(){ if(!VDRAFT||!VDRAFT.id){ cancelView(); return; }
-  const a=anPrefs(); a.views=a.views.filter(x=>x.id!==VDRAFT.id);
+  const a=anPrefs(); delMark(VDRAFT.id); a.views=a.views.filter(x=>x.id!==VDRAFT.id);
   if(a.activeView===VDRAFT.id) a.activeView=a.views[0]?a.views[0].id:null;
   VDRAFT=null; document.getElementById('scrim').classList.remove('show'); save(); refreshAnalytics();
 }
@@ -4124,7 +4282,7 @@ function deleteTask(){
   confirmDialog('Delete Task', 'Delete this task?').then(ok => {
     if(!ok) return;
     const _dt=S.tasks.find(x=>x.id===EDIT.id);
-    S.tasks=S.tasks.filter(x=>x.id!==EDIT.id);
+    delMark(EDIT.id); S.tasks=S.tasks.filter(x=>x.id!==EDIT.id);
     if(_dt) try{ logEvent({kind:'delete', taskType:_dt.type, taskId:_dt.id, taskTitle:_dt.title}); }catch(e){}
     closeSheet(); save(); render();
   });
@@ -4162,7 +4320,7 @@ function saveReward(){
   try{ logEvent({kind:_rwNew?'rewardCreate':'rewardEdit', rewardId:REDIT.id, taskTitle:REDIT.title, cost:REDIT.cost}); }catch(e){}
   closeSheet(); save(); render();
 }
-function delReward(){ try{ logEvent({kind:'rewardDelete', rewardId:REDIT.id, taskTitle:REDIT.title, cost:REDIT.cost}); }catch(e){} S.rewards=S.rewards.filter(r=>r.id!==REDIT.id); closeSheet(); save(); render(); }
+function delReward(){ try{ logEvent({kind:'rewardDelete', rewardId:REDIT.id, taskTitle:REDIT.title, cost:REDIT.cost}); }catch(e){} delMark(REDIT.id); S.rewards=S.rewards.filter(r=>r.id!==REDIT.id); closeSheet(); save(); render(); }
 function buyReward(id){
   const r=S.rewards.find(x=>x.id===id); if(!r)return;
   if(S.char.gold < r.cost){ toast('Not enough gold'); return; }

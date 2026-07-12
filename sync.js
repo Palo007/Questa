@@ -329,7 +329,8 @@ function syncSubset(){
     history: S.history || [],
     charHistory: S.charHistory || [],
     an: an,
-    monthlyBackups: S.monthlyBackups || []
+    monthlyBackups: S.monthlyBackups || [],
+    deletions: S.deletions || []
   };
   return JSON.parse(JSON.stringify(raw)); // deep copy, strips functions/undefined
 }
@@ -370,6 +371,7 @@ function syncApply(subset){
     S.history = Array.isArray(subset.history) ? subset.history : [];
     S.charHistory = Array.isArray(subset.charHistory) ? subset.charHistory : [];
     S.monthlyBackups = Array.isArray(subset.monthlyBackups) ? subset.monthlyBackups : [];
+    S.deletions = Array.isArray(subset.deletions) ? subset.deletions : (S.deletions || []);
     S.prefs = S.prefs || {};
     S.prefs.an = S.prefs.an || {};
     S.prefs.an.views = (subset.an && Array.isArray(subset.an.views)) ? subset.an.views : [];
@@ -593,7 +595,7 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
 // so a future-skewed clock cannot win a guard or mint an undeletable record.
 function _ua(x){ var v = (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; return v > Date.now() + 120000 ? 0 : v; }
 function _ca(x){ var v = (x && Number(x.createdAt)) || 0; return v > Date.now() + 120000 ? 0 : v; }
-function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSavedAt){
+function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSavedAt, tombstoneMap){
   const baseMap = new Map((baseArr || []).map(x => [x.id, x]));
   const localMap = new Map((localArr || []).map(x => [x.id, x]));
   const remoteMap = new Map((remoteArr || []).map(x => [x.id, x]));
@@ -632,7 +634,8 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
         if(staleLocal){ resultMap.set(id, b); return; }
       }
       if(localHad) resultMap.set(id, l);
-      return; // local edited/added or deleted; remote untouched -> local wins (incl. deletion)
+      else if(b) resultMap.set(id, b); // TOMBSTONE MODEL (2026-07-12): local absence is NOT a deletion signal; keep -- the S.deletions overlay removes it iff a real tombstone exists
+      return;
     }
     if(!localChanged && remoteChanged){
       if(remoteHad){
@@ -656,17 +659,18 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
         // GUARD 2: never drop a record CREATED AFTER the remote snapshot was
         // written -- the remote simply never saw it, so its absence is not a
         // deletion. Only applies when caller supplied a real remoteSavedAt.
-        if(localHad && remoteSavedAt != null && _ca(l) > Number(remoteSavedAt)){
-          resultMap.set(id, l);
-        }
-        // else: genuine remote deletion -> leave unset (propagates)
+        // TOMBSTONE MODEL (2026-07-12): a record merely absent from the remote
+        // snapshot is NOT proof of deletion -- a stale/partial remote must never
+        // silently drop it (this was the bug that lost 500+ day dailies). Keep
+        // the local copy; real deletions are applied by the S.deletions overlay.
+        if(localHad) resultMap.set(id, l);
       }
       return;
     }
     // both changed relative to base
     if(localHad && !remoteHad){ resultMap.set(id, l); return; }   // remote deleted, local modified -> modification wins
     if(!localHad && remoteHad){ resultMap.set(id, r); return; }   // local deleted, remote modified -> modification wins
-    if(!localHad && !remoteHad) return;                            // both deleted -> stays deleted
+    if(!localHad && !remoteHad){ if(b) resultMap.set(id, b); return; } // TOMBSTONE MODEL (2026-07-12): keep; only the S.deletions overlay deletes
     // both modified and both still present -> daily-aware tiebreak (F3, 2026-07-11):
     // cron no longer bumps updatedAt (app.js runCron), so a plain updatedAt race
     // can't arbitrate completion-vs-reset conflicts for dailies any more; hand
@@ -694,6 +698,18 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
     resultMap.set(id, winner);
     return;
   });
+
+  // ---- TOMBSTONE OVERLAY (2026-07-12) --------------------------------------
+  // Deletion is driven ONLY by explicit tombstones (S.deletions), never by an
+  // entity being absent from one side. Remove an id iff a tombstone's timestamp
+  // is >= the surviving entity's own effective edit time, so an edit/re-create
+  // made AFTER the delete still wins (resurrects).
+  if(tombstoneMap && tombstoneMap.size){
+    resultMap.forEach((v, id) => {
+      const ts = tombstoneMap.get(id);
+      if(ts != null && Number(ts) >= _ua(v)) resultMap.delete(id);
+    });
+  }
 
   // Preserve LOCAL order; append remote-only entities at the end (plain end —
   // acceptable per plan §3.4, same-type-group placement skipped as optional).
@@ -808,14 +824,28 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt){
     return l >= r ? l : r; // dayStamp() is a lexically-sortable integer (YYYYMMDD-ish) -> plain max
   })();
 
+  // Union all tombstones (base+local+remote), keeping the newest 'at' per id.
+  // Passed into every id-keyed mergeCollection so deletion is tombstone-driven.
+  const mergedDeletions = (function(){
+    const acc = new Map();
+    [].concat(base.deletions||[], remote.deletions||[], local.deletions||[]).forEach(d=>{
+      if(!d || d.id==null) return;
+      const at = Number(d.at)||0;
+      const prev = acc.get(d.id);
+      if(prev==null || at>prev) acc.set(d.id, at);
+    });
+    return acc; // Map(id -> at)
+  })();
+  const _tomb = mergedDeletions;
+
   const merged = {
-    tasks: normalizeDailyResets(mergeCollection(base.tasks, local.tasks, remote.tasks, remoteSavedAt, localSavedAt), mergedLastCron), // F3 (2026-07-11): reset overlay keyed to merged lastCron
-    rewards: mergeCollection(base.rewards, local.rewards, remote.rewards, remoteSavedAt, localSavedAt),
-    tags: mergeCollection(base.tags, local.tags, remote.tags, remoteSavedAt, localSavedAt),
+    tasks: normalizeDailyResets(mergeCollection(base.tasks, local.tasks, remote.tasks, remoteSavedAt, localSavedAt, _tomb), mergedLastCron), // F3 (2026-07-11): reset overlay keyed to merged lastCron
+    rewards: mergeCollection(base.rewards, local.rewards, remote.rewards, remoteSavedAt, localSavedAt, _tomb),
+    tags: mergeCollection(base.tags, local.tags, remote.tags, remoteSavedAt, localSavedAt, _tomb),
     devices: mergeDevices(base.devices, local.devices, remote.devices),
     an: {
-      views: mergeCollection(baseAn.views, localAn.views, remoteAn.views, remoteSavedAt, localSavedAt),
-      metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics, remoteSavedAt, localSavedAt)
+      views: mergeCollection(baseAn.views, localAn.views, remoteAn.views, remoteSavedAt, localSavedAt, _tomb),
+      metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics, remoteSavedAt, localSavedAt, _tomb)
     },
     history: mergeDayArray(local.history, remote.history),
     charHistory: mergeDayArray(local.charHistory, remote.charHistory),
@@ -825,6 +855,7 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt){
       return Array.from(new Set([...l, ...r])).sort();
     })(),
     lastCron: mergedLastCron,
+    deletions: Array.from(mergedDeletions, ([id, at]) => ({id: id, at: at})),
     char: (function(){
       const b = base.char || {}, l = local.char || {}, r = remote.char || {};
       const localChanged = !deepEqual(l, b);

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.13-1617";
+const APP_VERSION = "v2026.07.13-1619";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -806,7 +806,7 @@ async function readSnapshot(id){
     });
   }catch(e){ console.error("readSnapshot failed:",e); return null; }
 }
-async function writeSnapshot(type){
+async function writeSnapshot(type, tier){
   try{
     const db = await idbOpen();
     let events = [];
@@ -839,7 +839,8 @@ async function writeSnapshot(type){
         views: ((S.prefs&&S.prefs.an&&S.prefs.an.views)||[]).length,
         events: events.length
       },
-      verified: false
+      verified: false,
+      tier: tier || null
     };
     const tx = db.transaction("backups","readwrite");
     const store = tx.objectStore("backups");

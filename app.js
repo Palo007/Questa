@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.13-0944";
+const APP_VERSION = "v2026.07.13-1616";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -984,6 +984,30 @@ const uid = ()=> Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 // missedOn and lastCron store these LOCAL YYYYMMDD ints. Cross-device TZ diffs
 // are cosmetic mismatches only, not data loss — see tests/daystamp.test.js.
 function dayStamp(d){ return d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate(); }
+// isoWeekKey(ts): ISO-8601 week key — year*100 + ISO week number (Mon-start).
+// Week 1 contains the first Thursday of the year (ISO 8601 definition).
+function isoWeekKey(ts){
+  var d = new Date(ts);
+  // Shift to the Monday of the ISO week: day-of-week (0=Sun..6=Sat) -> ISO (0=Mon..6=Sun)
+  var dow = (d.getDay() + 6) % 7;
+  // Thursday trick: set to Thursday of this week, then read its year
+  d.setDate(d.getDate() - dow + 3);
+  var isoYear = d.getFullYear();
+  // Jan 4 is always in ISO week 1; weekNo = 1 + days since first Thursday / 7
+  var jan4 = new Date(isoYear, 0, 4);
+  var weekNo = 1 + Math.floor((d - jan4) / 604800000);
+  return isoYear * 100 + weekNo;
+}
+// snapshotBoundaryKeys(ts): calendar-boundary keys for GFS tier rotation.
+// Returns {day: YYYYMMDD, week: ISO week key, month: year*12+month}.
+function snapshotBoundaryKeys(ts){
+  var d = new Date(ts);
+  return {
+    day:   dayStamp(d),
+    week:  isoWeekKey(ts),
+    month: d.getFullYear() * 12 + d.getMonth()
+  };
+}
 /* BEGIN_REMINDER_HELPERS */
 function normalizeTaskReminders(t) {
   if (!t.reminders || !Array.isArray(t.reminders)) {

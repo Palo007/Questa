@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.13-1616";
+const APP_VERSION = "v2026.07.13-1617";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -173,6 +173,13 @@ function migrate(s){ const f=freshState();
   if(!Array.isArray(out.monthlyBackups)) out.monthlyBackups=[];
   if(!Array.isArray(out.deletions)) out.deletions=[];
   delete out.events;
+  // GFS (grandfather-father-son) snapshot rotation counters — ensure prefs.gfs
+  // is a {daily, weekly, monthly} numeric object; coerce any legacy/non-numeric
+  // values to 0 so downstream rotation logic can rely on number semantics.
+  out.prefs.gfs = (out.prefs.gfs && typeof out.prefs.gfs==="object") ? out.prefs.gfs : {daily:0, weekly:0, monthly:0};
+  out.prefs.gfs.daily   = Number(out.prefs.gfs.daily)   || 0;
+  out.prefs.gfs.weekly  = Number(out.prefs.gfs.weekly)  || 0;
+  out.prefs.gfs.monthly = Number(out.prefs.gfs.monthly) || 0;
   if(Array.isArray(out.tasks)){ out.tasks.forEach(normalizeTaskReminders); }
   // F4 (2026-07-11): backfill missing checklist-item ids deterministically so
   // two devices converge on the same id for the same legacy item instead of

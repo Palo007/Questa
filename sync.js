@@ -1034,7 +1034,7 @@ async function _syncNowAttempt(transientRetryCount){
        && stableStringify(remote.state) !== stableStringify(base)){
       base = null;
     }
-    const merged = remote ? merge(base, local, remote.state, remote.savedAt, localSavedAt) : local;
+    const merged = remote ? merge(base, local, remote.state, remote.savedAt, localSavedAt, syncDeviceId(), remote.deviceId || null) : local;
 
     if(!merged || !Array.isArray(merged.tasks)){
       syncCfgSave({ lastError: "merge produced invalid state; sync aborted" });
@@ -1095,7 +1095,7 @@ async function _pushWithConflictRetry(mergedJson, knownRev, attempt){
       }
       const localSavedAt = (typeof S !== "undefined" && S && S.__savedAt) || null;
       const local = syncSubset();
-      const reMerged = fresh ? merge(_base2, local, fresh.state, fresh.savedAt, localSavedAt) : local;
+      const reMerged = fresh ? merge(_base2, local, fresh.state, fresh.savedAt, localSavedAt, syncDeviceId(), fresh.deviceId || null) : local;
       syncApply(reMerged);
       return _pushWithConflictRetry(JSON.stringify(reMerged), fresh ? fresh.rev : null, attempt + 1);
     }
@@ -1480,13 +1480,16 @@ async function syncEventsPush(){
   if(typeof getEvents !== "function") return;
   const myDev = syncDeviceId();
   const since = syncCfg().evtLastUploadTs || 0;
-  const fresh = evtUploadable(await getEvents({ from: since + 1 }), myDev, since);
+  // diagnostics sync cross-device for remote debugging; the Activity Feed
+  // still filters them at render via getEvents' default (app.js).
+  const fresh = evtUploadable(await getEvents({ from: since + 1, includeDiag: true }), myDev, since);
   if(!fresh.length) return;
   const months = [...new Set(fresh.map(e => evtMonthKey(e.ts)))].sort();
   let maxTs = since;
   for(const mk of months){
     const r = evtMonthRange(mk);
-    const recs = evtOwnMonthRecords(await getEvents({ from: r.from, to: r.to }), myDev);
+    // diagnostics sync cross-device for remote debugging (see note above).
+    const recs = evtOwnMonthRecords(await getEvents({ from: r.from, to: r.to, includeDiag: true }), myDev);
     if(!recs.length) continue;
     await dbxUploadText(EVENTS_DIR + "/" + myDev + "-" + mk + ".json", JSON.stringify(recs));
     recs.forEach(e => { if(e.ts > maxTs) maxTs = e.ts; });
@@ -1516,7 +1519,9 @@ async function syncEventsPull(){
     try{ records = JSON.parse(dl.text); }catch(e){ /* corrupt: skip content */ }
     if(Array.isArray(records)){
       const range = evtMonthRange(parsed.month);
-      const existing = new Set((await getEvents({ from: range.from, to: range.to }))
+      // diagnostics sync cross-device for remote debugging (see note above);
+      // the pre-existing kind:'lifecycle' exclusion in evtIncomingFilter stays.
+      const existing = new Set((await getEvents({ from: range.from, to: range.to, includeDiag: true }))
         .map(e => e && e.uid).filter(Boolean));
       await evtInsertNew(evtIncomingFilter(records, existing, myDev, now, ageLimit));
     }

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.13-0857";
+const APP_VERSION = "v2026.07.13-0944";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -210,6 +210,16 @@ var _prevCharSig = null;
 function _charSig(c){ if(!c) return ""; var o={}; for(var k in c){ if(k!=="updatedAt") o[k]=c[k]; } try{ return JSON.stringify(o); }catch(e){ return ""; } }
 /* BEGIN_DURABLE_STATE_HELPERS */
 let _stateWritePromise = null;
+// 2026-07-13 P0-1: save() must be fully SYNCHRONOUS. The previous design
+// deferred the actual localStorage write into a navigator.locks.request()
+// callback, so save() returned before anything persisted — the pagehide
+// flush (flushState -> save) inherited this, and an OS kill between pagehide
+// and lock grant lost the edit. Web Locks are removed from save() entirely
+// (they remain in sync.js's syncNow runner election, untouched here). Instead,
+// multi-tab clobber detection uses a tiny companion key (STORE_KEY + ".seq")
+// that is cheap to read on every save without parsing the full stored blob;
+// the full parse only happens in the rare case where another tab has already
+// written a higher seq.
 function save(){
   var applying = (typeof syncIsApplying==="function" && syncIsApplying());
   // Stamp char.updatedAt only on a genuine user-driven char change (not while
@@ -222,9 +232,8 @@ function save(){
     _prevCharSig = _charSig(S.char);
   }
   IS_DIRTY = true;
-  // #10 Multi-tab clobber protection: capture pre-bump __seq so the lock
-  // callback can detect whether another tab wrote a newer state while this
-  // save() was queued.
+  // #10 Multi-tab clobber protection: capture pre-bump __seq so we can detect
+  // whether another tab wrote a newer state before this save() commits.
   var preBumpSeq = (S.__seq || 0);
   // Durable-state stamps (2026-07-11 persistence-loss fix, Phase A): a
   // monotonic __seq + wall-clock __savedAt on every S snapshot, so load()/
@@ -239,6 +248,10 @@ function save(){
     var _json = JSON.stringify(S);
     try{
       localStorage.setItem(STORE_KEY, _json);
+      // Companion key, written right after the state itself so the next
+      // save() (in this tab or another) can cheaply detect a newer writer
+      // without parsing the full blob. Skipped if setItem above threw.
+      try{ localStorage.setItem(STORE_KEY + ".seq", String(S.__seq)); }catch(_){}
     }catch(quotaErr){
       // #11a: QuotaExceededError aborts setItem but __seq already bumped.
       // IDB has its own larger quota; write the mirror so reconcileDurableState
@@ -253,35 +266,30 @@ function save(){
     _stateWritePromise = _idbWriteState(_json).catch(function(){ /* best-effort mirror */ });
     if(typeof scheduleSync==="function" && !applying) scheduleSync();
   }
-  // #10 Layer (a): Web Locks exclusive lock around read-check-write.
-  // Inside the lock, if stored __seq > preBumpSeq, another tab wrote first:
-  // adopt stored state, log multiTabClobberAvoided, drop this write, re-render.
-  if(typeof navigator!=='undefined' && navigator.locks && typeof navigator.locks.request==='function'){
-    navigator.locks.request('questa-sync', {mode:'exclusive'}, function(){
-      try{
-        var stored = localStorage.getItem(STORE_KEY);
-        if(stored){
-          var storedObj = JSON.parse(stored);
-          var storedSeq = Number(storedObj.__seq) || 0;
-          if(storedSeq > preBumpSeq){
-            // Another tab wrote a newer state — adopt it, drop this write.
-            S = migrate(storedObj);
-            if(typeof logEvent==='function') logEvent({kind:'multiTabClobberAvoided', preBumpSeq:preBumpSeq, storedSeq:storedSeq});
-            if(typeof render==='function') render();
-            return;
-          }
-        }
-      }catch(ex){ /* fall through to _saveCommit on parse/read error */ }
-      _saveCommit();
-    });
-  } else {
-    // Graceful fallback when navigator.locks unavailable (older browsers).
-    if(typeof logEvent==='function' && !save._locksWarned){
-      logEvent({kind:'webLocksUnavailable'});
-      save._locksWarned = true;
-    }
-    _saveCommit();
+  // Fast synchronous check against the companion seq key (no full-state
+  // parse on the common path). If absent (legacy/first run), skip the check
+  // and commit normally. This replaces the old Web-Locks read-check-write:
+  // save() must return with localStorage already updated in the same JS
+  // turn (2026-07-13 P0-1 — fixes an Android kill-path data-loss regression
+  // where the lock callback deferred the actual write).
+  var _companionRaw = null;
+  try{ _companionRaw = localStorage.getItem(STORE_KEY + ".seq"); }catch(ex){}
+  if(_companionRaw != null && Number(_companionRaw) > preBumpSeq){
+    // Another tab already wrote a newer state — adopt it, drop this write,
+    // same semantics as the old lock-based clobber-avoidance path.
+    try{
+      var stored = localStorage.getItem(STORE_KEY);
+      if(stored){
+        var storedObj = JSON.parse(stored);
+        var storedSeq = Number(storedObj.__seq) || 0;
+        S = migrate(storedObj);
+        if(typeof logEvent==='function') logEvent({kind:'multiTabClobberAvoided', preBumpSeq:preBumpSeq, storedSeq:storedSeq});
+        if(typeof render==='function') render();
+        return;
+      }
+    }catch(ex){ /* fall through to _saveCommit on parse/read error */ }
   }
+  _saveCommit();
 }
 // #10 Layer (b): storage event listener — incoming __seq > live → adopt + render.
 // Keeps idle tabs current so layer (a) rarely fires.
@@ -4568,7 +4576,10 @@ function resetEverything() {
     if(typeof syncBasePut==='function') syncBasePut(null);
     if(typeof _idbWriteState==='function') _idbWriteState(null).catch(function(){});
     localStorage.removeItem(STORE_KEY);
-    S.__seq = 0;              // so save()'s (S.__seq||0)+1 yields 1
+    localStorage.removeItem(STORE_KEY + ".seq");
+    // 2026-07-13: dropped the dead `S.__seq = 0` line — it mutated the OLD S
+    // one line before S = freshState() discards it entirely; freshState()
+    // has no __seq field, so save()'s (S.__seq||0)+1 yields 1 regardless.
     S = freshState();
     save();
     applyWidth();
@@ -4872,7 +4883,9 @@ function exportSaveDevice(blob, filename, eventCount) {
 }
 
 function exportData(){
-  getEvents({})
+  // backups are for debugging: user-facing export downloads must include
+  // diagnostic-kind events, not just the Activity-Feed-visible subset.
+  getEvents({includeDiag:true})
     .then(buildBackupFile)
     .then(({blob, filename, eventCount}) => showExportChooser(blob, filename, eventCount))
     .catch(() => buildBackupFile([]).then(({blob, filename, eventCount}) => showExportChooser(blob, filename, eventCount)));

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.12-2318";
+const APP_VERSION = "v2026.07.13-0857";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -4474,7 +4474,7 @@ function openSettings(){
   h+=settingRow('notifications','Notifications','Browser-based notification permission and status.',(S.prefs.notificationsEnabled?'On':'Off'));
   h+='</div>';
   const syncTip='Sync via Dropbox (your account, no server) keeps this device and your other devices up to date automatically.';
-  h+='<div class="colTitle"><h2 style="font-size:13px">Sync</h2>'+infoIcon('Sync\n'+syncTip)+'</div>';
+  h+='<div class="colTitle"><h2 style="font-size:13px;flex:none">Sync</h2>'+infoIcon('Sync\n'+syncTip)+'</div>';
   if(typeof syncCfg==="function"){
     const scfg=syncCfg();
     if(!scfg.enabled){
@@ -4514,7 +4514,7 @@ function openSettings(){
   } else {
     h+='<div class="small">Sync module not loaded.</div>';
   }
-  h+='<div class="colTitle"><h2 style="font-size:13px">Backup &amp; transfer</h2>'+infoIcon('Backup & transfer\nYour progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.')+'</div>';
+  h+='<div class="colTitle"><h2 style="font-size:13px;flex:none">Backup &amp; transfer</h2>'+infoIcon('Backup & transfer\nYour progress lives only on this device. Export a file to back up or move to another phone, then import it there to continue. Export now includes your full event log (subtask/tap/completion history), so one file is a complete backup.')+'</div>';
   h+='<div class="settingsRow"><button class="btn ghost" onclick="exportData()">Export</button>'+
     '<button class="btn ghost" onclick="document.getElementById(\'importFile\').click()">Import</button>'+
     '<button class="btn ghost" onclick="openRestorePicker()">Restore Snapshot</button></div>';

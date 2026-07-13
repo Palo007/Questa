@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.13-1619";
+const APP_VERSION = "v2026.07.13-1644";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -877,49 +877,61 @@ async function writeSnapshot(type, tier){
   }catch(e){ console.error("writeSnapshot failed:",e); return null; }
 }
 
+// takeSnapshot: write a single full (GFS tier if boundary crossed) or delta,
+// then rotate. Uses snapshotBoundaryKeys (W1.1), S.prefs.gfs markers (W1.2),
+// and writeSnapshot(type, tier) (W1.3).
+async function takeSnapshot(){
+  const k = snapshotBoundaryKeys(Date.now());
+  const g = S.prefs.gfs || (S.prefs.gfs = {daily:0, weekly:0, monthly:0});
+  let tier = null;
+  if(g.monthly !== k.month) tier = "monthly";
+  else if(g.weekly !== k.week) tier = "weekly";
+  else if(g.daily  !== k.day)  tier = "daily";
+  // Advance markers ONLY if the write actually succeeded (writeSnapshot returns
+  // the new id, or null on failure). Otherwise the boundary cross is "consumed"
+  // without a baseline full and that daily/weekly/monthly slot is silently skipped
+  // until the next boundary -- a transient IDB error must NOT permanently skip a tier.
+  const id = tier ? await writeSnapshot("full", tier) : await writeSnapshot("delta");
+  if(id){
+    try { g.daily = k.day; g.weekly = k.week; g.monthly = k.month; save(); }
+    catch(e) { /* markers not persisted; next call may re-promote -- acceptable */ }
+    await rotateSnapshots();
+  }
+  return id;
+}
+
 // Grandfather-father-son rotation: keep 7 daily, 4 weekly, 6 monthly baselines.
+// Uses calendar-boundary keys (snapshotBoundaryKeys) NOT epoch buckets.
 async function rotateSnapshots(){
   try{
     const db = await idbOpen();
-    const snapshots = await listSnapshots();
-    if(snapshots.length <= 7) return;
-    const day = 86400000, week = 7*day, month = 30*day;
-    const keep = new Set();
-    if(snapshots.length > 0) keep.add(snapshots[0].id);
-    const seenDays = new Set();
-    for(const s of snapshots){
-      const dayKey = Math.floor(s.ts / day);
-      if(!seenDays.has(dayKey)){
-        seenDays.add(dayKey);
-        keep.add(s.id);
-        if(seenDays.size >= 7) break;
-      }
-    }
-    const seenWeeks = new Set();
-    for(const s of snapshots){
-      const weekKey = Math.floor(s.ts / week);
-      if(!seenWeeks.has(weekKey)){
-        seenWeeks.add(weekKey);
-        keep.add(s.id);
-        if(seenWeeks.size >= 4) break;
-      }
-    }
-    const seenMonths = new Set();
-    for(const s of snapshots){
-      const mKey = Math.floor(s.ts / month);
-      if(!seenMonths.has(mKey)){
-        seenMonths.add(mKey);
-        keep.add(s.id);
-        if(seenMonths.size >= 6) break;
-      }
-    }
-    const tx = db.transaction("backups", "readwrite");
+    const snaps = await listSnapshots();
+    if(snaps.length === 0) return;
+    const fulls = snaps.filter(s => s.type === "full");
+    const deltas = snaps.filter(s => s.type === "delta");
+    const keep = new Set([snaps[0].id]); // newest overall
+    // Daily: keep 7 most-recent distinct calendar-day fulls
+    const dailySeen = new Set(); const dailyKeptFulls = [];
+    for(const s of fulls){ const dk = snapshotBoundaryKeys(s.ts).day;
+      if(!dailySeen.has(dk)){ dailySeen.add(dk); keep.add(s.id); dailyKeptFulls.push(s); if(dailySeen.size>=7) break; } }
+    // Weekly: keep 4 most-recent distinct ISO-week fulls
+    const weekSeen = new Set();
+    for(const s of fulls){ const wk = snapshotBoundaryKeys(s.ts).week;
+      if(!weekSeen.has(wk)){ weekSeen.add(wk); keep.add(s.id); if(weekSeen.size>=4) break; } }
+    // Monthly: keep 6 most-recent distinct month fulls
+    const monthSeen = new Set();
+    for(const s of fulls){ const mk = snapshotBoundaryKeys(s.ts).month;
+      if(!monthSeen.has(mk)){ monthSeen.add(mk); keep.add(s.id); if(monthSeen.size>=6) break; } }
+    // Son window floor = oldest retained DAILY full (keeps deltas within ~7 days)
+    let oldestDailyFullTs = Infinity;
+    for(const s of dailyKeptFulls){ oldestDailyFullTs = Math.min(oldestDailyFullTs, s.ts); }
+    for(const s of deltas){ if(s.ts >= oldestDailyFullTs) keep.add(s.id); }
+    // Chain integrity: a kept delta must keep its baseline full (ts <= delta.ts)
+    for(const s of deltas){ if(keep.has(s.id)){
+      const base = fulls.find(f => f.ts <= s.ts); if(base) keep.add(base.id); } }
+    const tx = db.transaction("backups","readwrite");
     const store = tx.objectStore("backups");
-    for(const s of snapshots){
-      if(!keep.has(s.id)){
-        store.delete(s.id);
-      }
-    }
+    for(const s of snaps){ if(!keep.has(s.id)) store.delete(s.id); }
   }catch(e){ console.error("rotateSnapshots failed:", e); }
 }
 

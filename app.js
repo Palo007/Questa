@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.13-1644";
+const APP_VERSION = "v2026.07.13-1700";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -4574,12 +4574,7 @@ function openSettings(){
   h+='<div class="backupMeta small"><span id="lastFullBackupDate"></span><span id="lastExportDate"></span></div>';
   h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button><div class="appVersion" onclick="tapVersionDebug()">'+APP_VERSION+'</div></div>';
   if(IS_DIRTY){
-    _flushPromise = listSnapshots().then(snapshots => {
-      const hasBaseline = snapshots.some(s => s.type === "full");
-      return writeSnapshot(hasBaseline ? "delta" : "full");
-    }).catch(() => writeSnapshot("full")).then(id => {
-      if(id) IS_DIRTY = false;
-    }).finally(() => { _flushPromise = null; });
+    _flushPromise = takeSnapshot().then(id => { if(id) IS_DIRTY=false; }).finally(()=>{ _flushPromise=null; });
   }
   sheet.innerHTML=h;
   if(_dnFocused){
@@ -5174,23 +5169,13 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
 document.addEventListener('visibilitychange', () => {
   if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'tier1:visibilitychange', hidden:document.hidden, dirty:IS_DIRTY});
   if(document.hidden && IS_DIRTY){
-    _flushPromise = listSnapshots().then(snapshots => {
-      const hasBaseline = snapshots.some(s => s.type === "full");
-      return writeSnapshot(hasBaseline ? "delta" : "full");
-    }).catch(() => writeSnapshot("full")).then(id => {
-      if(id) IS_DIRTY = false;
-    }).finally(() => { _flushPromise = null; });
+    _flushPromise = takeSnapshot().then(id => { if(id) IS_DIRTY=false; }).finally(()=>{ _flushPromise=null; });
   }
 });
 window.addEventListener('pagehide', () => {
   if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'tier1:pagehide', dirty:IS_DIRTY});
   if(IS_DIRTY){
-    _flushPromise = listSnapshots().then(snapshots => {
-      const hasBaseline = snapshots.some(s => s.type === "full");
-      return writeSnapshot(hasBaseline ? "delta" : "full");
-    }).catch(() => writeSnapshot("full")).then(id => {
-      if(id) IS_DIRTY = false;
-    }).finally(() => { _flushPromise = null; });
+    _flushPromise = takeSnapshot().then(id => { if(id) IS_DIRTY=false; }).finally(()=>{ _flushPromise=null; });
   }
 });
 
@@ -5265,19 +5250,12 @@ try{
     });
   }
 }catch(e){ /* best-effort */ }
-rotateSnapshots().catch(()=>{});
 checkExportStaleness();
 // #11b: Request persistent storage to reduce browser-eviction risk (Safari ITP
 // 7-day wipe, Chrome eviction under pressure). PWAs get this automatically;
 // browser-tab usage does not (MDN: all-or-nothing per origin).
 try{ if(navigator&&navigator.storage&&typeof navigator.storage.persist==="function"){ navigator.storage.persist().then(function(granted){ if(typeof logEvent==="function") logEvent({kind:"storagePersist", granted:!!granted}); }).catch(function(){}); } }catch(_){}
 
-setTimeout(() => {
-  listSnapshots().then(snapshots => {
-    const now = Date.now();
-    const needsSnapshot = snapshots.length === 0 || (now - snapshots[0].ts) > 12*3600000;
-    if(needsSnapshot){
-      writeSnapshot("full").catch(()=>{});
-    }
-  }).catch(()=>{});
+setTimeout(()=>{
+  if(!_flushPromise){ _flushPromise = takeSnapshot().catch(()=>{}).finally(()=>{ _flushPromise=null; }); }
 }, 5000);

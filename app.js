@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.14-1426";
+const APP_VERSION = "v2026.07.14-2330";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -4212,6 +4212,7 @@ function drawSheet(){
   if(S.prefs.saveBtnTop){
     h+='<button class="btn primary" type="button" onclick="saveTask()" style="padding:6px 14px;height:auto">Save</button>';
   }
+  h+='<button type="button" onclick="pasteEditTask()" title="Paste title, checklist & notes" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.3;padding:0 4px;line-height:1;color:inherit">📋</button>';
   h+='<button type="button" onclick="copyEditTask()" title="Copy title, checklist & notes" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.3;padding:0 4px;line-height:1;color:inherit">⧉</button></div>';
   h+='<label>Title</label><input type="text" id="eTitle" value="'+esc(t.title)+'" placeholder="What needs doing?">';
   const diffOpts = t.type==='habit' ? ['trivial','easy','medium','hard','log'] : ['trivial','easy','medium','hard'];
@@ -4419,6 +4420,155 @@ function copyEditTask(){
     document.body.removeChild(ta);
   }
   copyToClipboard(text);
+}
+async function pasteEditTask(){
+  if (!navigator.clipboard || !navigator.clipboard.readText) {
+    toast('Clipboard paste is blocked or unsupported in this browser');
+    return;
+  }
+  let text = '';
+  let clipboardWorked = false;
+  try {
+    if (document.body) document.body.focus();
+    if (window.focus) window.focus();
+    text = (await navigator.clipboard.readText()).trim();
+    clipboardWorked = true;
+  } catch (err) {
+    text = '';
+  }
+  if (text) {
+    applyPaste(text);
+    return;
+  }
+  if (clipboardWorked) {
+    toast('Clipboard is empty');
+    return;
+  }
+  const ta = document.createElement('textarea');
+  ta.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:90%;max-width:600px;height:300px;z-index:999999;opacity:1;font-size:16px;padding:16px;box-sizing:border-box;background:#fff;border:3px solid #5b3a86;border-radius:12px;outline:none;resize:none;box-shadow:0 8px 32px rgba(0,0,0,0.3)';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.placeholder = 'Paste task text here (Ctrl+V), then press Enter...';
+  toast('Paste into the box, then press Enter');
+  const finish = () => {
+    ta.removeEventListener('keydown', onKey);
+    ta.removeEventListener('paste', onPaste);
+    if (ta.parentNode) document.body.removeChild(ta);
+    const v = ta.value.trim();
+    if (v) applyPaste(v);
+    else toast('Paste cancelled');
+  };
+  const onPaste = () => setTimeout(() => {
+    ta.removeEventListener('keydown', onKey);
+    ta.removeEventListener('paste', onPaste);
+    if (ta.parentNode) document.body.removeChild(ta);
+    const v = ta.value.trim();
+    if (v) applyPaste(v);
+    else toast('Paste cancelled');
+  }, 100);
+  const onKey = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      finish();
+    }
+    if (e.key === 'Escape') {
+      ta.removeEventListener('keydown', onKey);
+      ta.removeEventListener('paste', onPaste);
+      if (ta.parentNode) document.body.removeChild(ta);
+      toast('Paste cancelled');
+    }
+  };
+  ta.addEventListener('paste', onPaste);
+  ta.addEventListener('keydown', onKey);
+}
+function legacyPaste(){
+  const ta = document.createElement('textarea');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try {
+    const ok = document.execCommand('paste');
+    if (!ok) return null;
+    return ta.value;
+  } catch (e) {
+    return null;
+  } finally {
+    document.body.removeChild(ta);
+  }
+}
+function applyPaste(text){
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 1) {
+    EDIT.title = text;
+    const titleInp = document.getElementById('eTitle');
+    if (titleInp) titleInp.value = text;
+    toast('Title pasted');
+    return;
+  }
+  let titleLines = [];
+  let checklistItems = [];
+  let notesLines = [];
+  let parseMode = 'title';
+  let hasChecklistMarker = false;
+  let hasNotesMarker = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (trimmed === 'Checklist:') {
+      hasChecklistMarker = true;
+      parseMode = 'checklist';
+      continue;
+    } else if (trimmed === 'Notes:') {
+      hasNotesMarker = true;
+      parseMode = 'notes';
+      continue;
+    }
+    if (parseMode === 'title') {
+      titleLines.push(line);
+    } else if (parseMode === 'checklist') {
+      const match = line.match(/^\s*-\s*\[([ xX]?)\]\s*(.*)$/);
+      if (match) {
+        const done = match[1].toLowerCase() === 'x';
+        checklistItems.push({ id: uid(), text: match[2].trim(), done: done });
+      } else if (trimmed !== '') {
+        checklistItems.push({ id: uid(), text: trimmed, done: false });
+      }
+    } else if (parseMode === 'notes') {
+      notesLines.push(line);
+    }
+  }
+  if (!hasChecklistMarker && checklistItems.length === 0) {
+    const firstSubtaskIdx = lines.findIndex(l => /^\s*-\s*\[([ xX]?)\]/.test(l) || /^\s*-\s/.test(l));
+    if (firstSubtaskIdx > 0) {
+      titleLines = lines.slice(0, firstSubtaskIdx);
+      for (let i = firstSubtaskIdx; i < lines.length; i++) {
+        const l = lines[i];
+        const t = l.trim();
+        if (t === 'Notes:') {
+          hasNotesMarker = true;
+          notesLines = lines.slice(i + 1);
+          break;
+        }
+        const match = l.match(/^\s*-\s*\[([ xX]?)\]\s*(.*)$/);
+        if (match) {
+          const done = match[1].toLowerCase() === 'x';
+          checklistItems.push({ id: uid(), text: match[2].trim(), done: done });
+        } else if (t !== '') {
+          checklistItems.push({ id: uid(), text: t, done: false });
+        }
+      }
+    }
+  }
+  const parsedTitle = titleLines.join(' ').trim();
+  if (parsedTitle) EDIT.title = parsedTitle;
+  if (checklistItems.length > 0) EDIT.checklist = checklistItems;
+  const parsedNotes = notesLines.join('\n').trim();
+  if (parsedNotes) EDIT.notes = parsedNotes;
+  drawSheet();
+  toast('Task pasted');
 }
 function deleteTask(){
   confirmDialog('Delete Task', 'Delete this task?').then(ok => {

@@ -882,6 +882,33 @@
     padding: 8px 10px !important;
   }
 
+
+  @media (max-width: 480px) {
+    #sheet .rowBtns,
+    #sheet .settingsRow {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    #sheet .rowBtns .btn,
+    #sheet .settingsRow .btn {
+      flex: 1 1 calc(50% - 4px);
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      line-height: 1.25;
+      padding: 10px 6px;
+      font-size: 11px;
+      word-break: break-word;
+      min-height: 40px;
+      text-align: center;
+    }
+    #sheet .rowBtns .btn.danger {
+      flex: 1 1 100%;
+      order: 10;
+    }
+  }
 </style>
 </head>
 <body>

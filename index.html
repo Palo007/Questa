@@ -877,9 +877,40 @@
     padding: 6px 10px !important;
   }
   .dragGhost.ci {
-    background: var(--panel) !important;
+    background: var(--panel2) !important;
     border: 1px solid var(--line) !important;
-    padding: 8px 10px !important;
+    padding: 3px 8px !important;
+    border-radius: 6px !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5) !important;
+    height: auto !important;
+    min-height: 0 !important;
+  }
+  .dragGhost.ci .ci-drag-handle,
+  .dragGhost.ci .del {
+    display: none !important;
+  }
+  .dragGhost.ci .box {
+    width: 20px !important;
+    height: 20px !important;
+    border-radius: 5px !important;
+    font-size: 12px !important;
+    flex-shrink: 0 !important;
+  }
+  .dragGhost.ci input[type="text"] {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    color: var(--ink) !important;
+    font-size: 13px !important;
+    pointer-events: none !important;
+    font-family: inherit !important;
+    outline: none !important;
+    height: auto !important;
+    line-height: 1.2 !important;
   }
 
 

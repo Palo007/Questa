@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.14-1201";
+const APP_VERSION = "v2026.07.14-1255";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -3550,7 +3550,9 @@ function enableTouchDrag(card){
   // before LONGPRESS_MS elapses — see the LONGPRESS_MS comment. Keep it small.)
   card.addEventListener('touchstart',e=>{
     if(e.touches.length!==1) return;
-    if(e.target.closest('.check')) return;        // don't hijack +/-/check taps
+    const isCheckTouch = !!e.target.closest('.check') || !!e.target.closest('.subFrac') || !!e.target.closest('.subbox');
+    const isSubtaskTouch = !!e.target.closest('.subitem');
+    if(isCheckTouch || isSubtaskTouch){ stopInertia(); return; }   // don't hijack check/fraction taps or subtask drags (but still halt any coast)
     if(_tActive || _tGhost || _tDrag) resetDragState();   // clean slate every gesture
     stopInertia();                                // a new touch always halts coasting
     const t=e.touches[0];
@@ -3914,6 +3916,9 @@ function enableEditChecklistDragReorder(){
 
         // Create ghost clone of the .ci row
         _tEditGhost = ci.cloneNode(true);
+        const originalInput = ci.querySelector('input[type="text"]');
+        const ghostInput = _tEditGhost.querySelector('input[type="text"]');
+        if(originalInput && ghostInput){ ghostInput.value = originalInput.value; }
         _tEditGhost.classList.add('dragGhost');
         _tEditGhost.classList.add('ci');
         _tEditGhost.style.width = r.width + 'px';

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.14-1255";
+const APP_VERSION = "v2026.07.14-1426";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -3552,15 +3552,20 @@ function enableTouchDrag(card){
     if(e.touches.length!==1) return;
     const isCheckTouch = !!e.target.closest('.check') || !!e.target.closest('.subFrac') || !!e.target.closest('.subbox');
     const isSubtaskTouch = !!e.target.closest('.subitem');
-    if(isCheckTouch || isSubtaskTouch){ stopInertia(); return; }   // don't hijack check/fraction taps or subtask drags (but still halt any coast)
     if(_tActive || _tGhost || _tDrag) resetDragState();   // clean slate every gesture
     stopInertia();                                // a new touch always halts coasting
+    // Long-press lifts the CARD. Skip it when the touch begins on an interactive
+    // control or a subtask, so those own their tap/drag. Scrolling still works
+    // from these spots below (touch-action:none means native scroll is off; we drive it).
+    const skipCardTimer = isCheckTouch || isSubtaskTouch;
     const t=e.touches[0];
     _tStartX=t.clientX; _tStartY=t.clientY; _tPointerY=t.clientY;
     let _lastY=t.clientY, _decided=false, _isScroll=false;
     let _vLastY=t.clientY, _vLastT=(e.timeStamp||performance.now()), _vel=0;
     clearTimeout(_tTimer);
-    _tTimer=setTimeout(()=>{ if(!_isScroll){ _decided=true; beginTouchDrag(card,t); } },longPressMs());  // long-press (Settings: drag delay)
+    if(!skipCardTimer){
+      _tTimer=setTimeout(()=>{ if(!_isScroll){ _decided=true; beginTouchDrag(card,t); } },longPressMs());
+    }
 
     const onMove=ev=>{
       // Cancel EVERY move from the first one. Card is touch-action:none, but we
@@ -3583,6 +3588,7 @@ function enableTouchDrag(card){
       // First clear movement before the press fires = a scroll: drive it manually.
       if(!_decided && (totDy>10 || totDx>10)){ _decided=true; _isScroll=true; clearTimeout(_tTimer); _tTimer=null; }
       if(_isScroll){
+        if(_tSubActive) return;                    // subtask drag owns this gesture
         window.scrollBy(0,-dy);
         // exponential-moving-average velocity in px/ms (sign matches finger dir)
         const now=(ev.timeStamp||performance.now()), dt=now-_vLastT;
@@ -3596,7 +3602,7 @@ function enableTouchDrag(card){
       window.removeEventListener('touchend',onEnd);
       window.removeEventListener('touchcancel',onEnd);
       if(_tActive){ endTouchDrag(); }              // finish an active drag (no fling)
-      else if(_isScroll){ startInertia(_vel); }    // coast after a manual scroll flick
+      else if(_isScroll && !_tSubActive){ startInertia(_vel); }    // coast after a manual scroll flick
     };
     card.addEventListener('touchmove',onMove,{passive:false});
     window.addEventListener('touchend',onEnd);

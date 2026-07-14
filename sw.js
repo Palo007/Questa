@@ -1,6 +1,6 @@
 /* Questa service worker - network-first for the app shell so updates appear
    on the next launch; cache fallback keeps it working fully offline. */
-const CACHE = "questa-v162";
+const CACHE = "questa-v163";
 const ASSETS = ["./", "./index.html", "./app.js", "./sync.js", "./manifest.json", "./icon.svg",
                 "./icon-192.png", "./icon-512.png"];
 

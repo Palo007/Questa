@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.14-2342";
+const APP_VERSION = "v2026.07.15-2039";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -4691,7 +4691,10 @@ function openSettings(){
   if(typeof syncCfg==="function"){
     const scfg=syncCfg();
     if(!scfg.enabled){
-      h+='<div class="settingsRow"><button class="btn ghost" onclick="syncConnect()">Connect Dropbox</button></div>';
+      h+='<div class="settingsRow" style="display:flex;gap:8px;">'+
+             '<button class="btn ghost" style="flex:1;" onclick="syncConnect()">Connect Dropbox</button>'+
+             '<button class="btn danger" style="flex:1;" onclick="confirmConnectForForcePush()">Connect &amp; Force Push</button>'+
+           '</div>';
     } else {
       const rel=(typeof syncRelativeTime==="function")?syncRelativeTime(scfg.lastSyncAt):(scfg.lastSyncAt?new Date(scfg.lastSyncAt).toLocaleString():'never');
       const devId=scfg.deviceId||'';

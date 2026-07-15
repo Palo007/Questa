@@ -87,8 +87,14 @@ async function pkceChallenge(verifier){
 }
 
 // ---- 2.5 syncConnect() — full-page redirect (no popups) --------------------
-async function syncConnect(){
+async function syncConnect(keepPendingForcePush){
   try{
+    // A normal connect must never inherit a leftover force-push intent from an
+    // abandoned "Connect & Force Push" attempt. Only confirmConnectForForcePush()
+    // passes keepPendingForcePush=true (right after it sets the flag) to preserve it.
+    if(!keepPendingForcePush){
+      localStorage.removeItem("questa.sync.pendingForcePush");
+    }
     const verifier = pkceVerifier();
     const challenge = await pkceChallenge(verifier);
     const redirectUri = location.origin + location.pathname;
@@ -120,7 +126,7 @@ async function syncConnect(){
 // ---- 2.6 syncHandleRedirect() — exchange ?code= for tokens -----------------
 async function syncHandleRedirect(){
   let params;
-  try{ params = new URLSearchParams(location.search); }catch(e){ return; }
+  try{ params = new URLSearchParams(location.search); }catch(e){ localStorage.removeItem("questa.sync.pendingForcePush"); return; }
   const code = params.get("code");
   const pkce = (function(){
     try{
@@ -135,7 +141,7 @@ async function syncHandleRedirect(){
     }catch(e){ return null; }
   })();
   const verifier = pkce && pkce.v;
-  if(!code || !verifier) return;
+  if(!code || !verifier){ localStorage.removeItem("questa.sync.pendingForcePush"); return; }
 
   const redirectUri = (pkce && pkce.r) || (location.origin + location.pathname);
   try{
@@ -155,6 +161,12 @@ async function syncHandleRedirect(){
     if(!res.ok || !data.access_token){
       throw new Error((data && (data.error_description || data.error)) || ("token exchange failed: " + res.status));
     }
+    // Consume the "connect with intent to force push" flag BEFORE syncNow() can
+    // run. This is the crux of Option A: a normal connect merges the remote down
+    // first, which would defeat a user who connected specifically to overwrite the
+    // remote with THIS device's data. Read it, clear it, then branch on it.
+    const pendingForcePush = localStorage.getItem("questa.sync.pendingForcePush") === "true";
+    localStorage.removeItem("questa.sync.pendingForcePush");
     syncCfgSave({
       refreshToken: data.refresh_token,
       accessToken: data.access_token,
@@ -165,9 +177,15 @@ async function syncHandleRedirect(){
     localStorage.removeItem(PKCE_KEY);
     history.replaceState(null, "", location.pathname);
     if(typeof toast === "function") toast("Dropbox connected");
-    syncNow();
+    if(pendingForcePush){
+      if(typeof toast === "function") toast("Performing initial force push\u2026");
+      syncForcePush();
+    } else {
+      syncNow();
+    }
   }catch(e){
     try{ localStorage.removeItem(PKCE_KEY); }catch(e2){}
+    localStorage.removeItem("questa.sync.pendingForcePush"); // never leave a sticky force-push intent behind on failure
     syncCfgSave({ lastError: "connect failed: " + (e && e.message || e) });
     if(typeof toast === "function") toast("Dropbox connect failed");
   }
@@ -1610,6 +1628,33 @@ function confirmForcePush(){
     syncForcePush();
   });
 }
+// Connect + force push in a single action, for the "fresh device, make Dropbox hold
+// THIS device's data (don't merge the remote in)" case. The OAuth round-trip returns
+// via syncHandleRedirect(), which normally auto-runs syncNow() (a merge) — so we
+// can't connect-then-force-push from here, the merge would already have happened.
+// Instead we stash an intent flag BEFORE redirecting; syncHandleRedirect() reads it
+// and force-pushes instead of merging. Same hard-confirm gate as confirmForcePush()
+// since it is equally destructive to whatever is already in Dropbox.
+function confirmConnectForForcePush(){
+  if(typeof confirmDialog!=="function"){
+    if(typeof toast==="function") toast('Connect & Force Push unavailable right now (confirmation dialog missing).');
+    return;
+  }
+  confirmDialog(
+    'Connect and overwrite Dropbox?',
+    "This connects to Dropbox and IMMEDIATELY overwrites the remote backup with THIS device's data, skipping the normal merge. Anything already saved in Dropbox will be permanently lost. This cannot be undone."
+  ).then(ok=>{
+    if(!ok) return;
+    try{
+      localStorage.setItem("questa.sync.pendingForcePush", "true");
+    }catch(e){
+      if(typeof toast==="function") toast('Could not start connect (storage unavailable).');
+      return;
+    }
+    if(typeof toast==="function") toast('Connecting to Dropbox\u2026');
+    syncConnect(true);
+  });
+}
 // Same "refuse rather than silently proceed" rule as confirmForcePush — force
 // pull discards whatever unsynced local changes this device has, so it needs
 // the same hard confirmation gate.
@@ -1633,6 +1678,16 @@ let _syncInitDone = false;
 function syncInit(){
   if(_syncInitDone) return;
   _syncInitDone = true;
+  // Drop any stale force-push intent left behind by an abandoned "Connect & Force
+  // Push" (user bailed out mid-OAuth). BUT NOT on the redirect coming back: when a
+  // ?code= is present, syncHandleRedirect() below must still see the flag to force
+  // push instead of merging. On the redirect load, syncHandleRedirect() itself
+  // consumes/clears the flag on every path.
+  try{
+    if(String((typeof location!=="undefined" && location.search) || "").indexOf("code=") === -1){
+      localStorage.removeItem("questa.sync.pendingForcePush");
+    }
+  }catch(e){ /* best-effort */ }
   syncHandleRedirect();
   // One-time base purge (2026-07-11 recency-guard rollout): clear any base
   // snapshot written by a pre-fix build so a stale poisoned base cannot fire.
@@ -1662,6 +1717,7 @@ function syncInit(){
 if(typeof window !== "undefined"){
   window.QuestaSync = {
     connect: syncConnect,
+    connectForForcePush: confirmConnectForForcePush,
     disconnect: syncDisconnect,
     now: syncNow,
     forcePush: syncForcePush,

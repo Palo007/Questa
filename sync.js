@@ -181,6 +181,14 @@ async function syncHandleRedirect(){
       if(typeof toast === "function") toast("Performing initial force push\u2026");
       syncForcePush();
     } else {
+      // 2026-07-15: if a reset-while-disconnected stashed a device id for an
+      // event-log purge, delete that device's now-stale /events files before
+      // any pull can resurrect them into the Activity Feed.
+      const pend = (typeof localStorage !== "undefined") ? localStorage.getItem("questa.events.pendingPurgeDev") : null;
+      if(pend){
+        try{ localStorage.removeItem("questa.events.pendingPurgeDev"); }catch(e){}
+        if(typeof syncEventsDeleteDevice === "function") syncEventsDeleteDevice(pend).catch(function(){});
+      }
       syncNow();
     }
   }catch(e){
@@ -313,6 +321,36 @@ async function dbxUpload(path, wrapperObj, rev, _retriedAuth){
     throw new HttpError("upload failed: " + res.status + (detail ? " " + detail : ""), res.status);
   }
   return await res.json();
+}
+
+// Delete a file/folder at path. 409 path/not_found is treated as success
+// (already gone); any other error surfaces. Pre-flight 401 refreshes the
+// token once. Used by the event-log purge on "Reset everything".
+async function dbxDelete(path, _retriedAuth){
+  const tok = await syncToken();
+  const res = await fetch("https://api.dropboxapi.com/2/files/delete_v2", {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer " + tok,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ path: path })
+  });
+  if(res.status === 401 && !_retriedAuth){
+    await syncToken(true);
+    return dbxDelete(path, true);
+  }
+  if(res.status === 409){
+    let summary = "";
+    try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
+    if(!summary || summary.indexOf("not_found") !== -1) return; // already deleted
+    throw new HttpError("delete failed: 409 " + summary.slice(0, 200), 409);
+  }
+  if(!res.ok){
+    let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
+    throw new HttpError("delete failed: " + res.status + (detail ? " " + detail : ""), res.status);
+  }
+  return true;
 }
 
 function syncDisconnect(){
@@ -1551,6 +1589,23 @@ async function syncEventsPull(){
   syncCfgSave({ evtFileRevs: revs, evtLastPullAt: now });
 }
 
+// Delete a single device's own /events files from Dropbox. Used by
+// resetEverything() so a reset truly erases THIS device's event history from the
+// cloud (other devices keep their own copies -- "this device only" scope). The
+// Activity Feed's own-device filter means a same-deviceId reconnect already
+// skips these, but deleting them also covers the identity-changed case and
+// stops stale files from ever being re-pulled. No-op if not connected.
+async function syncEventsDeleteDevice(devId){
+  if(!devId || typeof dbxListFolder !== "function" || typeof dbxDelete !== "function") return;
+  const entries = await dbxListFolder(EVENTS_DIR);
+  for(const ent of entries){
+    const parsed = evtParseFileName(ent.name);
+    if(parsed && parsed.dev === devId){
+      try{ await dbxDelete(EVENTS_DIR + "/" + ent.name); }catch(e){ /* best-effort */ }
+    }
+  }
+}
+
 // Fire-and-forget wrapper, called from syncNow()'s success path. Own in-flight
 // guard; any failure lands in lastError and never breaks ordinary state sync.
 let _evtSyncInFlight = false;
@@ -1736,6 +1791,7 @@ if(typeof window !== "undefined"){
     maybeAutoExport: syncMaybeAutoExport,
     eventsPush: syncEventsPush,
     eventsPull: syncEventsPull,
+    eventsDeleteDevice: syncEventsDeleteDevice,
     eventsSync: syncEventsSync,
     evtHelpers: { evtMonthKey, evtMonthRange, evtParseFileName, evtUploadable, evtOwnMonthRecords, evtIncomingFilter, evtMonthOlderThan }
   };

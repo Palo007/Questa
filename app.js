@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.15-2039";
+const APP_VERSION = "v2026.07.15-2227";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -4701,7 +4701,6 @@ function openSettings(){
       const devShort=devId.slice(0,6);
       const myDevEntry=(S.devices||[]).find(x=>x&&x.id===devId);
       const myDevName=(myDevEntry&&myDevEntry.name)?myDevEntry.name:'';
-      const myDevLabel=(typeof deviceDisplayName==="function")?deviceDisplayName(S.devices,devId):(myDevName||devShort);
       h+='<div class="devNameWrap">'+
            '<div class="devNameHeader">'+
               '<div class="devSyncStatus">Last sync: '+esc(rel)+
@@ -4713,7 +4712,7 @@ function openSettings(){
              '<button class="btn ghost" onclick="syncNow()">Sync now</button>'+
              '<input type="text" id="setDeviceName" placeholder="'+esc(devShort)+'" value="'+esc(myDevName)+'" onchange="setDeviceName(this.value)">'+
               '<div class="devDisconnectCol">'+
-             '<div class="devDisconnectLbl">Device '+esc(myDevLabel)+'</div>'+
+             '<div class="devDisconnectLbl">Device '+esc(devShort)+'</div>'+
              '<button class="btn ghost" onclick="confirmSyncDisconnect()">Disconnect</button>'+
               '</div>'+
            '</div>'+
@@ -4769,12 +4768,31 @@ function checkExportStaleness(){
   }
 }
 function resetEverything() {
-  confirmDialog('Reset Everything', 'Erase ALL progress on this device? This cannot be undone.').then(ok => {
+  confirmDialog('Reset Everything', 'Erase ALL progress on this device? This cannot be undone.').then(async ok => {
     if(!ok) return;
     // #2 this-device-only reset: disconnect sync, wipe IDB syncmeta base +
     // state mirror, reset __seq so the fresh state starts at seq 1 after
     // save(). NO tombstone-all, NO destructive propagation to other devices.
     // Reconnecting later pulls the world back via keep-by-default merge.
+    // 2026-07-15 event-log fix: a reset must also truly erase the event
+    // log -- locally AND this device's own /events files in Dropbox -- or a
+    // later reconnect resurrects the old Activity Feed entries. Other devices
+    // keep their own copies (this-device-only scope, like the task reset).
+    const oldDev = (typeof syncDeviceId==='function') ? syncDeviceId() : null;
+    const cfgAtReset = (typeof syncCfg==='function') ? syncCfg() : {};
+    if(oldDev && cfgAtReset.refreshToken && typeof syncEventsDeleteDevice==='function'){
+      // Still connected: token is valid, so delete the remote own files now.
+      await syncEventsDeleteDevice(oldDev).catch(function(){});
+    } else if(oldDev && typeof localStorage!=='undefined'){
+      // Disconnected at reset time: stash so the delete runs on next connect.
+      try{ localStorage.setItem("questa.events.pendingPurgeDev", oldDev); }catch(e){}
+    }
+    // Wipe the local event log (IndexedDB events store). resetEverything used
+    // to leave it intact, contradicting "erase ALL progress".
+    if(typeof clearAllEvents==='function'){ await clearAllEvents().catch(function(){}); }
+    // Reset event-sync watermarks so no stale ts/rev state survives the reset.
+    if(typeof syncCfgSave==='function') syncCfgSave({ evtLastUploadTs: 0, evtFileRevs: {} });
+    // Keep deviceId (same device) -- do NOT null it. syncDisconnect preserves it.
     if(typeof syncDisconnect==='function') syncDisconnect();
     if(typeof syncBasePut==='function') syncBasePut(null);
     if(typeof _idbWriteState==='function') _idbWriteState(null).catch(function(){});

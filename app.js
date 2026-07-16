@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.16-0846";
+const APP_VERSION = "v2026.07.16-1304";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -50,7 +50,7 @@ function confirmDialog(title, text) {
   });
 }
 
-function alertDialog(title, text) {
+function alertDialog(title, text, html) {
   return new Promise((resolve) => {
     const overlay = document.getElementById('confirmOverlay');
     const titleEl = document.getElementById('confirmTitle');
@@ -64,7 +64,10 @@ function alertDialog(title, text) {
     }
 
     titleEl.textContent = title || 'Info';
-    textEl.textContent = text || '';
+    // If an HTML body was provided (e.g. a structured import summary), render it
+    // as markup; otherwise fall back to the safe plain-text path.
+    if (html) { textEl.innerHTML = html; }
+    else { textEl.textContent = text || ''; }
     noBtn.style.display = 'none'; // Hide cancel button
     yesBtn.textContent = 'OK';
     overlay.classList.add('show');
@@ -748,7 +751,117 @@ function clearLifecycleEvents(){
   })).catch(()=>0);
 }
 /* END_EVENTS_HELPERS */
+// Stable, synchronous event uid derived from content. Used when re-parenting
+// imported events so a re-import of the same merged file dedupes via the
+// existing uploaded-uid set (evtIncomingFilter) instead of doubling. FNV-1a
+// over the fields that define a unique event; a changed field => new uid.
+function eventUidOf(rec, idx){
+  if(!rec || typeof rec!=='object') return '';
+  // Collision-free content hash. The ORIGINAL fields are included so the SAME
+  // record always hashes the same (idempotent re-import), but enough distinct
+  // fields are covered -- including the original record id and stable array
+  // position -- that two logically different events NEVER collide on the same
+  // uid. Collisions would make sync's existingUidSet drop legitimate history.
+  const ts = (typeof rec.ts==='number') ? rec.ts : 0;
+  const kind = rec.kind || '';
+  const taskId = rec.taskId || '';
+  const taskTitle = rec.taskTitle || '';
+  const dir = rec.dir || '';
+  const dev = rec.dev || '';
+  const uid = rec.uid || '';
+  const value = (typeof rec.value==='number') ? rec.value : '';
+  const reps = (typeof rec.reps==='number') ? rec.reps : '';
+  const src = rec.source || '';
+  const subId = rec.subId || '';
+  const subText = rec.subText || '';
+  const notes = rec.notes || '';
+  const origId = rec.id || '';
+  const pos = (typeof idx==='number') ? idx : -1;
+  const str = [ts,kind,taskId,taskTitle,dir,dev,uid,value,reps,src,subId,subText,notes,origId,pos].join('\u0001');
+  let h = 0x811c9dc5;
+  for(let i=0;i<str.length;i++){
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return 'rep-' + (h>>>0).toString(16);
+}
+// Re-parent imported events to THIS device so they pass the normal sync
+// upload/ingest gates (evtUploadable / evtIncomingFilter) and propagate to
+// other devices. Records already owned by this device (real taps) are left
+// untouched. Synthetic / dev:null / dev:undefined / other-device records are
+// stamped with this device id, given a stable content-hash uid, and cleared of
+// the synthetic flag so they become first-class owned data. History content
+// (ts/kind/taskId/taskTitle/value/reps/source/...) is preserved verbatim.
+function reparentEventsForImport(list){
+  if(!Array.isArray(list)) return list;
+  const myDev = (typeof syncDeviceId==='function') ? syncDeviceId() : null;
+  for(let i=0;i<list.length;i++){
+    const e = list[i];
+    if(!e || typeof e!=='object') continue;
+    delete e.id;
+    const owned = myDev && e.dev===myDev && e.uid;
+    if(owned) continue; // preserve original uid/dev for my own real taps
+    if(myDev) e.dev = myDev;
+    e.uid = eventUidOf(e, i);
+    if('synthetic' in e) delete e.synthetic;
+    e.imported = true;
+  }
+  return list;
+}
+// Summarise a reparented event list so the import report can reconcile the
+// stored count against what the Activity Feed will actually show. The feed
+// hides DIAGNOSTIC_KINDS and applies a date window, so a raw 'N events'
+// count can look like a discrepancy vs the visible feed. This makes the
+// breakdown explicit: total stored, system/diagnostic hidden, user-visible,
+// and a per-category split (habit/daily/todo/system).
+function eventImportSummary(list){
+  const arr = Array.isArray(list) ? list : [];
+  let total = 0, diag = 0;
+  const byCat = { habit: 0, daily: 0, todo: 0, system: 0 };
+  for(const e of arr){
+    if(!e || typeof e!=='object') continue;
+    total++;
+    const isDiag = DIAGNOSTIC_KINDS.indexOf(e.kind) >= 0;
+    if(isDiag){ diag++; continue; }
+    const cat = getEventCategory(e);
+    if(byCat[cat] != null) byCat[cat]++; else byCat.system++;
+  }
+  const visible = total - diag;
+  return { total: total, diagnostic: diag, visible: visible, byCat: byCat };
+}
+function eventImportSummaryText(sum){
+  if(!sum) return '';
+  const c = sum.byCat || {};
+  return sum.total + ' stored total \u00b7 ' + sum.visible + ' visible in feed \u00b7 '
+    + sum.diagnostic + ' system/diagnostic hidden \u00b7 '
+    + 'Habits ' + (c.habit||0) + ', Dailies ' + (c.daily||0) + ', To-dos ' + (c.todo||0) + ', System ' + (c.system||0);
+}
+// Compact, mobile-friendly HTML summary for the import-completion dialog.
+// Uses a small two-column table so the stored/visible/diagnostic split and the
+// per-category counts are scannable at a glance, and explains why the feed
+// count can be lower than the stored total without looking like a bug.
+function eventImportSummaryHTML(sum){
+  if(!sum) return '';
+  const c = sum.byCat || {};
+  const row = (k,v) => '<tr><td class="evsK">'+k+'</td><td class="evsV">'+v+'</td></tr>';
+  return '<div class="evSummary">'
+    + '<table class="evSummaryTbl">'
+    + row('Stored total', sum.total)
+    + row('Visible in feed', sum.visible)
+    + row('System / diagnostic hidden', sum.diagnostic)
+    + '</table>'
+    + '<div class="evSummaryCat">'
+    + '<span>Habits <b>'+(c.habit||0)+'</b></span>'
+    + '<span>Dailies <b>'+(c.daily||0)+'</b></span>'
+    + '<span>To-dos <b>'+(c.todo||0)+'</b></span>'
+    + '<span>System <b>'+(c.system||0)+'</b></span>'
+    + '</div>'
+    + '<p class="evSummaryNote">The feed hides '+sum.diagnostic+' system/diagnostic events and follows the date window, so its count (under \u201cAll\u201d) may be lower than stored. All events are kept locally and will sync.</p>'
+    + '</div>';
+}
 function bulkAddEvents(list){
+
+
   return idbOpen().then(db=>new Promise((resolve)=>{
     let added=0, tx;
     try{ tx = db.transaction(EVENTS_STORE,"readwrite"); }catch(e){ resolve(0); return; }
@@ -952,7 +1065,8 @@ function importEventsBackfill(ev){
       if(!ok) return;
       // mark everything from this load as synthetic so a re-load can replace it
       list.forEach(e=>{ if(e && typeof e==="object" && e.synthetic===undefined) e.synthetic=true; });
-      clearSyntheticEvents().then(()=>bulkAddEvents(list)).then(added=>{
+      const reparented = reparentEventsForImport(list);
+      clearSyntheticEvents().then(()=>bulkAddEvents(reparented)).then(added=>{
         toast('Loaded '+added+' events');
         if(TAB==='analytics') render();
       });
@@ -3166,6 +3280,7 @@ function renderEventDetail(from,to){
     let feedContent = document.getElementById('evFeedContent');
     if(!feedContent){
       let h='<div class="k">Activity Feed</div>';
+      h+='<div id="evOverview" class="evOverview"></div>';
       
       // Category chips
       const categories = [
@@ -3190,6 +3305,15 @@ function renderEventDetail(from,to){
       h+='<div id="evFeedContent"></div>';
       cur.innerHTML = h;
       feedContent = document.getElementById('evFeedContent');
+      // Reconciling overview: total stored (incl. diagnostic) vs what the
+      // feed will show (diagnostic hidden + date-windowed). Prevents the
+      // stored-count vs visible-count gap from looking like a bug.
+      getEvents({includeDiag:true}).then(function(all){
+        const eo = document.getElementById('evOverview'); if(!eo) return;
+        let diag=0; for(const e of all){ if(DIAGNOSTIC_KINDS.indexOf(e.kind)>=0) diag++; }
+        const visible = all.length - diag;
+        eo.textContent = all.length + ' events stored \u00b7 ' + visible + ' shown in feed (system/diagnostic hidden: ' + diag + ')';
+      }).catch(function(){});
     } else {
       // Sync filter chips active class without re-rendering controls
       const chips = cur.querySelectorAll('.evFilterChip');
@@ -5125,9 +5249,15 @@ function importData(ev){
           if(!ok) return;
           S=migrate(data); save(); applyWidth(); applyCardThick(); closeSheet(); render();
           if(embeddedEvents && typeof indexedDB!=="undefined"){
-            clearAllEvents().then(()=>bulkAddEvents(embeddedEvents)).then(n=>{
-              logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Restored ' + n + ' events'});
-              toast('Imported · '+n+' events restored');
+            const reparented = reparentEventsForImport(embeddedEvents);
+            const impSum = eventImportSummary(reparented);
+            clearAllEvents().then(()=>bulkAddEvents(reparented)).then(n=>{
+              const note = 'Restored ' + n + ' events (' + eventImportSummaryText(impSum) + ')';
+              logEvent({kind: 'import', taskTitle: 'Import Data', notes: note});
+              toast('Imported \u00b7 ' + n + ' events restored');
+              alertDialog('Import complete',
+                n + ' events restored to this device.',
+                eventImportSummaryHTML(impSum));
               if(TAB==='analytics') render();
             });
           } else {

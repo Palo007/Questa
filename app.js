@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.16-1304";
+const APP_VERSION = "v2026.07.16-1430";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -5123,23 +5123,140 @@ function setDragDelay(v){
 // localStorage stays lean (events are only added to the export blob, never back
 // into S — migrate() strips `events` on import). Falls back to S-only if IDB is
 // unavailable so export never fails outright.
+// --- Tokenized export (schema 2) -----------------------------------------
+// Shrinks the on-disk backup without zip: replace repeated field names,
+// enum strings (kind/source) and task titles/ids with dictionary indices.
+// Tokenized form lives ONLY in the export file; IndexedDB keeps full objects.
+// See .kilo/plans/1784185676821-tokenized-export-archiving-handover.md.
+const _EXPORT_FIELD_MAP = {
+  ts:'t', uid:'u', dev:'d', kind:'k', taskTitle:'n', notes:'no', id:'i',
+  taskType:'ty', taskId:'ti', streak:'st', reward:'rw', repeat:'rp',
+  checklist:'cl', changes:'ch', subId:'si', subText:'sx', done:'do',
+  clawback:'cb', deviceId:'di', deviceName:'dn', prevDeviceName:'pn',
+  createdAt:'ca', completedAt:'co', dir:'dr', reps:'rs', value:'v',
+  dmg:'dg', cost:'ct', effect:'ef', counter:'cr', preBumpSeq:'ps',
+  storedSeq:'ss', granted:'gr', log:'lg', detail:'dt', visibilityState:'vs',
+  hidden:'hd', dirty:'dy', found:'fd', idbSeq:'is', liveSeq:'ls',
+  winner:'wn', loser:'lo', charTitle:'ctt', day:'dyy', late:'lt',
+  source:'o', synthetic:'sy', repCounted:'rc', inferred:'in'
+};
+function _tokenizeEvents(eventsArr){
+  const events = eventsArr||[];
+  const kindArr=[], srcArr=[], tidArr=[], titleArr=[];
+  const kindIdx={}, srcIdx={}, tidIdx={}, titleIdx={};
+  function idx(arr,map,v){ if(v==null) return -1; if(!(v in map)){ map[v]=arr.length; arr.push(v); } return map[v]; }
+  const out = events.map(function(e){
+    const o={};
+    for(const f in e){
+      const v=e[f];
+      if(f==='uid'||f==='dev'||f==='id'){ o[f]=v; continue; }
+      const sk=_EXPORT_FIELD_MAP[f];
+      if(!sk){ o[f]=v; continue; }
+      if(f==='kind') o[sk]=idx(kindArr,kindIdx,v);
+      else if(f==='source') o[sk]=idx(srcArr,srcIdx,v);
+      else if(f==='taskId') o[sk]=idx(tidArr,tidIdx,v);
+      else if(f==='taskTitle') o[sk]=idx(titleArr,titleIdx,v);
+      else if(f==='synthetic'||f==='repCounted'||f==='inferred'||f==='done') o[sk]=(v?1:0);
+      else o[sk]=v;
+    }
+    return o;
+  });
+  return { E: out, K: kindArr, SRC: srcArr, TID: tidArr, TT: titleArr };
+}
+// Reverse _tokenizeEvents. Returns an array of full event objects.
+function _detokenizeEvents(env){
+  if(!env || !Array.isArray(env.E)) return [];
+  const K=env.K||[], SRC=env.SRC||[], TID=env.TID||[], TT=env.TT||[];
+  const RM = (function(){ const m={}; for(const k in _EXPORT_FIELD_MAP) m[_EXPORT_FIELD_MAP[k]]=k; return m; })();
+  return env.E.map(function(o){
+    const e={};
+    for(const sk in o){
+      const v=o[sk];
+      if(sk==='uid'||sk==='dev'||sk==='id'){ e[sk]=v; continue; }
+      const f = RM[sk] || sk;
+      if(sk==='k') e.kind = K[v];
+      else if(sk==='o') e.source = SRC[v];
+      else if(sk==='ti') e.taskId = TID[v];
+      else if(sk==='n') e.taskTitle = TT[v];
+      else if(sk==='sy'||sk==='rc'||sk==='in'||sk==='do') e[f] = !!v;
+      else e[f]=v;
+    }
+    return e;
+  });
+}
+// Generic recursive field-name tokenizer for the snapshot. Builds a
+// frequency-ordered field map (most common field names get the shortest codes)
+// so the embedded map is small and the hash stays stable across re-exports.
+// Applied recursively to tasks/rewards/tags/charHistory/history/deletions/
+// devices/monthlyBackups/habiticaHistory/prefs.an/_joinConflicts etc. This is
+// what actually shrinks the multi-MB snapshot (tasks + habiticaHistory dominate).
+// Tokenized form is export-only; live S / IndexedDB keep full field names, and
+// importData detokenizes fully before migrate() consumes the object.
+function _buildFieldMap(snap){
+  const freq={};
+  (function walk(o){
+    if(Array.isArray(o)){ for(let i=0;i<o.length;i++) walk(o[i]); }
+    else if(o && typeof o==='object'){ for(const k in o){ freq[k]=(freq[k]||0)+1; walk(o[k]); } }
+  })(snap);
+  const keys=Object.keys(freq).sort(function(a,b){ return freq[b]-freq[a]; });
+  const map={}; let i=0;
+  function nextCode(){ let s='', n=i; do{ s=String.fromCharCode(97+(n%26))+s; n=Math.floor(n/26); }while(n>0); i++; return s; }
+  for(let j=0;j<keys.length;j++) map[keys[j]]=nextCode();
+  return map;
+}
+function _tokDeep(o, fm){
+  if(Array.isArray(o)){ const r=[]; for(let i=0;i<o.length;i++) r.push(_tokDeep(o[i], fm)); return r; }
+  if(o && typeof o==='object'){ const r={}; for(const k in o){ r[fm[k]||k]=_tokDeep(o[k], fm); } return r; }
+  return o;
+}
+function _detDeep(o, rmap){
+  if(Array.isArray(o)){ const r=[]; for(let i=0;i<o.length;i++) r.push(_detDeep(o[i], rmap)); return r; }
+  if(o && typeof o==='object'){ const r={}; for(const k in o){ r[rmap[k]||k]=_detDeep(o[k], rmap); } return r; }
+  return o;
+}
+function _tokenizeSnapshot(s){
+  const snap={};
+  for(const k in s){ if(k!=='events') snap[k]=s[k]; }
+  const fm=_buildFieldMap(snap);
+  return { S: _tokDeep(snap, fm), FM: fm };
+}
+function _detokenizeSnapshot(tok){
+  const fm = (tok && tok.FM) || {};
+  // Reverse the long->short field map into short->long for detokenization.
+  const rmap={}; for(const k in fm) rmap[fm[k]]=k;
+  const s = (tok && tok.S) || {};
+  return _detDeep(s, rmap);
+}
+
 async function buildBackupFile(eventsArr){
   const backup=Object.assign({}, S, {events: eventsArr||[]});
   const _lastMs=function(arr){let mx=0;(arr||[]).forEach(x=>{const c=(x.createdAt||0),u=(x.updatedAt||0);if(c>mx)mx=c;if(u>mx)mx=u;});return mx;};
-  backup._backup={ exportedAt:new Date().toISOString(), appVersion:APP_VERSION,
+  backup._backup={ schema:2, exportedAt:new Date().toISOString(), appVersion:APP_VERSION,
                    eventCount:(eventsArr||[]).length,
                    items:{ tasks:(S.tasks||[]).length, rewards:(S.rewards||[]).length,
                            tags:(S.tags||[]).length,
                            views:((S.prefs&&S.prefs.an&&S.prefs.an.views)||[]).length,
                            lastActivityAt:new Date(Math.max(_lastMs(S.tasks),_lastMs(S.rewards))||Date.now()).toISOString() } };
-  // Compute hash over the backup string (without hash field), then inject it
+  // Compute hash over the DETOKENIZED (legacy-shaped) backup string (without hash
+  // field), then inject it. Hashing the detokenized form keeps the hash stable
+  // across re-exports regardless of dictionary ordering, and keeps old schema-1
+  // backups valid (their hash was always on the detokenized form).
   let hash = null;
   try{
     const preJson = JSON.stringify(backup);
     hash = await computeHash(preJson);
     backup._backup.hash = hash;
   }catch(e){ /* hash optional; export proceeds without it */ }
-  const finalJson = JSON.stringify(backup, null, 2);
+  // Build the schema-2 tokenized envelope (tokenized form is export-only).
+  const tok = _tokenizeEvents(eventsArr||[]);
+  const snapTok = _tokenizeSnapshot(S);
+  const env = {
+    _backup: backup._backup,
+    K: tok.K, SRC: tok.SRC, TID: tok.TID, TT: tok.TT, FM: snapTok.FM,
+    S: snapTok.S,
+    E: tok.E
+  };
+  const finalJson = JSON.stringify(env, null, 2);
   const blob = new Blob([finalJson], {type:'application/json'});
   const d=new Date(); const p=(n)=>String(n).padStart(2,'0');
   const stamp=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
@@ -5241,7 +5358,20 @@ function exportData(){
 function importData(ev){
   const f=ev.target.files[0]; if(!f)return;
   const rd=new FileReader();
-  rd.onload=()=>{ try{ const data=JSON.parse(rd.result);
+  rd.onload=()=>{ try{ const parsed=JSON.parse(rd.result);
+      // Detect tokenized schema-2 export and expand it to the legacy shape
+      // (full event objects + long snapshot keys) BEFORE any validation or
+      // consumption. Schema-1 files (no _backup.schema===2) pass through.
+      let data;
+      if(parsed && parsed._backup && parsed._backup.schema===2){
+        data = _detokenizeSnapshot(parsed);
+        data.events = _detokenizeEvents(parsed);
+        if(parsed._backup){
+          if(typeof parsed._backup.appVersion!=='undefined') data._backup = Object.assign({}, data._backup, {appVersion: parsed._backup.appVersion});
+        }
+      } else {
+        data = parsed;
+      }
       if(!data.char||!Array.isArray(data.tasks)) throw 0;
       const doImport = () => {
         const embeddedEvents = Array.isArray(data.events) ? data.events : null;
@@ -5259,14 +5389,25 @@ function importData(ev){
                 n + ' events restored to this device.',
                 eventImportSummaryHTML(impSum));
               if(TAB==='analytics') render();
+              // F-import: run the same startup day-rollover the app runs on
+              // normal load (app.js startDay) so imported dailies get reset /
+              // the missed-yesterday prompt fires if the device calendar has
+              // advanced. Without this, importing a state that still carried
+              // done:true dailies from a prior day showed stale "yesterday"
+              // completion with no start-of-day correction.
+              startDay();
             });
           } else {
             logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Imported from backup'});
             toast('Imported');
             if(TAB==='analytics') render();
+            startDay();
           }
         });
       };
+      // Hash check: re-stringify the DETOKENIZED legacy-shaped object. For
+      // schema-2 this is the same canonical form that buildBackupFile hashed
+      // (it hashes the legacy-shaped backup, not the tokenized envelope).
       if(data._backup && data._backup.hash){
         const expectedHash = data._backup.hash;
         delete data._backup.hash;

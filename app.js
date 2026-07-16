@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.15-2227";
+const APP_VERSION = "v2026.07.16-0846";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -1810,11 +1810,14 @@ function toggleTagFilter(tab,id){ TAGFILTER[tab]=TAGFILTER[tab]||[]; const i=TAG
 function clearTagFilter(tab){ TAGFILTER[tab]=[]; S.prefs.tagFilter=TAGFILTER; save(); render(); }
 function tagFilterActive(tab){ return ((TAGFILTER[tab]||[]).length>0); }
 function applyTagFilter(list,tab){ const sel=(TAGFILTER[tab]||[]); if(!sel.length) return list;
-  return list.filter(t=>{ const tt=taskTags(t); return sel.some(id=>tt.indexOf(id)>=0); }); }
+  return list.filter(t=>{ const tt=taskTags(t); return sel.some(id=>id==='none'?tt.length===0:tt.indexOf(id)>=0); }); }
 function tagFilterBar(tab){
   if(!FILTEROPEN) return ''; ensureTags(); if(!S.tags.length) return '';
   const sel=(TAGFILTER[tab]||[]);
+  const noneActive = sel.indexOf('none') >= 0;
+  const noneBtn = '<button class="tagBtn' + (noneActive ? ' on' : '') + '" style="--tc:var(--muted)" onclick="toggleTagFilter(\''+tab+'\',\'none\')">None</button>';
   return '<div class="filterBar tagFilterBar"><span class="sortLbl">Tags</span>'+
+    noneBtn+
     S.tags.map(g=>'<button class="tagBtn'+(sel.indexOf(g.id)>=0?' on':'')+'" style="--tc:'+g.color+'" onclick="toggleTagFilter(\''+tab+'\',\''+g.id+'\')">'+esc(g.name)+'</button>').join('')+
     (sel.length?'<button class="tagClear" onclick="clearTagFilter(\''+tab+'\')">clear</button>':'')+'</div>';
 }

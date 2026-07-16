@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.16-1610";
+const APP_VERSION = "v2026.07.16-1611";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -4261,7 +4261,28 @@ function bindTips(selector){
     },{passive:false});
   });
 }
-function bindHeatTooltips(){ bindTips('.anHeatCell'); }
+// Heatmap cells: tap selects & pins a tooltip, but we must NOT capture touchmove
+// (no preventDefault) so the browser can natively pan the .anHeat container
+// horizontally. The slide-to-preview behavior from bindTips() would kill scrolling.
+function bindHeatTooltips(){
+  bindGlobalDismiss();
+  document.querySelectorAll('.anHeatCell[data-tip]').forEach(el=>{
+    const hover=e=>{ if(_selEl) return; clearTimeout(_tipTimer);
+      const x=e.clientX, y=e.clientY, delay=tipDelayMs();
+      if(delay<=0) showTip(el.dataset.tip,x,y,false);
+      else _tipTimer=setTimeout(()=>{ if(!_selEl) showTip(el.dataset.tip,x,y,false); },delay);
+    };
+    el.addEventListener('mouseenter',hover);
+    el.addEventListener('mousemove',hover);
+    el.addEventListener('mouseleave',()=>{ if(!_selEl) hideTip(); });
+    el.addEventListener('click',e=>{ e.stopPropagation(); selectEl(el,false); });
+    // touch: a tap (no significant move) selects; a drag is left for native pan-x scroll
+    let sx=0, sy=0;
+    el.addEventListener('touchstart',e=>{ const t=e.touches&&e.touches[0]; if(!t)return; sx=t.clientX; sy=t.clientY; },{passive:true});
+    el.addEventListener('touchend',e=>{ const t=e.changedTouches&&e.changedTouches[0]; if(!t)return;
+      if(Math.abs(t.clientX-sx)<10 && Math.abs(t.clientY-sy)<10) selectEl(el,true); },{passive:true});
+  });
+}
 function toggle(id, ev){
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
   if(t.type==='daily'){

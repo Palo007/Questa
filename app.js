@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.16-1431";
+const APP_VERSION = "v2026.07.16-1610";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -2068,6 +2068,10 @@ function viewRewards(){
    `value` is Habitica's internal score and is NOT used as a count.
    ============================================================ */
 const DAY = 86400000;
+// Local-calendar-day key (device timezone). The heatmap and all date labels
+// use device-local days (see dayStamp/runCron), so day buckets MUST key on
+// LOCAL midnight, not UTC midnight, or events shift by the tz offset.
+function localDayKey(ms){ const d=new Date(ms); d.setHours(0,0,0,0); return d.getTime(); }
 function anPrefs(){
   S.prefs = S.prefs || {};
   if(!S.prefs.an) S.prefs.an = { fromOff:90, toOff:0, snap:'90d', metricKw:'klik' };
@@ -2192,7 +2196,7 @@ function anRepsSeries(metric,from,to){
   anAllEvents().forEach(e=>{
     if(!M.match(e))return;
     if(e.date<from||e.date>to)return;
-    const day=Math.floor(e.date/DAY)*DAY;
+    const day=localDayKey(e.date);
     buckets[day]=(buckets[day]||0)+M.reps(e);
   });
   return Object.keys(buckets).sort((a,b)=>a-b).map(d=>({d:+d,v:buckets[d]}));
@@ -2204,7 +2208,7 @@ function anValueSeries(metric,from,to){
   anAllEvents().forEach(e=>{
     if(!M.match(e))return;
     if(e.date<from||e.date>to||e.value==null)return;
-    const d=Math.floor(e.date/DAY)*DAY;
+    const d=localDayKey(e.date);
     day[d]=day[d]||{sum:0,n:0};
     day[d].sum+=e.value; day[d].n++;
   });
@@ -2217,7 +2221,7 @@ function anActivitySeries(metric,from,to){
   anAllEvents().forEach(e=>{
     if(!M.match(e))return;
     if(e.date<from||e.date>to||!e.scored)return;
-    day[Math.floor(e.date/DAY)*DAY]=1;
+    day[localDayKey(e.date)]=1;
   });
   return Object.keys(day).map(Number).sort((a,b)=>a-b);
 }
@@ -2237,7 +2241,7 @@ function anAdherenceSeries(from,to){
   anAllEvents().forEach(e=>{
     if(e.type!=='daily'||e.completed===null)return;
     if(e.date<from||e.date>to)return;
-    const d=Math.floor(e.date/DAY)*DAY;
+    const d=localDayKey(e.date);
     day[d]=day[d]||{done:0,tot:0};
     day[d].tot++; if(e.completed) day[d].done++;
   });
@@ -2247,7 +2251,7 @@ function anIntensity(from,to){
   const day={};
   anAllEvents().forEach(e=>{
     if(e.date<from||e.date>to)return;
-    const d=Math.floor(e.date/DAY)*DAY;
+    const d=localDayKey(e.date);
     let w=e.scoredUp||0; if(e.completed) w+=1;
     if(w>0) day[d]=(day[d]||0)+w;
   });
@@ -2739,7 +2743,7 @@ function anViewMetric(v){ const ms=(anPrefs().metrics||[]); return ms.find(m=>m.
 function anBucket(events,group,from,to){
   const ev=events.filter(e=>e.ts>=from&&e.ts<=to);
   if(group==='day'){
-    const day={}; ev.forEach(e=>{ const d=Math.floor(e.ts/DAY)*DAY; day[d]=(day[d]||0)+e.v; });
+    const day={}; ev.forEach(e=>{ const d=localDayKey(e.ts); day[d]=(day[d]||0)+e.v; });
     const series=Object.keys(day).map(Number).sort((a,b)=>a-b).map(d=>({d:d,v:day[d]}));
     return {kind:'day',series:series,dayMap:day};
   }
@@ -2799,12 +2803,12 @@ function anSnapshotHistoryBucket(v, from, to){
        compMap = {};
        (t.history || []).forEach(p => {
          if (p.completed && typeof p.date === 'number') {
-           compMap[Math.floor(p.date/DAY)*DAY] = true;
+           compMap[localDayKey(p.date)] = true;
          }
        });
     }
     let curStreak = 0;
-    let walkD = Math.floor(cMs/DAY)*DAY;
+    let walkD = localDayKey(cMs);
     for (let d = walkD; d <= midnightTo; d += DAY) {
        if (t.type === 'daily') {
           const due = !t.repeat || t.repeat[new Date(d).getDay()];
@@ -2818,7 +2822,7 @@ function anSnapshotHistoryBucket(v, from, to){
              dayMap[d] += curStreak;
           } else if (src === 'incomplete') {
              if (t.type === 'todo') {
-                if (!t.completedAt || Math.floor(t.completedAt/DAY)*DAY > d) dayMap[d]++;
+                if (!t.completedAt || localDayKey(t.completedAt) > d) dayMap[d]++;
              } else if (t.type === 'daily') {
                 const due = !t.repeat || t.repeat[new Date(d).getDay()];
                 if (due && !compMap[d]) dayMap[d]++;
@@ -3567,7 +3571,7 @@ function anHeatmapHTML(from,to,inten,maxI){
   const end=new Date(Math.floor(to/DAY)*DAY); end.setHours(0,0,0,0);
   let cols='', col='', dow=0;
   for(let t=start.getTime(); t<=end.getTime(); t+=DAY){
-    const v=inten[Math.floor(t/DAY)*DAY]||0;
+    const v=inten[localDayKey(t)]||0;
     const title='📅 '+fmtDate(t)+'\n'+(v? '🔥 '+v+' activity':'💤 no activity');
     col+='<div class="anHeatCell" style="background:'+heatColor(v,maxI)+'" data-tip="'+esc(title)+'"></div>';
     dow++;

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.16-1430";
+const APP_VERSION = "v2026.07.16-1431";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -5588,7 +5588,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{ switchTab(b.d
   let sx=0, sy=0, tracking=false, multi=false;
   const view=document;   // bind to the whole document so swipes on empty area work regardless of content height
   // Elements that own their own horizontal touch gestures — never swipe-nav from them.
-  function inHGesture(t){ return !!(t && t.closest && t.closest('#anSlider, input[type=range], .anSlider, .seg')); }
+  function inHGesture(t){ return !!(t && t.closest && t.closest('#anSlider, input[type=range], .anSlider, .seg, .anHeat')); }
 
   view.addEventListener('touchstart',e=>{
     if(e.touches.length!==1){ multi=true; tracking=false; return; }

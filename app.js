@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.18-0843";
+const APP_VERSION = "v2026.07.18-2332";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -155,7 +155,7 @@ function legacySubtaskId(taskId, text, occurrence){
 }
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
-  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardThick:0, notificationsEnabled:false, saveBtnTop:false}, s.prefs||{});
+  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardThick:0, notificationsEnabled:false, saveBtnTop:false, hideSyncDiag:true}, s.prefs||{});
   if(out.prefs.cardPad !== undefined){
     let cp = parseInt(out.prefs.cardPad, 10);
     if(isFinite(cp)){
@@ -3203,6 +3203,9 @@ function getEventCategory(e) {
   }
   return 'system';
 }
+function isFeedNoise(e){
+  return e.kind === 'conflictResolved' || DIAGNOSTIC_KINDS.indexOf(e.kind) >= 0;
+}
 function _evCatBadgeName(cat){ return {habit:'Habit',daily:'Daily',todo:'To-do',system:'System'}[cat]||'Event'; }
 function _evCatBadgeClass(cat){ return {habit:'evBadge-habit',daily:'evBadge-daily',todo:'evBadge-todo',system:'evBadge-system'}[cat]||'evBadge-default'; }
 function _evDeltaSpan(val,unit){
@@ -3354,6 +3357,7 @@ function renderEventDetail(from,to){
 
     let listHtml='<div class="evFeed">';
     pageEvents.forEach(e=>{
+      if (S.prefs && S.prefs.hideSyncDiag && isFeedNoise(e)) return;
       let icon = '📝';
       let badgeClass = 'evBadge-default';
       let badgeName = 'Event';
@@ -4837,6 +4841,7 @@ function openSettings(){
   h+=settingRow('cardThick','Card thickness','Minimum height of each card. Short cards grow first; taller cards are only affected at higher values.',(S.prefs.cardThick||0)===0?'Default':('+'+(S.prefs.cardThick||0)+' px'));
   h+=settingRow('saveBtnTop','Save button position','Put the Save button at the top of the edit sheet, centered next to the title, instead of at the bottom.',(S.prefs.saveBtnTop?'Top':'Bottom'));
   h+=settingRow('notifications','Notifications','Browser-based notification permission and status.',(S.prefs.notificationsEnabled?'On':'Off'));
+  h+=settingRow('hideSyncDiag','Hide sync & diagnostic events','Hide background sync (conflict resolved) and diagnostic events from the Activity Feed. Task activity and exports stay visible.',(S.prefs.hideSyncDiag?'On':'Off'));
   h+='</div>';
   const syncTip='Sync via Dropbox (your account, no server) keeps this device and your other devices up to date automatically.';
   h+='<div class="colTitle"><h2 style="font-size:13px;flex:none">Sync</h2>'+infoIcon('Sync\n'+syncTip)+'</div>';
@@ -4965,6 +4970,7 @@ function resetEverything() {
 function setWidth(px){ S.prefs.width=px; applyWidth(); save(); closeOpt(); openSettings(); }
 function setNotesLines(n){ S.prefs.notesLines=n; save(); closeOpt(); openSettings(); }
 function setHaptics(n){ S.prefs.haptics=!!n; save(); closeOpt(); openSettings(); }
+function setHideSyncDiag(n){ S.prefs.hideSyncDiag=!!n; save(); closeOpt(); openSettings(); render(); }
 function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.min(60,Math.max(0,n)); S.prefs.cardThick=n; applyCardThick(); save(); closeOpt(); openSettings(); }
 function setSaveBtnTop(n){ S.prefs.saveBtnTop=!!n; save(); closeOpt(); if(EDIT) drawSheet(); else if(REDIT) openReward(REDIT.id); openSettings(); }
 function setExportIntervalDays(n){ let d=parseInt(n,10); if(!isFinite(d)||d<0) d=0; S.prefs.exportIntervalDays=d; save(); closeOpt(); openSettings(); }
@@ -5132,6 +5138,15 @@ function openOpt(key){
     var _bd=getBuzzDiag();
     h+='<div class="small" style="margin-top:6px">API: <b>'+_bd.type+'</b> &middot; Last: <b>'+( _bd.lastResult===null?'(none)':''+_bd.lastResult)+'</b> &middot; Count: <b>'+_bd.count+'</b></div>';
     h+='<button type="button" class="btn ghost" style="margin-top:10px" onclick="var r=buzz(50);toast(\'Vibrate returned: \'+r);openOpt(\'haptics\')">Test vibration</button>';
+  }
+  if(key==='hideSyncDiag'){
+    const hd=!!S.prefs.hideSyncDiag;
+    h+='<h4>Hide sync & diagnostic events</h4>';
+    h+='<p class="optHint">When On, background sync (conflict resolved) and diagnostic events are hidden from the Activity Feed. Your task activity and exports stay visible. Turn Off to see everything for debugging.</p>';
+    h+='<div class="optChoices">';
+    h+='<button type="button" class="'+(hd?'on':'')+'" onclick="setHideSyncDiag(1)">On</button>';
+    h+='<button type="button" class="'+(hd?'':'on')+'" onclick="setHideSyncDiag(0)">Off</button>';
+    h+='</div>';
   }
   h+='<button class="btn ghost optClose" type="button" onclick="closeOpt()">Done</button>';
   document.getElementById('optMenu').innerHTML=h;

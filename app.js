@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.16-1611";
+const APP_VERSION = "v2026.07.18-0843";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -5392,7 +5392,7 @@ function importData(ev){
         data = _detokenizeSnapshot(parsed);
         data.events = _detokenizeEvents(parsed);
         if(parsed._backup){
-          if(typeof parsed._backup.appVersion!=='undefined') data._backup = Object.assign({}, data._backup, {appVersion: parsed._backup.appVersion});
+          data._backup = Object.assign({}, parsed._backup);
         }
       } else {
         data = parsed;

@@ -442,10 +442,91 @@ function _qDiagErrorsHtml(){
   }).join('');
   return header + rows;
 }
+// --- Per-device event divergence block for the sync debug overlay (W6.16) --
+// Surfaces the failure mode that hid the 2026-07-28 event-sync outage for a
+// full month: state sync converged (so the app LOOKED healthy) while
+// /events files sat in Dropbox completely unpulled by the other device.
+// Nothing in the normal UI would have shown that. For every known device
+// (S.devices, plus any dev id only seen locally or only seen in the cached
+// Dropbox file listing) this shows the LOCAL event count for that dev
+// alongside what the last successful pull recorded for that dev's file(s)
+// in Dropbox (cfg.evtFileRevs/evtBadRevs -- see sync.js's syncEventsPull()).
+// Read-only and pure: every input (devices/localHist/cfg) is handed in by
+// the caller (showSyncDebugOverlay(), below) from already-cached data --
+// this function itself never touches IndexedDB, localStorage, or the
+// network, so it can't perturb the very sync state it's diagnosing.
+// THE SIGNAL: a device with ZERO local events for a dev whose file DOES
+// exist in the cached Dropbox listing is exactly the July 28 failure mode.
+// That row gets a "*** DIVERGENCE ***" text marker plus a red bordered/
+// highlighted style so it's unmistakable at a glance, not something the
+// user has to compute by comparing two numbers themselves.
+// Every interpolated value goes through esc() -- device names are
+// user-supplied and filenames come from Dropbox, so both are attacker-ish
+// controlled strings from this app's threat-model perspective.
+function _qDivFileDev(name){
+  const m = /^(.+)-(\d{6})\.json$/.exec(name || "");
+  return m ? m[1] : null;
+}
+function _qDivTs(ts){
+  if(!ts) return "not set";
+  try{ return new Date(ts).toLocaleString(); }catch(e){ return String(ts); }
+}
+function _qDivergenceHtml(devices, localHist, cfg){
+  devices = Array.isArray(devices) ? devices : [];
+  localHist = localHist || {};
+  cfg = cfg || {};
+  const fileRevs = cfg.evtFileRevs || {};
+  const badRevs = cfg.evtBadRevs || {};
+  const filesByDev = {};
+  function addFile(name, info){
+    const dev = _qDivFileDev(name);
+    if(!dev) return;
+    (filesByDev[dev] = filesByDev[dev] || []).push(Object.assign({name:name}, info));
+  }
+  Object.keys(fileRevs).forEach(name=>addFile(name, {rev:fileRevs[name], bad:false}));
+  Object.keys(badRevs).forEach(name=>addFile(name, {rev:(badRevs[name]&&badRevs[name].rev)||null, bad:true}));
+
+  const header = '<div style="font-weight:bold;margin-bottom:4px;">Per-device event divergence</div>';
+  const connLine = '<div>Dropbox: ' + ((cfg.enabled && cfg.refreshToken) ? 'connected' : 'not connected') +
+    ' | evtLastUploadTs: ' + esc(_qDivTs(cfg.evtLastUploadTs)) +
+    ' | evtLastPullAt: ' + esc(_qDivTs(cfg.evtLastPullAt)) +
+    ' | evtFullScanAt: ' + esc(_qDivTs(cfg.evtFullScanAt)) + '</div>';
+
+  const ids = {};
+  devices.forEach(d=>{ if(d && d.id) ids[d.id]=true; });
+  Object.keys(localHist).forEach(id=>{ ids[id]=true; });
+  Object.keys(filesByDev).forEach(id=>{ ids[id]=true; });
+  const idList = Object.keys(ids).sort();
+  if(!idList.length) return header + connLine + '<div>No known devices</div>';
+
+  const myDev = cfg.deviceId || null;
+  const rows = idList.map(function(id){
+    const name = (typeof deviceDisplayName==="function") ? deviceDisplayName(devices, id) : String(id).slice(0,6);
+    const localCount = (Object.prototype.hasOwnProperty.call(localHist, id)) ? localHist[id] : 0;
+    const files = filesByDev[id] || [];
+    const remoteKnown = files.length > 0;
+    const flagged = localCount === 0 && remoteKnown;
+    const fileBits = files.length
+      ? files.map(function(f){ return esc(f.name) + (f.bad ? ' [quarantined]' : '') + ' size=not cached rev=' + esc(String(f.rev)); }).join('; ')
+      : '(no file cached)';
+    const meLabel = (myDev && id===myDev) ? ' (this device)' : '';
+    const rowStyle = flagged
+      ? 'border:2px solid #f33;background:#3a0000;padding:4px;margin-bottom:4px;'
+      : 'border-bottom:1px solid #333;padding:4px 0;';
+    const marker = flagged ? '<b style="color:#f66;">*** DIVERGENCE (local=0, remote file exists) *** </b><br>' : '';
+    return '<div style="' + rowStyle + '">' +
+      marker +
+      '<b>' + esc(name) + '</b> (' + esc(String(id).slice(0,10)) + ')' + esc(meLabel) + '<br>' +
+      'local events: ' + esc(String(localCount)) + '<br>' +
+      'dropbox cache: ' + fileBits +
+      '</div>';
+  }).join('');
+  return header + connLine + rows;
+}
 function showSyncDebugOverlay(){
   var cfg = {}; try{ cfg = JSON.parse(localStorage.getItem("questa.sync.v1") || "{}"); }catch(e){}
   function dump(a){ return (a && a.tasks) ? a.tasks.map(function(t){ return {id:t.id, type:t.type, title:t.title, streak:t.streak, done:t.done, updatedAt:t.updatedAt, createdAt:t.createdAt}; }) : "n/a"; }
-  function renderOverlay(base){
+  function renderOverlay(base, hist){
     var out = {
       APP_VERSION: (typeof APP_VERSION!=="undefined")?APP_VERSION:"?",
       baseReset: localStorage.getItem("questa.baseReset.v1"),
@@ -465,6 +546,15 @@ function showSyncDebugOverlay(){
     var errBox = document.createElement("div");
     errBox.style.cssText = "flex-shrink:0;max-height:160px;overflow-y:auto;width:100%;background:#111;color:#0f0;font-family:monospace;font-size:11px;border:1px solid #444;padding:8px;box-sizing:border-box;margin-top:8px;";
     errBox.innerHTML = _qDiagErrorsHtml();
+    // W6.16: per-device event divergence readout -- see _qDivergenceHtml()
+    // above for the rationale (this is the check that would have caught the
+    // 2026-07-28 silent event-sync outage). Built from cfg (already parsed
+    // above, read-only from localStorage) + hist (the one-pass local
+    // histogram computed below, never a network call) + S.devices.
+    var divBox = document.createElement("div");
+    divBox.style.cssText = "flex-shrink:0;max-height:200px;overflow-y:auto;width:100%;background:#111;color:#0f0;font-family:monospace;font-size:11px;border:1px solid #444;padding:8px;box-sizing:border-box;margin-top:8px;";
+    var liveDevices = (typeof S!=="undefined" && Array.isArray(S.devices)) ? S.devices : [];
+    divBox.innerHTML = (typeof _qDivergenceHtml==="function") ? _qDivergenceHtml(liveDevices, hist, cfg) : "divergence readout unavailable";
     // W5.9: one-off recovery control for the output of
     // tools/reconstruct_events_jul28.py ({"events":[...]}, 20 synthetic
     // records, no uid). Wired to importEventsBackfill() -- the only
@@ -508,21 +598,26 @@ function showSyncDebugOverlay(){
     closeBtn.style.cssText = "flex:1;padding:12px;font-size:16px;";
     closeBtn.onclick = function(){ ov.remove(); };
     btnRow.appendChild(copyBtn); btnRow.appendChild(dlBtn); btnRow.appendChild(closeBtn);
-    ov.appendChild(ta); ov.appendChild(errBox); ov.appendChild(backfillBox); ov.appendChild(btnRow);
+    ov.appendChild(ta); ov.appendChild(errBox); ov.appendChild(divBox); ov.appendChild(backfillBox); ov.appendChild(btnRow);
     document.body.appendChild(ov);
     ta.focus(); ta.select();
   }
+  function finish(base){
+    var histFn = (typeof evtDevHistogram==="function") ? evtDevHistogram : function(){ return Promise.resolve({}); };
+    Promise.resolve().then(histFn).then(function(hist){ renderOverlay(base, hist||{}); })
+      .catch(function(){ renderOverlay(base, {}); });
+  }
   try{
     var r = indexedDB.open("questa");
-    r.onerror = function(){ renderOverlay(null); };
+    r.onerror = function(){ finish(null); };
     r.onsuccess = function(){
       try{
         var g = r.result.transaction("syncmeta","readonly").objectStore("syncmeta").get("base");
-        g.onsuccess = function(){ renderOverlay(g.result ? JSON.parse(g.result) : null); };
-        g.onerror = function(){ renderOverlay(null); };
-      }catch(e){ renderOverlay(null); }
+        g.onsuccess = function(){ finish(g.result ? JSON.parse(g.result) : null); };
+        g.onerror = function(){ finish(null); };
+      }catch(e){ finish(null); }
     };
-  }catch(e){ renderOverlay(null); }
+  }catch(e){ finish(null); }
 }
 // --- FULL on-device diagnostic export (2026-07-12) --------------------------
 // Everything a desktop devtools session could inspect, in one downloadable JSON.
@@ -799,6 +894,33 @@ function countEvents(){
       req.onsuccess=()=>resolve(req.result||0); req.onerror=()=>resolve(0);
     }catch(e){ resolve(0); }
   })).catch(()=>0);
+}
+// One-pass per-`dev` local event histogram (W6.16 divergence readout). A
+// single cursor scan over the WHOLE store, not a scan repeated per known
+// device -- the store holds ~7,250 records, so one pass building a
+// histogram here is cheap while a per-device rescan would not be. Counts
+// EVERY stored record regardless of kind (including diagnostic kinds),
+// because the quantity being compared against a Dropbox event file for
+// that dev is "how many raw records does this device hold", not a
+// UI-filtered subset. Read-only, no network I/O. Resolves {} on any
+// failure (missing IDB, missing store, etc.) -- never throws.
+function evtDevHistogram(){
+  if(typeof idbOpen !== "function" || typeof EVENTS_STORE === "undefined") return Promise.resolve({});
+  return idbOpen().then(db=>new Promise((resolve)=>{
+    const counts = {};
+    let tx;
+    try{ tx = db.transaction(EVENTS_STORE,"readonly"); }catch(e){ resolve(counts); return; }
+    let cur;
+    try{ cur = tx.objectStore(EVENTS_STORE).openCursor(); }catch(e){ resolve(counts); return; }
+    cur.onsuccess = ()=>{
+      const c = cur.result;
+      if(!c){ resolve(counts); return; }
+      const dev = (c.value && c.value.dev!=null) ? String(c.value.dev) : "(no dev)";
+      counts[dev] = (counts[dev]||0) + 1;
+      c.continue();
+    };
+    cur.onerror = ()=>resolve(counts);
+  })).catch(()=>({}));
 }
 // --- event backfill (synthesized from Habitica history) --------------
 // The importer emits a separate file of synthetic events (each flagged

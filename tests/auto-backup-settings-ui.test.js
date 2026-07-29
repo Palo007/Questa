@@ -55,19 +55,22 @@ assert('NO "exportInterval" settingRow in openSettings',
 // =========================================================================
 // 2. Behavioral: extract key functions and test in VM sandbox
 // =========================================================================
-const lines = appSrc.split('\n');
-function grab(a, b) { return lines.slice(a - 1, b).join('\n'); }
+const { extractFunction, extractBraceBody } = require('./_extract');
 
-// Extract: esc (5657), settingRow (5059-5063), closeOpt (5064)
-// autoBackup block from openSettings (4896-4903)
-// openOpt autoBackup branch (5171-5189)
-// setAutoBackupTiers (5027)
-// Line numbers updated 2026-07-29 for eventMergeFilter addition (+31 shift,
-// everything from old line 766 onward moved down 31 lines).
+// Anchor-based extraction (see tests/_extract.js) replaces the old hardcoded
+// grab(lineStart, lineEnd) helper: every app.js insertion used to silently
+// shift those ranges (last repatch 2026-07-29). Each function below is
+// located by a regex on its declaration, then extracted via brace-balance to
+// its true end -- immune to line shifts anywhere else in app.js.
+const escFn = extractFunction(appSrc, /^function esc\(s\)\{/, 'esc');
+const settingRowFn = extractFunction(appSrc, /^function settingRow\(/, 'settingRow');
+const closeOptFn = extractFunction(appSrc, /^function closeOpt\(\)\{/, 'closeOpt');
+const setAutoBackupTiersFn = extractFunction(appSrc, /^function setAutoBackupTiers\(patch\)\{/, 'setAutoBackupTiers');
+
 const code = [
-  grab(5657, 5657),       // esc
-  grab(5059, 5064),       // settingRow + closeOpt
-  grab(5027, 5027),       // setAutoBackupTiers
+  escFn,
+  settingRowFn + '\n' + closeOptFn,
+  setAutoBackupTiersFn,
   'return { esc, settingRow, closeOpt, setAutoBackupTiers };'
 ].join('\n');
 
@@ -158,11 +161,12 @@ assert('settingRow output is a button with setItem class',
 // --- Test openOpt('autoBackup') renders 4 tier checkboxes ---
 // Extract the openOpt function body. It is a large if/else chain; we only
 // need the autoBackup branch, so we build a minimal openOpt that calls it.
-// Extract the autoBackup branch from openOpt (lines 5172-5188).
-const openOptBlock = grab(5172, 5188);
+// Anchored on the `} else if(key==='autoBackup'){` line; brace-balanced to
+// find its true end (see tests/_extract.js).
+const openOptBlock = extractBraceBody(appSrc, /else if\(key==='autoBackup'\)\{\s*$/, "openOpt autoBackup branch");
 
 const openOptCode = [
-  grab(5657, 5657),   // esc
+  escFn,   // esc
   'function openOpt(key){',
   '  var h="";',
   '  if(key==="autoBackup"){',

@@ -11,26 +11,40 @@
 // Run: node tests/feed-hide-sync.test.js  (also run by node tests/run.js)
 
 const fs = require('fs'), path = require('path'), vm = require('vm');
+const { extractLine, extractFunction, extractSpan, functionEndLineIndex } = require('./_extract');
 
 const appSrc = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
-const lines = appSrc.split('\n');
 
-function grab(a, b) { return lines.slice(a - 1, b).join('\n'); }
+// Anchor-based extraction (see tests/_extract.js) replaces the old hardcoded
+// grab(lineStart, lineEnd) helper: every app.js insertion used to silently
+// shift those ranges (this repatch happened 2026-07-23 and again 2026-07-29).
+// Anchors are located by regex on their declaration text, then (for the
+// render block / esc) a brace-balance scan finds the true end, so extraction
+// survives arbitrary line shifts elsewhere in the file.
+//
+// DIAGNOSTIC_KINDS: `var DIAGNOSTIC_KINDS = [...]` declaration line.
+// Render helper block: from `let _evWin=null;` through the brace-balanced end
+// of renderEventDetail() -- covers getEventCategory, isFeedNoise,
+// _evCatBadge*, _evDeltaSpan, _evDiffText, evSetSearch, renderEventDetail.
+// Some render globals (`_evFilterType`, `_evPage`, `_evSearchQuery`) live
+// elsewhere in app.js (before the render block); stub them as vars.
+// esc(): single-line function, extracted whole via brace balance.
+const diagnosticKindsLine = extractLine(appSrc, /^var DIAGNOSTIC_KINDS\s*=\s*\[/, 'DIAGNOSTIC_KINDS declaration');
+const renderBlock = extractSpan(
+  appSrc,
+  /^let _evWin=null;/,
+  functionEndLineIndex(/^function renderEventDetail\(from,to\)\{/, 'renderEventDetail'),
+  'feed render helper block (_evWin..renderEventDetail end)'
+);
+const escFn = extractFunction(appSrc, /^function esc\(s\)\{/, 'esc');
 
-// DIAGNOSTIC_KINDS (var, line 672) + render helper block (3217-3615, includes
-// `let _evWin` at 3217) + esc (5657). Some render globals (`_evFilterType`,
-// `_evPage`, `_evSearchQuery`) live elsewhere in app.js; stub them as vars.
-// Line numbers updated 2026-07-23 for autoBackupEnabled migration (+13/+30 shift).
-// Line numbers updated 2026-07-29 for eventMergeFilter addition (+31 shift,
-// everything from old line 766 onward moved down 31 lines; line 672 is
-// unaffected since it sits before the insertion point).
 const evStubs = 'var _evFilterType="all", _evPage=0, _evSearchQuery="";\n';
 const code =
-  grab(672, 672) + '\n' +
+  diagnosticKindsLine + '\n' +
   evStubs +
-  grab(3217, 3615) + '\n' +
-  grab(5657, 5657) + '\n' +
-  'return { renderEventDetail, isFeedNoise, getEventCategory, DIAGNOSTIC_KINDS };';;
+  renderBlock + '\n' +
+  escFn + '\n' +
+  'return { renderEventDetail, isFeedNoise, getEventCategory, DIAGNOSTIC_KINDS };';
 
 // Stub S with controllable prefs.
 const S = { prefs: { hideSyncDiag: false } };

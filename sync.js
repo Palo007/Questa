@@ -1825,15 +1825,36 @@ function confirmSyncDisconnect(){
 // yet-synced changes), so unlike confirmSyncDisconnect above it does NOT
 // have a "just proceed" fallback if the confirm dialog is unavailable for
 // any reason — refusing is the safe default for a hard-to-undo action.
-function confirmForcePush(){
+async function confirmForcePush(){
   if(typeof confirmDialog!=="function"){
     if(typeof toast==="function") toast('Force push unavailable right now (confirmation dialog missing).');
     return;
   }
-  confirmDialog(
-    'Force push — overwrite Dropbox?',
-    "This replaces the data in Dropbox with what's on THIS device. Anything saved on other devices that hasn't synced yet will be permanently lost. This cannot be undone."
-  ).then(ok=>{
+  // Surface the local event count so the user has a signal for whether THIS
+  // device is the well-synced one before nuking Dropbox's copy of the state.
+  // NOTE: force push only overwrites remote STATE (syncSubset() -> dbxUpload
+  // (STATE_PATH, ...) in syncForcePush()/_syncForcePushAttempt() above) -- it
+  // never touches the event log, so a low count here is a hint about THIS
+  // device's history, not a claim that events are at risk on the remote.
+  // countEvents() (app.js) resolves 0 on any failure and is optional per this
+  // file's typeof-guard convention (see syncDeviceId() above, ~line 60), so a
+  // missing/throwing/rejecting global just means we skip the sentence.
+  let n = null;
+  if(typeof countEvents==="function"){
+    try{ const c = await countEvents(); if(typeof c === "number" && !isNaN(c)) n = c; }
+    catch(e){ n = null; }
+  }
+  let text = "This replaces the data in Dropbox with what's on THIS device. Anything saved on other devices that hasn't synced yet will be permanently lost. This cannot be undone.";
+  if(n !== null){
+    text += " This device has " + n + " local event" + (n === 1 ? "" : "s") + ".";
+    // Advisory only, not a hard gate: below this, THIS device's own event
+    // history looks thin, which can mean it hasn't been the synced device in
+    // a while -- worth a second look before overwriting Dropbox's state.
+    if(n < 50){
+      text += " If that looks low, it may not be the most up-to-date device.";
+    }
+  }
+  confirmDialog('Force push — overwrite Dropbox?', text).then(ok=>{
     if(!ok) return;
     if(typeof toast==="function") toast('Pushing this device\'s data to Dropbox\u2026');
     syncForcePush();
@@ -1932,6 +1953,7 @@ if(typeof window !== "undefined"){
     disconnect: syncDisconnect,
     now: syncNow,
     forcePush: syncForcePush,
+    confirmForcePush: confirmForcePush, // test-only-motivated export (W3.6): exercise the event-count copy directly
     forcePull: syncForcePull,
     cfg: syncCfg,
     merge: merge, // exposed so it can be unit-tested from the browser console too

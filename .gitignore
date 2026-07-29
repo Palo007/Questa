@@ -20,6 +20,18 @@
 !/sw.js
 !/README.md
 !/sync.js
+# === Test and tool directories ===
+!/tests/
+!/tools/
+# generated data + local scratch, never tracked
+tools/out/
+tests/_tmp_*
+tests/.gfs_full.new
+# archive/ is ignored wholesale EXCEPT archive/tests/, which tests/run.js executes.
+# Order matters: gitignore is last-match-wins, so the blanket must precede the negation.
+!/archive/
+archive/*
+!/archive/tests/
 
 # === OS cruft ===
 .DS_Store

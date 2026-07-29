@@ -5476,28 +5476,50 @@ function importData(ev){
       if(!data.char||!Array.isArray(data.tasks)) throw 0;
       const doImport = () => {
         const embeddedEvents = Array.isArray(data.events) ? data.events : null;
-        confirmDialog('Import Progress', 'Replace current progress with the imported file?').then(ok => {
+        confirmDialog('Import Progress', 'Replace current progress with the imported file?').then(async ok => {
           if(!ok) return;
           S=migrate(data); save(); applyWidth(); applyCardThick(); closeSheet(); render();
           if(embeddedEvents && typeof indexedDB!=="undefined"){
+            // Read the existing local event store BEFORE reparenting, same house
+            // pattern as confirmRestore() (~5626): getEvents() reads IndexedDB
+            // directly and is unaffected by the S/migrate() reassignment above,
+            // so this is read first purely to capture the pre-import baseline.
+            // Union-insert only -- clearAllEvents() must NEVER be called on this
+            // path; that used to wipe every local event absent from the import.
+            const existing = await getEvents({includeDiag:true});
+            const existingUidSet = new Set(); const existingSigSet = new Set();
+            (existing||[]).forEach(r=>{ if(r && r.uid) existingUidSet.add(r.uid); existingSigSet.add(eventMergeSig(r)); });
             const reparented = reparentEventsForImport(embeddedEvents);
             const impSum = eventImportSummary(reparented);
-            clearAllEvents().then(()=>bulkAddEvents(reparented)).then(n=>{
-              const note = 'Restored ' + n + ' events (' + eventImportSummaryText(impSum) + ')';
-              logEvent({kind: 'import', taskTitle: 'Import Data', notes: note});
-              toast('Imported \u00b7 ' + n + ' events restored');
-              alertDialog('Import complete',
-                n + ' events restored to this device.',
-                eventImportSummaryHTML(impSum));
-              if(TAB==='analytics') render();
-              // F-import: run the same startup day-rollover the app runs on
-              // normal load (app.js startDay) so imported dailies get reset /
-              // the missed-yesterday prompt fires if the device calendar has
-              // advanced. Without this, importing a state that still carried
-              // done:true dailies from a prior day showed stale "yesterday"
-              // completion with no start-of-day correction.
-              startDay();
-            });
+            // The signature key (eventMergeSig; ts/kind/taskId/dir/reps) is
+            // MANDATORY here, not optional: reparentEventsForImport() above
+            // overwrites e.dev to THIS device and rehashes e.uid via
+            // eventUidOf(), which hashes dev as one of its input fields. A
+            // foreign event that already arrived locally via sync carries its
+            // ORIGINATING device's uid, while the SAME logical event coming in
+            // via THIS import path gets a fresh 'rep-...' uid -- the two never
+            // uid-match, so uid-only dedup would let the duplicate through.
+            // Residual, accepted risk: the signature (ts,kind,taskId,dir,reps)
+            // could in principle collide for two genuinely distinct taps on the
+            // same task/direction/rep-count within the same millisecond -- not
+            // real user behaviour.
+            const merge = eventMergeFilter(reparented, existingUidSet, existingSigSet);
+            const add = merge.add, skipped = merge.skipped;
+            await bulkAddEvents(add);
+            const note = 'Restored ' + add.length + ' events (' + eventImportSummaryText(impSum) + '; ' + skipped + ' already present, skipped)';
+            logEvent({kind: 'import', taskTitle: 'Import Data', notes: note});
+            toast('Imported \u00b7 ' + add.length + ' events restored');
+            alertDialog('Import complete',
+              add.length + ' events restored to this device.',
+              eventImportSummaryHTML(impSum));
+            if(TAB==='analytics') render();
+            // F-import: run the same startup day-rollover the app runs on
+            // normal load (app.js startDay) so imported dailies get reset /
+            // the missed-yesterday prompt fires if the device calendar has
+            // advanced. Without this, importing a state that still carried
+            // done:true dailies from a prior day showed stale "yesterday"
+            // completion with no start-of-day correction.
+            startDay();
           } else {
             logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Imported from backup'});
             toast('Imported');

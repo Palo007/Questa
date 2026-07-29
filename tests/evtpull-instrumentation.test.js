@@ -217,7 +217,18 @@ async function main(){
     assert('T5: downloadFailed produces evtPullSkip', hit && hit.reason === 'downloadFailed');
   }
 
-  // T6: parseError -- corrupt JSON; rev is still recorded (unchanged behavior)
+  // T6: parseError -- corrupt JSON is skipped and quarantined into evtBadRevs
+  // (2026-07-29 W6.13: this assertion was INVERTED. The old behavior --
+  // recording a corrupt payload's rev in the normal evtFileRevs map -- is
+  // exactly the self-inaccessibility bug W6.13 fixes: an unparseable file
+  // would keep the same rev forever (its writer never changes it), so once
+  // recorded it would never be retried again. The fix moves corrupt/failed
+  // payloads into the separate evtBadRevs quarantine (slower badRevBackoff
+  // retry cadence) and leaves evtFileRevs untouched for that file, so it is
+  // NOT pinned out of future pulls. Do not "restore" the old
+  // evtFileRevs-gets-written assertion below thinking it proves correctness
+  // -- see the precedent of the 2026-07-12 tombstone change inverting G2b/G2c
+  // in recency-guard and R3 in stale-local for the same reason.)
   {
     const name = 'dev-other-' + CUR_MONTH + '.json';
     const c = makeCtx({ entries: [{ name: name, rev: 'r6' }], downloads: { [name]: { text: 'not json {', rev: 'r6' } } });
@@ -225,7 +236,8 @@ async function main(){
     const hit = c.diag.find(function(e){ return e.kind === 'evtPullSkip' && e.name === name; });
     assert('T6: parseError produces evtPullSkip', hit && hit.reason === 'parseError');
     const saved = JSON.parse(c.store[CFG]);
-    assert('T6: the rev is still recorded for the corrupt file (unchanged behavior)', saved.evtFileRevs[name] === 'r6');
+    assert('T6: the corrupt file\'s rev is absent from evtFileRevs and quarantined in evtBadRevs instead (2026-07-29 W6.13: no longer pinned out of the pull forever)',
+      !(name in saved.evtFileRevs) && saved.evtBadRevs && saved.evtBadRevs[name] && saved.evtBadRevs[name].rev === 'r6');
   }
 
   // T7: notArray -- valid JSON, but not an array

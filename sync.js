@@ -36,8 +36,10 @@ function syncCfgDefaults(){
     lastError: null,
     deviceId: null,
     evtLastUploadTs: 0,   // watermark: max ts of own events already uploaded
-    evtFileRevs: {},      // filename -> Dropbox rev of last successfully pulled version
-    evtLastPullAt: 0      // throttle: last time we ran a pull
+    evtFileRevs: {},      // filename -> Dropbox rev of last successfully PARSED+INSERTED pull
+    evtLastPullAt: 0,     // throttle: last time we ran a pull
+    evtFullScanAt: 0,     // periodic full re-scan watermark (ignores evtFileRevs/evtBadRevs)
+    evtBadRevs: {}        // filename -> {rev, at} for corrupt/failed payloads (slower retry, never pins)
   };
 }
 function syncCfg(){
@@ -1554,6 +1556,11 @@ async function syncMaybeAutoExport(){
 // ---- 3.9 Event-log sync (plan: .omo/plans/2026-07-10-eventlog-sync.md) ----
 const EVENTS_DIR = "/events";
 const EVT_PULL_MIN_INTERVAL_MS = 60000; // list_folder at most once/min
+// (2026-07-29 W6.13) Self-healing pull knobs -- see plan note above
+// syncEventsPull() for the full rationale.
+const EVT_FULL_SCAN_INTERVAL_MS = 24 * 3600000; // periodic rev-cache-ignoring re-scan
+const EVT_BAD_REV_RETRY_MS = 15 * 60000;        // corrupt/failed payload retry backoff
+const EVT_BAD_REVS_MAX = 200;                   // cap on cfg.evtBadRevs so it can't grow unbounded
 
 /* BEGIN_EVTSYNC_HELPERS */
 // UTC month key for an event timestamp: 1467-style ms -> "YYYYMM".
@@ -1569,6 +1576,18 @@ function evtMonthRange(key){
 // "<deviceId>-<YYYYMM>.json" -> {dev, month} | null. Greedy (.+) means the
 // month is always the LAST 6-digit group — safe even if a deviceId contains
 // digits or hyphens.
+// (2026-07-29 W6.13) Deliberately does NOT match Dropbox's own conflict-copy
+// naming, e.g. "mrl770yaq56gl-202607 (1).json" (confirmed present in prod
+// Dropbox). A conflict copy is Dropbox's artifact of a write race on a file
+// this same device-month OVERWRITES WHOLESALE on every push (see
+// evtOwnMonthRecords/syncEventsPush) -- it is not an appended log, so a
+// " (1)" copy is a stale full-month snapshot the writer already superseded.
+// Ingesting it risks resurrecting events the writing device deliberately
+// dropped from its own rebuilt file (e.g. after a local delete/edit). Such
+// names already fall through to the 'unparsedName' diag path below rather
+// than being silently dropped, which meets the visibility bar without
+// resurrecting superseded history. Left unparsed on purpose; do not "fix"
+// this without re-reading that reasoning.
 function evtParseFileName(name){
   const m = /^(.+)-(\d{6})\.json$/.exec(name || "");
   return m ? { dev: m[1], month: m[2] } : null;
@@ -1715,14 +1734,20 @@ async function syncEventsPush(){
 // questaFullDiagnostic(). Control flow is unchanged; see archive backup diff.
 // Module-scoped so the throttle-diag rate limit survives across calls.
 let _evtPullLastThrottleDiag = 0;
-async function syncEventsPull(){
+async function syncEventsPull(opts){
+  // (2026-07-29 W6.13) opts.force bypasses BOTH the rev cache and the 60s
+  // throttle for a full reconciliation pull. Every existing call site
+  // (syncEventsSync()'s .then(() => syncEventsPull()), the only caller
+  // today) passes no argument, so `opts` is undefined and `force` is false --
+  // identical to prior behavior.
+  const force = !!(opts && opts.force);
   if(typeof getEvents !== "function" || typeof idbOpen !== "function"){
     if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: null, reason: 'missingDeps' });
     return;
   }
   const now = Date.now();
   const cfg = syncCfg();
-  if(now - (cfg.evtLastPullAt || 0) < EVT_PULL_MIN_INTERVAL_MS){
+  if(!force && now - (cfg.evtLastPullAt || 0) < EVT_PULL_MIN_INTERVAL_MS){
     // The throttle can fire far more often than an actual pull would run (any
     // scheduleSync/syncNow tick inside the 60s window), so logging every hit
     // would flood the 50-entry ring before the user opens the diag overlay.
@@ -1735,8 +1760,23 @@ async function syncEventsPull(){
   }
   const myDev = syncDeviceId();
   const ageLimit = (typeof EVENT_AGE_LIMIT_MS !== "undefined") ? EVENT_AGE_LIMIT_MS : 18 * 30 * 86400000;
+  // Periodic full re-scan: ignore the rev cache entirely once a day so a file
+  // that got wedged (stale/corrupt rev pinning, a missed webhook-less list,
+  // etc.) self-heals within 24h instead of staying invisible forever. Insert
+  // is already a uid union (evtIncomingFilter + evtInsertNew), so redundantly
+  // re-pulling an already-ingested file is idempotent and cheap.
+  // A never-before-set watermark (fresh device, or upgrading from a build
+  // that predates this feature) bootstraps the clock on THIS pull without
+  // forcing an immediate full scan -- the first real full scan then lands
+  // ~24h later, matching "self-heals within a day" rather than instantly
+  // re-scanning every existing install the moment this ships.
+  const lastFullScanAt = cfg.evtFullScanAt || 0;
+  const isFullScan = lastFullScanAt > 0 && (now - lastFullScanAt) > EVT_FULL_SCAN_INTERVAL_MS;
+  const ignoreRevCache = force || isFullScan;
   const entries = await dbxListFolder(EVENTS_DIR);
+  if(isFullScan && typeof _qDiagPush === "function") _qDiagPush('evtFullScan', { entries: entries.length });
   const revs = Object.assign({}, cfg.evtFileRevs || {});
+  const badRevs = Object.assign({}, cfg.evtBadRevs || {});
   for(const ent of entries){
     const parsed = evtParseFileName(ent.name);
     if(!parsed){                             // not an event file (ignore strangers)
@@ -1749,16 +1789,25 @@ async function syncEventsPull(){
     }
     if(evtMonthOlderThan(parsed.month, now, ageLimit)){
       delete revs[ent.name];
+      delete badRevs[ent.name];
       if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: ent.name, reason: 'tooOld' });
       continue;
     }
-    if(ent.rev && revs[ent.name] === ent.rev){
+    const bad = badRevs[ent.name];
+    if(!ignoreRevCache && bad && (now - (bad.at || 0)) < EVT_BAD_REV_RETRY_MS){
+      // A corrupt/failed payload backs off at a slower cadence than a normal
+      // unchanged-rev skip, instead of being pinned alongside healthy files.
+      if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: ent.name, reason: 'badRevBackoff' });
+      continue;
+    }
+    if(!ignoreRevCache && ent.rev && revs[ent.name] === ent.rev){
       if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: ent.name, reason: 'revUnchanged' });
       continue; // unchanged since last pull
     }
     const dl = await dbxDownloadRaw(EVENTS_DIR + "/" + ent.name);
     if(!dl){
       if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: ent.name, reason: 'downloadFailed' });
+      badRevs[ent.name] = { rev: ent.rev || null, at: now };
       continue;
     }
     let records = null;
@@ -1772,15 +1821,35 @@ async function syncEventsPull(){
         .map(e => e && e.uid).filter(Boolean));
       const _evtInserted = await evtInsertNew(evtIncomingFilter(records, existing, myDev, now, ageLimit));
       if(typeof _qDiagPush === "function") _qDiagPush('evtPullOk', { name: ent.name, inserted: _evtInserted });
+      // Successful parse + insert only: record the rev in the normal cache
+      // (and clear any earlier bad-payload sentinel) so a future unchanged
+      // rev correctly short-circuits again.
+      revs[ent.name] = dl.rev || ent.rev || null;
+      delete badRevs[ent.name];
     } else {
       if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: ent.name, reason: _evtParseFailed ? 'parseError' : 'notArray' });
+      // Corrupt/unexpected payload: do NOT record it in `revs` -- that would
+      // pin the file out of the pull forever (its writer may never change
+      // the rev again). Track it separately with a timestamp instead, so it
+      // is retried at a slower cadence (see badRevBackoff above) rather than
+      // being silently skipped alongside healthy files.
+      badRevs[ent.name] = { rev: dl.rev || ent.rev || null, at: now };
     }
-    // Record the rev even if the file was corrupt — its writer overwrites it
-    // on their next push; re-downloading a permanently bad file every minute
-    // helps no one.
-    revs[ent.name] = dl.rev || ent.rev || null;
   }
-  syncCfgSave({ evtFileRevs: revs, evtLastPullAt: now });
+  // Bound badRevs: it must never grow without limit (a Dropbox account could
+  // accumulate many stale/foreign files over time). Keep only the most
+  // recently-touched EVT_BAD_REVS_MAX entries.
+  const badKeys = Object.keys(badRevs);
+  if(badKeys.length > EVT_BAD_REVS_MAX){
+    badKeys.sort((a, b) => (badRevs[a].at || 0) - (badRevs[b].at || 0));
+    for(let i = 0; i < badKeys.length - EVT_BAD_REVS_MAX; i++) delete badRevs[badKeys[i]];
+  }
+  syncCfgSave({
+    evtFileRevs: revs,
+    evtBadRevs: badRevs,
+    evtLastPullAt: now,
+    evtFullScanAt: isFullScan ? now : (lastFullScanAt || now)
+  });
 }
 
 // Delete a single device's own /events files from Dropbox. Used by

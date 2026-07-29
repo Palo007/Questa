@@ -203,7 +203,17 @@ async function runTests(){
   // =====================================================================
   // R4: Concurrent multi-tier single-blob
   // syncMaybeAutoExport enables fourHour + daily, both due (lastTs=0),
-  // verifies buildBackupFile called exactly once even though 2 tiers fire.
+  // verifies buildBackupFile called exactly once even though 2 tiers fire,
+  // AND that both tiers actually uploaded.
+  //
+  // 2026-07-29: this block used to assert ONLY buildCount === 1. That passed
+  // whether or not `daily` fired -- one due tier already satisfies it, because
+  // syncMaybeAutoExport builds the blob once for any non-empty due list. Its
+  // "both due (lastTs=0)" comment was therefore false, and it masked the
+  // _bkNextBoundary bug that made daily/weekly/monthly unable to fire at all.
+  // The dbxUploadText mock now records paths so "2 tiers fired, 1 blob built"
+  // is genuinely pinned. Path shape comes from _bkPath():
+  //   /questa-backups/<prefix>-<dev6>-<NN>-<YYYYMMDD-HHMMSS>.json
   // =====================================================================
   {
     resetBkLocal();
@@ -216,13 +226,19 @@ async function runTests(){
     sandbox.S.prefs = {
       autoBackupEnabled: { fourHour: true, daily: true }
     };
+    var uploadedPaths = [];
     sandbox.dbxListFolder = async function(){ return []; };
-    sandbox.dbxUploadText = async function(){ return {}; };
+    sandbox.dbxUploadText = async function(p){ uploadedPaths.push(p); return {}; };
     sandbox.dbxDelete = async function(){};
 
     await Q.maybeAutoExport();
 
     assert('R4: buildBackupFile called exactly once for 2 concurrent tiers', buildCount === 1);
+    assert('R4c: both enabled tiers uploaded (2 paths)', uploadedPaths.length === 2);
+    assert('R4d: fourHour uploaded a 4hour- prefixed backup',
+      uploadedPaths.some(function(p){ return p.indexOf('/questa-backups/4hour-') === 0; }));
+    assert('R4e: daily uploaded a daily- prefixed backup',
+      uploadedPaths.some(function(p){ return p.indexOf('/questa-backups/daily-') === 0; }));
   }
 
   // R4 variant: only one tier enabled

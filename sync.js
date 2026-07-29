@@ -1408,21 +1408,35 @@ async function _bkListTier(deviceShort, tierPrefix){
   }catch(e){ return []; }
 }
 function _bkNextBoundary(tierKey, lastTs){
-  const now = new Date();
+  // 2026-07-29 FIX (plan: .kilo/plans/1785344033093-dropbox-cycling-backups-review.md P1).
+  // The boundary MUST be derived from lastTs. The old body opened with
+  // `const now = new Date();` and built every calendar boundary from it, so the
+  // returned boundary was future-by-construction relative to the very instant the
+  // caller compares it against (syncMaybeAutoExport, below) -- meaning
+  // daily/weekly/monthly could NEVER fire, under any lastTs. Only fourHour worked.
+  // lastTs === 0 (never fired) => 0, i.e. due immediately, seeding slot 0. The
+  // alternative `lastTs || Date.now()` was considered and REJECTED: lastTs is
+  // persisted in _bkFire the moment a tier fires, so lastTs===0 costs exactly one
+  // seed upload, whereas that guard would withhold all backups from a freshly
+  // enabled monthly tier for up to 31 days. Unit-tested in
+  // tests/auto-backup-boundary.test.js (B1-B8).
+  if(!BK_TIERS[tierKey]) return Infinity;
+  if(!lastTs) return 0;
+  const base = new Date(lastTs);
   if(tierKey === 'fourHour'){
     return lastTs + BK_TIERS.fourHour.cadenceMs;
   }
   if(tierKey === 'daily'){
-    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+    const next = new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1, 0, 0, 0, 0);
     return next.getTime();
   }
   if(tierKey === 'weekly'){
-    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+    const next = new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1, 0, 0, 0, 0);
     while(next.getDay() !== 1){ next.setDate(next.getDate() + 1); }
     return next.getTime();
   }
   if(tierKey === 'monthly'){
-    return new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0, 0).getTime();
+    return new Date(base.getFullYear(), base.getMonth() + 1, 1, 0, 0, 0, 0).getTime();
   }
   return Infinity;
 }

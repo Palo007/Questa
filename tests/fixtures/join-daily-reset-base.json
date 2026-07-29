@@ -182,6 +182,12 @@
   }
  ],
  "prefs": {
+  "autoBackupEnabled": {
+   "fourHour": false,
+   "daily": false,
+   "weekly": false,
+   "monthly": false
+  },
   "width": 480,
   "notesLines": 3,
   "lastTab": "habits",

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.23-0815";
+const APP_VERSION = "v2026.07.29-1446";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -5623,17 +5623,34 @@ async function confirmRestore(id){
       }
     }
 
+    // Read the existing event store BEFORE touching anything else. getEvents()
+    // reads IndexedDB directly and is unaffected by the S/migrate() reassignment
+    // below (migrate() is a synchronous in-memory state normalizer that makes
+    // zero IDB calls and explicitly deletes any .events field -- events live
+    // only in IndexedDB). This is read first purely so the merge below has the
+    // pre-restore baseline; not because migrate() would otherwise empty it.
+    const existing = await getEvents({includeDiag:true});
+    const existingUidSet = new Set(); const existingSigSet = new Set();
+    (existing||[]).forEach(r=>{ if(r && r.uid) existingUidSet.add(r.uid); existingSigSet.add(eventMergeSig(r)); });
+
     // Apply state
     S = migrate(stateSnapshot);
     save();
     applyWidth();
     applyCardThick();
 
-    // Restore events
+    // Merge events: do NOT clear the local store here. clearAllEvents()
+    // followed by bulkAddEvents(events) used to destroy every local event not
+    // present in the restored backup -- this is the mechanism that wiped
+    // independent per-device event history when a stale backup was restored.
+    // Union-insert only: existing local events are left untouched, and only
+    // genuinely new backup events (by uid, falling back to content signature)
+    // are added.
     if(events.length > 0 && typeof indexedDB !== "undefined"){
-      await clearAllEvents();
-      const n = await bulkAddEvents(events);
-      logEvent({kind: 'restore', taskTitle: 'Restore from snapshot', notes: 'Restored ' + n + ' events'});
+      const merge = eventMergeFilter(events, existingUidSet, existingSigSet);
+      const add = merge.add, skipped = merge.skipped;
+      await bulkAddEvents(add);
+      logEvent({kind: 'restore', taskTitle: 'Restore from snapshot', notes: 'Restored ' + add.length + ' events (' + skipped + ' already present, skipped)'});
     }
 
     closeSheet();

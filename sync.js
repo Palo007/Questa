@@ -1264,6 +1264,18 @@ async function _syncForcePullAttempt(){
     syncApply(remote.state);           // local becomes remote's content, unconditionally
     await syncBasePut(remote.state, remote.rev);   // remote's state is now truthfully "the last synced state"
     syncCfgSave({ lastRev: remote.rev || null, lastSyncAt: Date.now(), lastError: null });
+    // W6.15: a force pull only reconciled state, silently leaving the event
+    // store behind -- same bug class as the clearAllEvents() gap just fixed on
+    // the restore/import paths. Pull events too, bypassing both the rev cache
+    // and the 60s throttle ({force:true}, added in W6.13) so this reconciles in
+    // one shot. State reconciliation has already succeeded above, so a failure
+    // here must not fail/roll back the force pull -- catch and diagnose only.
+    if(typeof syncEventsPull === "function"){
+      try{ await syncEventsPull({force:true}); }
+      catch(e){
+        if(typeof _qDiagPush === "function") _qDiagPush('forcePullEventsFailed', { error: (e && e.message) || String(e) });
+      }
+    }
   }catch(e){
     syncCfgSave({ lastError: "force pull failed: " + ((e && e.message) || String(e)) });
   }

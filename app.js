@@ -658,12 +658,43 @@ function logEvent(ev){
   const rec = (typeof syncEventUid==="function" && typeof syncDeviceId==="function")
     ? Object.assign({ts:Date.now(), uid:syncEventUid(), dev:syncDeviceId()}, ev)
     : Object.assign({ts:Date.now()}, ev);
-  idbOpen().then(db=>{
+  // 2026-07-29 hardening (W2.4): wire tx.onabort/tx.onerror so an async IndexedDB
+  // transaction failure is no longer invisible -- previously only a synchronous
+  // try/catch around the transaction+add call existed, with a silent swallow and
+  // NO abort/error handlers at all. Retry happens ONCE, on a fresh transaction,
+  // and ONLY from tx.onabort -- abort is a definitive "this transaction did NOT
+  // commit" signal, so retrying here can never duplicate a record whose original
+  // transaction actually committed late. A timer-based retry could not make that
+  // guarantee (the original might commit after the timer fires) and was rejected
+  // for that reason. attempt() recurses into the retry at most once: the only
+  // call to attempt(db,true) is guarded by "!isRetry", and the isRetry===true
+  // branch never calls attempt() again -- so this can never loop.
+  // NOTE: this is defensive hardening against a failure mode that has NOT been
+  // observed, not the fix for the 2026-07-28 event gap -- on that date this same
+  // device successfully wrote 9 events (storagePersist, lifecycle x4, miss x3,
+  // purchase) through this identical logEvent() -> IndexedDB path, so IndexedDB
+  // was healthy and logEvent() was working that day. A future reader must not
+  // mistake this hardening for that root-cause fix.
+  function _logEventDiag(kind, data){
+    if(typeof _qDiagPush === "function"){ try{ _qDiagPush(kind, data); }catch(e){} }
+  }
+  function attempt(db, isRetry){
     try{
       const tx = db.transaction(EVENTS_STORE, "readwrite");
       tx.objectStore(EVENTS_STORE).add(rec);
-    }catch(e){ /* swallow: fidelity layer is best-effort, never blocks scoring */ }
-  }).catch(()=>{ /* IDB unavailable (e.g. private mode) — silently skip logging */ });
+      tx.onabort = function(){
+        if(isRetry){
+          _logEventDiag('logEventRetryFailed', {kind:rec.kind, taskId:rec.taskId, msg:(tx.error&&tx.error.message)||String(tx.error)});
+        } else {
+          attempt(db, true);
+        }
+      };
+      tx.onerror = function(){
+        _logEventDiag('logEventTxError', {kind:rec.kind, taskId:rec.taskId, msg:(tx.error&&tx.error.message)||String(tx.error)});
+      };
+    }catch(e){ _logEventDiag('logEventSync', {kind:rec.kind, taskId:rec.taskId, msg:String((e&&e.message)||e)}); }
+  }
+  idbOpen().then(db=>attempt(db, false)).catch(()=>{ /* IDB unavailable (e.g. private mode) — silently skip logging */ });
 }
 /* BEGIN_EVENTS_HELPERS */
 // Async read API: resolve to events in [from,to] (ms, inclusive) optionally

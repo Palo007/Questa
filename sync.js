@@ -1604,21 +1604,35 @@ function evtParseFileName(name){
   const m = /^(.+)-(\d{6})\.json$/.exec(name || "");
   return m ? { dev: m[1], month: m[2] } : null;
 }
-// Own not-yet-uploaded events: stamped, mine, real (not synthetic), newer than
-// the watermark.
+// Own not-yet-uploaded events: stamped, mine, real (not synthetic), not an
+// unpublished import, newer than the watermark.
+// (2026-07-29 W6.14) `imported` records (reparentEventsForImport(), app.js)
+// are excluded the same way `synthetic` records always have been: re-
+// uploading an imported record would publish ANOTHER device's history under
+// THIS device's uid, permanently duplicating it with no uid-based dedup able
+// to collapse the copies (the concrete harm this task exists to remove --
+// see reparentEventsForImport()'s header comment in app.js). The exclusion
+// is lifted ONLY when the record carries an explicit `republish: true`
+// opt-in (see republishImportedEvents(), app.js). The `!e.synthetic` check
+// below is UNCONDITIONAL and independent of `republish` -- a synthetic
+// (reconstructed/backfilled) record can never become uploadable no matter
+// what other flags it carries. Do not fold synthetic into the same
+// republish-gated clause; it must stay a separate, unconditional term.
 function evtUploadable(events, myDev, sinceTs){
   // 'lifecycle' is a local-only diagnostic kind (Phase C, 2026-07-11) and
   // must never be pushed to Dropbox -- it would spam every other device's
   // Activity Feed too (see app.js getEvents() for the read-side filter and
   // the matching fix note).
   return (events || []).filter(e => e && e.uid && e.dev === myDev && !e.synthetic
+    && (!e.imported || e.republish)
     && e.kind !== "lifecycle" && typeof e.ts === "number" && e.ts > sinceTs);
 }
-// Full-month rebuild set for upload: same ownership rule, no watermark, local
-// IDB `id` stripped (meaningless on other devices).
+// Full-month rebuild set for upload: same ownership rule (including the
+// imported/republish gate above -- see evtUploadable() comment), no
+// watermark, local IDB `id` stripped (meaningless on other devices).
 function evtOwnMonthRecords(events, myDev){
   return (events || [])
-    .filter(e => e && e.uid && e.dev === myDev && !e.synthetic && e.kind !== "lifecycle" && typeof e.ts === "number")
+    .filter(e => e && e.uid && e.dev === myDev && !e.synthetic && (!e.imported || e.republish) && e.kind !== "lifecycle" && typeof e.ts === "number")
     .map(e => { const r = Object.assign({}, e); delete r.id; return r; });
 }
 // Filter a downloaded file's records down to what should be inserted locally:

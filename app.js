@@ -573,6 +573,21 @@ function showSyncDebugOverlay(){
       if(typeof importEventsBackfill==="function") importEventsBackfill(evt);
     };
     backfillBox.appendChild(backfillInput);
+    // W6.14: opt-in re-publish control for imported (Habitica backfill)
+    // event history -- see republishImportedEvents() above for the full
+    // rationale and the synthetic-exclusion guarantee. Kept HERE alongside
+    // the other recovery controls (errors block, backfill input, divergence
+    // readout), deliberately NOT in Settings proper.
+    var republishBox = document.createElement("div");
+    republishBox.style.cssText = "flex-shrink:0;width:100%;background:#111;color:#0f0;font-family:monospace;font-size:11px;border:1px solid #444;padding:8px;box-sizing:border-box;margin-top:8px;";
+    republishBox.innerHTML = '<div style="font-weight:bold;margin-bottom:4px;">Republish imported history (opt-in)</div><div>Imported (Habitica backfill) events are excluded from sync by default. This re-publishes records owned by this device.</div>';
+    var republishBtn = document.createElement("button");
+    republishBtn.textContent = "Republish Imported Events";
+    republishBtn.style.cssText = "width:100%;padding:12px;font-size:16px;margin-top:6px;";
+    republishBtn.onclick = function(){
+      if(typeof republishImportedEvents==="function") republishImportedEvents();
+    };
+    republishBox.appendChild(republishBtn);
     var btnRow = document.createElement("div");
     btnRow.style.cssText = "display:flex;gap:8px;margin-top:8px;";
     var copyBtn = document.createElement("button");
@@ -598,7 +613,7 @@ function showSyncDebugOverlay(){
     closeBtn.style.cssText = "flex:1;padding:12px;font-size:16px;";
     closeBtn.onclick = function(){ ov.remove(); };
     btnRow.appendChild(copyBtn); btnRow.appendChild(dlBtn); btnRow.appendChild(closeBtn);
-    ov.appendChild(ta); ov.appendChild(errBox); ov.appendChild(divBox); ov.appendChild(backfillBox); ov.appendChild(btnRow);
+    ov.appendChild(ta); ov.appendChild(errBox); ov.appendChild(divBox); ov.appendChild(backfillBox); ov.appendChild(republishBox); ov.appendChild(btnRow);
     document.body.appendChild(ov);
     ta.focus(); ta.select();
   }
@@ -973,6 +988,83 @@ function clearLifecycleEvents(){
     tx.onabort = ()=>resolve(removed);
   })).catch(()=>0);
 }
+// --- opt-in re-publish of imported (Habitica backfill) event history -----
+// (2026-07-29 W6.14) evtUploadable()/evtOwnMonthRecords() (sync.js) now
+// exclude `imported` records (reparentEventsForImport(), above) the same
+// way they have always excluded `synthetic` ones -- otherwise re-uploading
+// an imported record republishes ANOTHER device's history under THIS
+// device's uid, a duplicate no uid-based dedup can collapse (the concrete
+// harm this task exists to remove). That default means imported history
+// (5,629 records measured 2026-07-29, the pre-2026-07 Habitica backfill)
+// will never reach another device via sync, with no migration bringing it
+// across. This is the explicit, user-triggered opt-in escape hatch: it sets
+// `republish: true` on every imported record OWNED BY THIS DEVICE, which
+// flips the sync.js gate back to including them. It deliberately does NOT
+// strip `imported` -- doing so would destroy provenance and re-create the
+// exact upload ambiguity this task removes.
+//
+// GUARANTEE: a `synthetic` (reconstructed/backfilled, see
+// importEventsBackfill()) record can NEVER become republishable. This
+// function's own eligibility filter excludes `!e.synthetic` records only
+// (never sets republish on a synthetic one), AND -- independently, as a
+// second, unconditional line of defense -- evtUploadable()/
+// evtOwnMonthRecords() in sync.js check `!e.synthetic` as a separate,
+// unconditional filter term that is never combined with the republish
+// clause. So even if a `republish:true` flag were ever set on a synthetic
+// record by some other code path, sync.js would still refuse to upload it.
+// See tests/no-republish-imported.test.js for the regression test.
+//
+// Gated behind confirmDialog() (Promise-based; toast() is fire-and-forget
+// and cannot ask "Continue?") because this permanently expands what leaves
+// the device -- it must never fire silently as a side effect of anything
+// else. Exposed only from showSyncDebugOverlay() (below), not Settings
+// proper, consistent with the other recovery controls added there.
+function countRepublishEligible(myDev){
+  return idbOpen().then(db=>new Promise((resolve)=>{
+    let n=0, tx;
+    try{ tx = db.transaction(EVENTS_STORE,"readonly"); }catch(e){ resolve(0); return; }
+    const cur = tx.objectStore(EVENTS_STORE).openCursor();
+    cur.onsuccess = ()=>{ const c=cur.result;
+      if(!c){ resolve(n); return; }
+      const v = c.value;
+      if(v && v.imported===true && v.dev===myDev && !v.synthetic && !v.republish) n++;
+      c.continue();
+    };
+    cur.onerror = ()=>resolve(n);
+  })).catch(()=>0);
+}
+function republishImportedEvents(){
+  const myDev = (typeof syncDeviceId==='function') ? syncDeviceId() : null;
+  if(!myDev){ toast('Cannot republish: no device id set.'); return Promise.resolve(0); }
+  return countRepublishEligible(myDev).then(n=>{
+    if(n===0){ toast('No imported records on this device are eligible to republish.'); return 0; }
+    const msg = 'Republish '+n+' imported event'+(n===1?'':'s')+' to Dropbox sync? This will make them visible to your other devices.';
+    return confirmDialog('Republish Imported History', msg).then(ok=>{
+      if(!ok){ toast('Republish cancelled.'); return 0; }
+      return idbOpen().then(db=>new Promise((resolve)=>{
+        let updated=0, tx;
+        try{ tx = db.transaction(EVENTS_STORE,"readwrite"); }catch(e){ resolve(0); return; }
+        const cur = tx.objectStore(EVENTS_STORE).openCursor();
+        cur.onsuccess = ()=>{ const c=cur.result;
+          if(!c){ return; }
+          const v = c.value;
+          if(v && v.imported===true && v.dev===myDev && !v.synthetic && !v.republish){
+            v.republish = true;
+            try{ c.update(v); }catch(e){}
+            updated++;
+          }
+          c.continue();
+        };
+        tx.oncomplete = ()=>resolve(updated);
+        tx.onerror = ()=>resolve(updated);
+        tx.onabort = ()=>resolve(updated);
+      })).then(updated=>{
+        toast('Republished '+updated+' imported event'+(updated===1?'':'s')+'.');
+        return updated;
+      });
+    });
+  }).catch(()=>0);
+}
 // Merge-filter for incoming sync/import events: a pure union-insert used to
 // decide which records from an incoming batch (a downloaded sync file, or an
 // imported/reparented list) are genuinely new versus already known. Dedupes
@@ -1055,6 +1147,11 @@ function reparentEventsForImport(list){
     delete e.id;
     const owned = myDev && e.dev===myDev && e.uid;
     if(owned) continue; // preserve original uid/dev for my own real taps
+    // (2026-07-29 W6.14) Preserve provenance: origDev keeps the record's
+    // PRE-reparenting dev (the device that actually generated it), captured
+    // before e.dev is overwritten below, so the true origin stays
+    // recoverable even though e.dev now reads as this device.
+    e.origDev = e.dev;
     if(myDev) e.dev = myDev;
     e.uid = eventUidOf(e, i);
     if('synthetic' in e) delete e.synthetic;

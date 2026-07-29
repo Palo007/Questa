@@ -465,6 +465,24 @@ function showSyncDebugOverlay(){
     var errBox = document.createElement("div");
     errBox.style.cssText = "flex-shrink:0;max-height:160px;overflow-y:auto;width:100%;background:#111;color:#0f0;font-family:monospace;font-size:11px;border:1px solid #444;padding:8px;box-sizing:border-box;margin-top:8px;";
     errBox.innerHTML = _qDiagErrorsHtml();
+    // W5.9: one-off recovery control for the output of
+    // tools/reconstruct_events_jul28.py ({"events":[...]}, 20 synthetic
+    // records, no uid). Wired to importEventsBackfill() -- the only
+    // events-only import entry point (never touches S) -- and kept HERE in
+    // the debug overlay, deliberately NOT in Settings proper, so it cannot
+    // be mistaken for the Settings restore/import pathway. Do not wire this
+    // control to that other pathway.
+    var backfillBox = document.createElement("div");
+    backfillBox.style.cssText = "flex-shrink:0;width:100%;background:#111;color:#0f0;font-family:monospace;font-size:11px;border:1px solid #444;padding:8px;box-sizing:border-box;margin-top:8px;";
+    backfillBox.innerHTML = '<div style="font-weight:bold;margin-bottom:4px;">Load reconstructed events (device-local, backfill)</div>';
+    var backfillInput = document.createElement("input");
+    backfillInput.type = "file";
+    backfillInput.accept = "application/json,.json";
+    backfillInput.style.cssText = "width:100%;color:#0f0;font-family:monospace;font-size:11px;";
+    backfillInput.onchange = function(evt){
+      if(typeof importEventsBackfill==="function") importEventsBackfill(evt);
+    };
+    backfillBox.appendChild(backfillInput);
     var btnRow = document.createElement("div");
     btnRow.style.cssText = "display:flex;gap:8px;margin-top:8px;";
     var copyBtn = document.createElement("button");
@@ -490,7 +508,7 @@ function showSyncDebugOverlay(){
     closeBtn.style.cssText = "flex:1;padding:12px;font-size:16px;";
     closeBtn.onclick = function(){ ov.remove(); };
     btnRow.appendChild(copyBtn); btnRow.appendChild(dlBtn); btnRow.appendChild(closeBtn);
-    ov.appendChild(ta); ov.appendChild(errBox); ov.appendChild(btnRow);
+    ov.appendChild(ta); ov.appendChild(errBox); ov.appendChild(backfillBox); ov.appendChild(btnRow);
     document.body.appendChild(ov);
     ta.focus(); ta.select();
   }

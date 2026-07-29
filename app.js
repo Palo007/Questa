@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.29-2041";
+const APP_VERSION = "v2026.07.29-2240";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -1219,10 +1219,11 @@ function bulkAddEvents(list){
     const store = tx.objectStore(EVENTS_STORE);
     list.forEach(ev=>{
       if(!ev || typeof ev!=="object") return;
-      // ensure ts/kind exist; drop any incoming id so autoIncrement assigns fresh
       const rec = Object.assign({}, ev); delete rec.id;
       if(typeof rec.ts!=="number") rec.ts = Date.now();
-      try{ store.add(rec); added++; }catch(e){}
+      const req = store.add(rec);
+      req.onsuccess = ()=>{ added++; };
+      req.onerror = ()=>{};
     });
     tx.oncomplete = ()=>resolve(added);
     tx.onerror = ()=>resolve(added);
@@ -3631,6 +3632,7 @@ function renderEventDetail(from,to){
 
     // Filter events
     const filtered = sorted.filter(e=>{
+      if(S.prefs && S.prefs.hideSyncDiag && isFeedNoise(e)) return false;
       const cat = getEventCategory(e);
       if(_evFilterType!=='all' && cat!==_evFilterType) return false;
       if(_evSearchQuery.trim()){
@@ -3673,15 +3675,7 @@ function renderEventDetail(from,to){
       h+='<div id="evFeedContent"></div>';
       cur.innerHTML = h;
       feedContent = document.getElementById('evFeedContent');
-      // Reconciling overview: total stored (incl. diagnostic) vs what the
-      // feed will show (diagnostic hidden + date-windowed). Prevents the
-      // stored-count vs visible-count gap from looking like a bug.
-      getEvents({includeDiag:true}).then(function(all){
-        const eo = document.getElementById('evOverview'); if(!eo) return;
-        let diag=0; for(const e of all){ if(DIAGNOSTIC_KINDS.indexOf(e.kind)>=0) diag++; }
-        const visible = all.length - diag;
-        eo.textContent = all.length + ' events stored \u00b7 ' + visible + ' shown in feed (system/diagnostic hidden: ' + diag + ')';
-      }).catch(function(){});
+      const eo = document.getElementById('evOverview'); if(eo) eo.textContent = filtered.length + ' events shown in feed';
     } else {
       // Sync filter chips active class without re-rendering controls
       const chips = cur.querySelectorAll('.evFilterChip');
@@ -3718,7 +3712,6 @@ function renderEventDetail(from,to){
 
     let listHtml='<div class="evFeed">';
     pageEvents.forEach(e=>{
-      if (S.prefs && S.prefs.hideSyncDiag && isFeedNoise(e)) return;
       let icon = '📝';
       let badgeClass = 'evBadge-default';
       let badgeName = 'Event';

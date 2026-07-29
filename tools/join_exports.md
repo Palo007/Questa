@@ -70,6 +70,11 @@ conflicts == 40   (all equal-ts field-merges / newest-export-wins, no data loss)
 char.xp == 3533, char.hp == 50
 "habiticaHistory" present
 "exportIntervalDays" in prefs, "gfs" in prefs
+  (`exportIntervalDays` is the LEGACY auto-backup interval, retained for
+   migration; the current key is `prefs.autoBackupEnabled` — see below)
+"autoBackupEnabled" in prefs when any input carries it (4-tier object:
+  {fourHour,daily,weekly,monthly}; per-device, excluded from sync, so inputs
+  from different devices may legitimately disagree and newest-export-wins)
 prefs.an.views == 22   (per-id union; no silent drop of non-newest export's views)
 prefs.an.metrics == 12
 all event ids unique

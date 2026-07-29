@@ -118,6 +118,18 @@ const fixture = [
   { ts: 6000, kind: 'lifecycle', notes: 'boot', dev: 'mrg0grhu3mozs' },
 ];
 
+// Pager fixture: 25 conflictResolved (noise) + 3 real events = 28 total.
+// With hideSyncDiag=true, the 25 noise events are filtered out before
+// pagination, so only 3 real rows should appear and the pager should
+// reflect 3 events / 1 page — not 28 events / 2 pages.
+const pagerFixture = [];
+for (let i = 0; i < 25; i++) {
+  pagerFixture.push({ ts: 1000 + i, kind: 'conflictResolved', taskType: 'habit', taskTitle: 'Noise event ' + i, winner: 'remote', loser: 'local', dev: 'mrg0grhu3mozs' });
+}
+pagerFixture.push({ ts: 26000, kind: 'habitTap', taskType: 'habit', taskTitle: 'Real habit', dev: 'mrl770yaq56gl' });
+pagerFixture.push({ ts: 27000, kind: 'complete', taskType: 'daily', taskTitle: 'Real daily', dev: 'mrg0grhu3mozs' });
+pagerFixture.push({ ts: 28000, kind: 'export', notes: 'Real export', dev: 'mrg0grhu3mozs' });
+
 // =========================================================================
 // Unit: isFeedNoise
 // =========================================================================
@@ -134,12 +146,12 @@ assert('isFeedNoise(export) === false', isFeedNoise({ kind: 'export' }) === fals
 // #evFeedContent innerHTML after a tick. Cases run sequentially because the
 // captured #evFeedContent element is shared between cases.
 // =========================================================================
-function renderCase(hideDiag) {
+function renderCase(hideDiag, events) {
   return new Promise(function (resolve) {
     S.prefs.hideSyncDiag = hideDiag;
     doc.getElementById('anEventDetail').innerHTML = '';
     doc.getElementById('evFeedContent').innerHTML = '';
-    const caseApi = buildApiWithEvents(fixture);
+    const caseApi = buildApiWithEvents(events || fixture);
     caseApi.renderEventDetail(0, 1e15);
     setTimeout(function () { resolve(doc.getElementById('evFeedContent').innerHTML); }, 40);
   });
@@ -168,6 +180,17 @@ renderCase(false).then(function (htmlOff) {
   assert('ON: export row present', htmlOn.indexOf('Backup downloaded') >= 0);
   assert('ON: dev attribution preserved (mrl device label)', htmlOn.indexOf('mrl770yaq56gl') >= 0);
   assert('ON: lifecycle row hidden', htmlOn.indexOf('boot') < 0 || countRows(htmlOn) === 3);
+  // Regression: pager count must reflect post-noise count, not total unfiltered count.
+  // 25 conflictResolved + 3 real = 28 total, but only 3 visible when hideSyncDiag=true.
+  // Before the fix, the pager would show 28 events / 2 pages with blank page 1.
+  // After the fix, the pager shows 3 events / 1 page and page 1 renders the 3 real rows.
+  return renderCase(true, pagerFixture);
+}).then(function (htmlPager) {
+  assert('PAGER ON: 3 rows visible (25 conflictResolved filtered out)', countRows(htmlPager) === 3);
+  assert('PAGER ON: real habit row present', htmlPager.indexOf('Real habit') >= 0);
+  assert('PAGER ON: real daily row present', htmlPager.indexOf('Real daily') >= 0);
+  assert('PAGER ON: real export row present', htmlPager.indexOf('Real export') >= 0);
+  assert('PAGER ON: no blank page (noise rows not rendered)', countRows(htmlPager) === 3);
   finish();
 }).catch(function (e) {
   console.error('\nERROR: ' + (e && e.stack || e));

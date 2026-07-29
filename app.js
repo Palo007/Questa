@@ -406,6 +406,42 @@ function tapVersionDebug(){
     showSyncDebugOverlay();
   }
 }
+// --- Recent-errors block for the sync debug overlay (W2.5) ----------------
+// Renders window.__qDiag.errors (the bounded ring pushed to by logEvent()'s
+// IndexedDB failure paths and sync.js's syncEventsPull()) as a read-only,
+// newest-first HTML block. Entries carry differing shapes (logEventTxError:
+// kind/taskId/msg; evtPullSkip: name/reason; error: message/src/line/col; ...)
+// so every own key except t/kind is rendered generically as "key=value" --
+// this keeps an unrecognized entry shape useful instead of showing undefined.
+// Every interpolated value goes through esc(): entries can contain arbitrary
+// strings (exception messages, Dropbox filenames), so unescaped interpolation
+// into this overlay's innerHTML would be an injection vector. Read-only --
+// never mutates window.__qDiag.errors (copies via slice()/reverse() first).
+function _qDiagErrorsHtml(){
+  var errs = (typeof window!=="undefined" && window.__qDiag && window.__qDiag.errors) ? window.__qDiag.errors : [];
+  var header = '<div style="font-weight:bold;margin-bottom:4px;">Recent errors (last 50)</div>';
+  if(!errs.length) return header + '<div>No errors recorded</div>';
+  var rows = errs.slice().reverse().map(function(e){
+    e = e || {};
+    var kind = (e.kind!==undefined && e.kind!==null) ? e.kind : "?";
+    var when; try{ when = new Date(e.t).toLocaleString(); }catch(ex){ when = String(e.t); }
+    var bits = [];
+    try{
+      Object.keys(e).forEach(function(k){
+        if(k==="t" || k==="kind") return;
+        var v = e[k];
+        if(v===undefined || v===null) return;
+        var vs; try{ vs = (typeof v==="object") ? JSON.stringify(v) : String(v); }catch(ex2){ vs = String(v); }
+        bits.push(k + "=" + vs);
+      });
+    }catch(ex3){}
+    return '<div style="border-bottom:1px solid #333;padding:4px 0;">' +
+      '<b>[' + esc(String(kind)) + ']</b> ' + esc(when) +
+      (bits.length ? ('<br>' + esc(bits.join(" "))) : '') +
+      '</div>';
+  }).join('');
+  return header + rows;
+}
 function showSyncDebugOverlay(){
   var cfg = {}; try{ cfg = JSON.parse(localStorage.getItem("questa.sync.v1") || "{}"); }catch(e){}
   function dump(a){ return (a && a.tasks) ? a.tasks.map(function(t){ return {id:t.id, type:t.type, title:t.title, streak:t.streak, done:t.done, updatedAt:t.updatedAt, createdAt:t.createdAt}; }) : "n/a"; }
@@ -426,6 +462,9 @@ function showSyncDebugOverlay(){
     ta.readOnly = true;
     ta.value = text;
     ta.style.cssText = "flex:1;width:100%;background:#111;color:#0f0;font-family:monospace;font-size:11px;border:1px solid #444;padding:8px;box-sizing:border-box;";
+    var errBox = document.createElement("div");
+    errBox.style.cssText = "flex-shrink:0;max-height:160px;overflow-y:auto;width:100%;background:#111;color:#0f0;font-family:monospace;font-size:11px;border:1px solid #444;padding:8px;box-sizing:border-box;margin-top:8px;";
+    errBox.innerHTML = _qDiagErrorsHtml();
     var btnRow = document.createElement("div");
     btnRow.style.cssText = "display:flex;gap:8px;margin-top:8px;";
     var copyBtn = document.createElement("button");
@@ -451,7 +490,7 @@ function showSyncDebugOverlay(){
     closeBtn.style.cssText = "flex:1;padding:12px;font-size:16px;";
     closeBtn.onclick = function(){ ov.remove(); };
     btnRow.appendChild(copyBtn); btnRow.appendChild(dlBtn); btnRow.appendChild(closeBtn);
-    ov.appendChild(ta); ov.appendChild(btnRow);
+    ov.appendChild(ta); ov.appendChild(errBox); ov.appendChild(btnRow);
     document.body.appendChild(ov);
     ta.focus(); ta.select();
   }

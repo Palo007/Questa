@@ -1710,32 +1710,70 @@ async function syncEventsPush(){
 }
 
 // Pull other devices' files whose rev changed; union-insert by uid.
+// (2026-07-29 W6.12) Instrumentation only -- every continue/return below now
+// pushes a diag entry via _qDiagPush so a silent skip is visible in
+// questaFullDiagnostic(). Control flow is unchanged; see archive backup diff.
+// Module-scoped so the throttle-diag rate limit survives across calls.
+let _evtPullLastThrottleDiag = 0;
 async function syncEventsPull(){
-  if(typeof getEvents !== "function" || typeof idbOpen !== "function") return;
+  if(typeof getEvents !== "function" || typeof idbOpen !== "function"){
+    if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: null, reason: 'missingDeps' });
+    return;
+  }
   const now = Date.now();
   const cfg = syncCfg();
-  if(now - (cfg.evtLastPullAt || 0) < EVT_PULL_MIN_INTERVAL_MS) return;
+  if(now - (cfg.evtLastPullAt || 0) < EVT_PULL_MIN_INTERVAL_MS){
+    // The throttle can fire far more often than an actual pull would run (any
+    // scheduleSync/syncNow tick inside the 60s window), so logging every hit
+    // would flood the 50-entry ring before the user opens the diag overlay.
+    // Rate-limit this one reason to roughly once per pull-cycle window.
+    if(typeof _qDiagPush === "function" && (now - _evtPullLastThrottleDiag >= EVT_PULL_MIN_INTERVAL_MS)){
+      _evtPullLastThrottleDiag = now;
+      _qDiagPush('evtPullSkip', { name: null, reason: 'throttled' });
+    }
+    return;
+  }
   const myDev = syncDeviceId();
   const ageLimit = (typeof EVENT_AGE_LIMIT_MS !== "undefined") ? EVENT_AGE_LIMIT_MS : 18 * 30 * 86400000;
   const entries = await dbxListFolder(EVENTS_DIR);
   const revs = Object.assign({}, cfg.evtFileRevs || {});
   for(const ent of entries){
     const parsed = evtParseFileName(ent.name);
-    if(!parsed) continue;                    // not an event file (ignore strangers)
-    if(parsed.dev === myDev) continue;       // never re-import own uploads
-    if(evtMonthOlderThan(parsed.month, now, ageLimit)){ delete revs[ent.name]; continue; }
-    if(ent.rev && revs[ent.name] === ent.rev) continue; // unchanged since last pull
+    if(!parsed){                             // not an event file (ignore strangers)
+      if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: ent.name, reason: 'unparsedName' });
+      continue;
+    }
+    if(parsed.dev === myDev){                // never re-import own uploads
+      if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: ent.name, reason: 'ownDevice' });
+      continue;
+    }
+    if(evtMonthOlderThan(parsed.month, now, ageLimit)){
+      delete revs[ent.name];
+      if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: ent.name, reason: 'tooOld' });
+      continue;
+    }
+    if(ent.rev && revs[ent.name] === ent.rev){
+      if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: ent.name, reason: 'revUnchanged' });
+      continue; // unchanged since last pull
+    }
     const dl = await dbxDownloadRaw(EVENTS_DIR + "/" + ent.name);
-    if(!dl) continue;
+    if(!dl){
+      if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: ent.name, reason: 'downloadFailed' });
+      continue;
+    }
     let records = null;
-    try{ records = JSON.parse(dl.text); }catch(e){ /* corrupt: skip content */ }
+    let _evtParseFailed = false;
+    try{ records = JSON.parse(dl.text); }catch(e){ _evtParseFailed = true; /* corrupt: skip content */ }
     if(Array.isArray(records)){
       const range = evtMonthRange(parsed.month);
       // diagnostics sync cross-device for remote debugging (see note above);
       // the pre-existing kind:'lifecycle' exclusion in evtIncomingFilter stays.
       const existing = new Set((await getEvents({ from: range.from, to: range.to, includeDiag: true }))
         .map(e => e && e.uid).filter(Boolean));
-      await evtInsertNew(evtIncomingFilter(records, existing, myDev, now, ageLimit));
+      const _evtInserted = await evtInsertNew(evtIncomingFilter(records, existing, myDev, now, ageLimit));
+      if(typeof _qDiagPush === "function") _qDiagPush('evtPullOk', { name: ent.name, inserted: _evtInserted });
+    } else {
+      if(typeof _qDiagPush === "function") _qDiagPush('evtPullSkip', { name: ent.name, reason: _evtParseFailed ? 'parseError' : 'notArray' });
     }
     // Record the rev even if the file was corrupt — its writer overwrites it
     // on their next push; re-downloading a permanently bad file every minute

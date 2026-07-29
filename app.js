@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.18-2332";
+const APP_VERSION = "v2026.07.23-0815";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -110,7 +110,7 @@ function freshState(){
     history:[], charHistory:[],
     monthlyBackups: [],
     deletions: [],
-    prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false }
+    prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false, autoBackupEnabled:{fourHour:false,daily:false,weekly:false,monthly:false} }
   };
 }
 var lastIssued = 0;
@@ -183,6 +183,19 @@ function migrate(s){ const f=freshState();
   out.prefs.gfs.daily   = Number(out.prefs.gfs.daily)   || 0;
   out.prefs.gfs.weekly  = Number(out.prefs.gfs.weekly)  || 0;
   out.prefs.gfs.monthly = Number(out.prefs.gfs.monthly) || 0;
+  // autoBackupEnabled backfill from legacy exportIntervalDays (2026-07-23)
+  if(!out.prefs.autoBackupEnabled){
+    const _ebd = parseInt(out.prefs.exportIntervalDays, 10);
+    const _ab = {fourHour:false, daily:false, weekly:false, monthly:false};
+    if(_ebd===1 || _ebd===3) _ab.daily=true;
+    else if(_ebd===7) _ab.weekly=true;
+    else if(_ebd===14 || _ebd===30) _ab.monthly=true;
+    out.prefs.autoBackupEnabled = _ab;
+    if(_ebd===14 && !out.prefs.autoBackupMigratedToast){
+      out.prefs.autoBackupMigratedToast = true;
+      setTimeout(function(){ try{ toast('Auto-backup upgraded to Monthly tier'); }catch(e){} }, 600);
+    }
+  }
   if(Array.isArray(out.tasks)){ out.tasks.forEach(normalizeTaskReminders); }
   // F4 (2026-07-11): backfill missing checklist-item ids deterministically so
   // two devices converge on the same id for the same legacy item instead of
@@ -4880,8 +4893,14 @@ function openSettings(){
            (typeof confirmForcePull==="function"?'<button class="btn danger" onclick="confirmForcePull()">Force pull</button>':'')+
            '</div>';
       }
-      const _eid=(S.prefs.exportIntervalDays||0);
-      h+='<div class="setList">'+settingRow('exportInterval','Auto-backup to Dropbox','Uploads a full backup file (same as Export) on this schedule, in addition to normal sync.',(_eid?('every '+_eid+'d'):'Off'))+'</div>';
+      const _abtiers = S.prefs.autoBackupEnabled || {fourHour:false,daily:false,weekly:false,monthly:false};
+      const _abLabels = [];
+      if(_abtiers.fourHour) _abLabels.push('4-hourly');
+      if(_abtiers.daily) _abLabels.push('Daily');
+      if(_abtiers.weekly) _abLabels.push('Weekly');
+      if(_abtiers.monthly) _abLabels.push('Monthly');
+      const _abSummary = _abLabels.length ? _abLabels.join(', ') : 'Off';
+      h+='<div class="setList">'+settingRow('autoBackup','Auto-backup tiers','Uploads a full backup file to Dropbox on each enabled cadence.',_abSummary)+'</div>';
     }
   } else {
     h+='<div class="small">Sync module not loaded.</div>';
@@ -4973,7 +4992,8 @@ function setHaptics(n){ S.prefs.haptics=!!n; save(); closeOpt(); openSettings();
 function setHideSyncDiag(n){ S.prefs.hideSyncDiag=!!n; save(); closeOpt(); openSettings(); render(); }
 function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.min(60,Math.max(0,n)); S.prefs.cardThick=n; applyCardThick(); save(); closeOpt(); openSettings(); }
 function setSaveBtnTop(n){ S.prefs.saveBtnTop=!!n; save(); closeOpt(); if(EDIT) drawSheet(); else if(REDIT) openReward(REDIT.id); openSettings(); }
-function setExportIntervalDays(n){ let d=parseInt(n,10); if(!isFinite(d)||d<0) d=0; S.prefs.exportIntervalDays=d; save(); closeOpt(); openSettings(); }
+function setExportIntervalDays(){ /* retained as defensive no-op; no live callers after autoBackup migration */ }
+function setAutoBackupTiers(patch){ S.prefs.autoBackupEnabled = Object.assign({}, S.prefs.autoBackupEnabled||{fourHour:false,daily:false,weekly:false,monthly:false}, patch); save(); closeOpt(); openSettings(); }
 function setCharName(v){ S.char.name=(v||'').trim()||'Adventurer'; save(); renderStats(); }
 function setDeviceName(v){
   if(typeof syncDeviceId!=="function") return;
@@ -5117,14 +5137,24 @@ function openOpt(key){
     h+='<button type="button" class="'+(sv?'on':'')+'" onclick="setSaveBtnTop(true)">Top</button>';
     h+='<button type="button" class="'+(sv?'':'on')+'" onclick="setSaveBtnTop(false)">Bottom</button>';
     h+='</div>';
-  } else if(key==='exportInterval'){
-    const eid=(S.prefs.exportIntervalDays||0);
+  } else if(key==='autoBackup'){
+    const _ab=S.prefs.autoBackupEnabled||{fourHour:false,daily:false,weekly:false,monthly:false};
     h+='<h4>Auto-backup to Dropbox</h4>';
-    h+='<p class="optHint">Uploads a full backup file (the same one Settings \u2192 Export produces \u2014 everything, including your device settings) to Dropbox on this schedule, on top of normal sync. Off by default.</p>';
-    h+='<div class="optChoices">'+
-      [['Off',0],['Daily',1],['Every 3 days',3],['Weekly',7],['Every 2 weeks',14],['Monthly',30]].map(o=>
-        '<button type="button" class="'+(eid===o[1]?'on':'')+'" onclick="setExportIntervalDays('+o[1]+')"><span>'+o[0]+'</span></button>').join('')+
-      '</div>';
+    h+='<p class="optHint">A full backup (same as Export) goes to Dropbox on each cadence you check. Each tier keeps its own cycling window on this device. Multiple devices each keep separate files (by device id). Missed windows don\u2019t stack.</p>';
+    h+='<div class="optTiers">';
+    [['fourHour','4-hourly','Fires at most once per sync, ~4h apart','keeps last 10'],
+     ['daily','Daily','Runs on first sync after local midnight','keeps last 7'],
+     ['weekly','Weekly','Runs on first sync after Monday midnight','keeps last 4'],
+     ['monthly','Monthly','Runs on first sync after 1st-of-month','keeps last 4']].forEach(function(t){
+      h+='<div class="optTier" onclick="setAutoBackupTiers({'+t[0]+':!S.prefs.autoBackupEnabled.'+t[0]+'})">'+
+        '<span class="optTierCheck">'+(_ab[t[0]]?'\u2611':'\u2610')+'</span>'+
+        '<span class="optTierLabel">'+t[1]+'</span>'+
+        '<span class="optTierMeta">('+t[3]+')</span>'+
+        '<div class="optTierDesc">'+t[2]+'</div>'+
+        '</div>';
+    });
+    h+='</div>';
+    h+='<p class="optHint" style="margin-top:12px">Local IndexedDB snapshots (automatic) are separate from these Dropbox export backups.</p>';
   }
   if(key==='haptics'){
     const hv=S.prefs.haptics!==false;

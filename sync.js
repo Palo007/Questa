@@ -1268,24 +1268,21 @@ async function _syncForcePullAttempt(){
 }
 
 // ---- 3.8 Automatic Dropbox export backup -----------------------------------
-// A SEPARATE feature from the state.json sync above: uploads the exact same
-// full backup file Settings -> Export produces (the entire S state,
-// including device-local UI prefs, PLUS the full IndexedDB event log) to a
-// fixed Dropbox path, overwritten in place each run — one file, not
-// versioned/dated copies, so Dropbox storage stays bounded (state.json +
-// this one export file, nothing more). Two ways in:
-//   1. Manually, via the "Save to Dropbox" button in the Export dialog
-//      (exportSaveDropbox() below, wired from app.js's showExportChooser).
-//   2. Automatically, on a user-configured day interval
-//      (S.prefs.exportIntervalDays, 0 = off, set via Settings), checked
-//      opportunistically at the end of every successful ordinary sync
-//      (syncNow()) rather than on its own timer — ordinary sync already
-//      runs often enough (on change, tab focus, coming back online, boot)
-//      that a day-granularity interval never needs a separate clock.
-// Both paths stamp S.prefs.lastExportTs — the SAME field the manual local
-// export buttons in app.js already use — so Settings' "Last export" line
-// reflects whichever export (local file or Dropbox, manual or automatic)
-// happened most recently, without needing two separate trackers.
+// A SEPARATE feature from the state.json sync above: uploads a full backup
+// (the same format Settings -> Export produces) to /questa-backups/ using a
+// four-tier cycling system (4-hourly, daily, weekly, monthly). Each tier keeps
+// its own slot cycle, filename prefix, and cadence, scoped per device.
+//
+// Backups ride the existing syncNow() opportunistic hook -- no new timers.
+// On every successful sync, every due tier fires exactly once (own in-flight
+// lock), writes its next slot to Dropbox, and rolls the oldest file off.
+//
+// Tier bookkeeping (lastTs, idx) lives in localStorage off the merge path.
+// Tier selections live in S.prefs.autoBackupEnabled (sync-excluded prefs).
+//
+// Manual "Save to Dropbox" (exportSaveDropbox below) still writes to the
+// legacy /export-backup.json path. lastExportTs is updated on any tier fire
+// or manual export, so Settings' "Last export" reflects the most recent activity.
 const EXPORT_BACKUP_PATH = "/export-backup.json";
 
 async function dbxUploadText(path, text, _retriedAuth){
@@ -1341,58 +1338,217 @@ function exportSaveDropbox(blob, filename, eventCount){
   });
 }
 
-// Opportunistic scheduler — see the block comment above for why this rides
-// on syncNow()'s success path instead of its own timer. Best-effort: any
-// failure here must never break ordinary sync, hence the try/catch wrapping
-// even the synchronous read of S.prefs.
-function syncMaybeAutoExport(){
+
+// ---- 3.8a Cycling backup tier infrastructure ---------------------------------
+// Tier bookkeeping lives in localStorage (off the sync/merge path).
+const _BK_LOCAL_KEY = 'questa.autobackup.local';
+const _BK_DEFAULT = {fourHour:{bkVersion:1,lastTs:0,idx:0}, daily:{bkVersion:1,lastTs:0,idx:0}, weekly:{bkVersion:1,lastTs:0,idx:0}, monthly:{bkVersion:1,lastTs:0,idx:0}};
+
+function bkLocalLoad(){
   try{
-    const days = (typeof S !== "undefined" && S.prefs && S.prefs.exportIntervalDays) || 0;
-    if(!days) return;
-    if(typeof buildBackupFile !== "function") return; // app.js not loaded/ready
-
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const monthKey = `${year}-${month}`;
-    S.monthlyBackups = S.monthlyBackups || [];
-
-    const monthlyBackupNeeded = !S.monthlyBackups.includes(monthKey);
-    const last = (S.prefs && S.prefs.lastExportTs) || 0;
-    const regularBackupNeeded = Date.now() - last >= days * 86400000;
-
-    if (monthlyBackupNeeded) {
-      const p = (n) => String(n).padStart(2, '0');
-      const stamp = '' + now.getFullYear() + p(now.getMonth() + 1) + p(now.getDate()) + '-' + p(now.getHours()) + p(now.getMinutes());
-      const filename = 'questa-backup-' + stamp + '.json';
-      const path = '/' + filename;
-
-      const eventsP = (typeof getEvents === "function") ? getEvents({}).catch(() => []) : Promise.resolve([]);
-      eventsP.then(buildBackupFile).then(({blob}) => {
-        return blob.text().then(text => dbxUploadText(path, text));
-      }).then(() => {
-        if (typeof S !== "undefined") {
-          S.prefs = S.prefs || {};
-          S.prefs.lastExportTs = Date.now();
-          S.monthlyBackups = S.monthlyBackups || [];
-          if (!S.monthlyBackups.includes(monthKey)) {
-            S.monthlyBackups.push(monthKey);
-          }
-          if (typeof save === "function") save();
-        }
-        if (typeof logEvent === "function") {
-          logEvent({ kind: "export", taskTitle: "Monthly Auto Backup", notes: "Saved monthly backup " + filename + " to Dropbox" });
-        }
-      }).catch(e => {
-        syncCfgSave({ lastError: "monthly backup failed: " + ((e && e.message) || String(e)) });
-      });
-    } else if (regularBackupNeeded) {
-      const eventsP = (typeof getEvents === "function") ? getEvents({}).catch(() => []) : Promise.resolve([]);
-      eventsP.then(buildBackupFile).then(({blob}) => syncUploadBackupBlob(blob)).catch(e => {
-        syncCfgSave({ lastError: "auto backup failed: " + ((e && e.message) || String(e)) });
-      });
+    const raw = localStorage.getItem(_BK_LOCAL_KEY);
+    if(!raw) return JSON.parse(JSON.stringify(_BK_DEFAULT));
+    const obj = JSON.parse(raw);
+    if(!obj || typeof obj !== 'object') return JSON.parse(JSON.stringify(_BK_DEFAULT));
+    const out = JSON.parse(JSON.stringify(_BK_DEFAULT));
+    for(const k of ['fourHour','daily','weekly','monthly']){
+      if(obj[k] && typeof obj[k] === 'object'){
+        out[k].bkVersion = typeof obj[k].bkVersion === 'number' ? obj[k].bkVersion : 1;
+        out[k].lastTs = typeof obj[k].lastTs === 'number' ? obj[k].lastTs : 0;
+        out[k].idx = typeof obj[k].idx === 'number' ? obj[k].idx : 0;
+      }
     }
-  }catch(e){ /* best-effort only, never throw into syncNow()'s chain */ }
+    return out;
+  }catch(e){ return JSON.parse(JSON.stringify(_BK_DEFAULT)); }
+}
+function bkLocalSave(data){
+  try{ localStorage.setItem(_BK_LOCAL_KEY, JSON.stringify(data)); }catch(e){ /* quota -- non-fatal */ }
+}
+
+// ---- 3.8b Tier definitions ---------------------------------------------------
+const BK_TIERS = {
+  fourHour: {prefix:'4hour', count:10, cadenceMs:4*3600e3},
+  daily:    {prefix:'daily', count:7},
+  weekly:   {prefix:'weekly', count:4},
+  monthly:  {prefix:'monthly', count:4}
+};
+
+// ---- 3.8c Filename / path helpers --------------------------------------------
+function _bkDeviceShort(){ return syncDeviceId().slice(-6); }
+function _bkStamp(ts){
+  const d = new Date(ts);
+  const p = n => String(n).padStart(2,'0');
+  return '' + d.getFullYear() + p(d.getMonth()+1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+function _bkPath(tierKey, slot, ts){
+  const tier = BK_TIERS[tierKey];
+  return '/questa-backups/' + tier.prefix + '-' + _bkDeviceShort() + '-' + String(slot).padStart(2,'0') + '-' + _bkStamp(ts) + '.json';
+}
+
+// ---- 3.8d Dropbox listing + boundary calculation ----------------------------
+async function _bkListTier(deviceShort, tierPrefix){
+  try{
+    const entries = await dbxListFolder('/questa-backups/');
+    const re = new RegExp('^' + tierPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-' + deviceShort.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-\\d+-');
+    return entries.filter(e => e && e.name && re.test(e.name));
+  }catch(e){ return []; }
+}
+function _bkNextBoundary(tierKey, lastTs){
+  const now = new Date();
+  if(tierKey === 'fourHour'){
+    return lastTs + BK_TIERS.fourHour.cadenceMs;
+  }
+  if(tierKey === 'daily'){
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+    return next.getTime();
+  }
+  if(tierKey === 'weekly'){
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+    while(next.getDay() !== 1){ next.setDate(next.getDate() + 1); }
+    return next.getTime();
+  }
+  if(tierKey === 'monthly'){
+    return new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0, 0).getTime();
+  }
+  return Infinity;
+}
+
+// ---- 3.8e Per-tier in-flight guard ------------------------------------------
+const _bkInFlight = new Set();
+
+// ---- 3.8f _bkFire(tierKey, blob) -- upload + slot rotation -------------------
+async function _bkFire(tierKey, blob){
+  if(_bkInFlight.has(tierKey)) return;
+  _bkInFlight.add(tierKey);
+  try{
+    const tier = BK_TIERS[tierKey];
+    const deviceShort = _bkDeviceShort();
+    const now = Date.now();
+    const bk = bkLocalLoad();
+    const tierState = bk[tierKey];
+
+    // Lazy self-heal: if bkVersion missing or < 1, list Dropbox to discover existing slots
+    if(typeof tierState.bkVersion !== 'number' || tierState.bkVersion < 1){
+      try{
+        const existing = await _bkListTier(deviceShort, tier.prefix);
+        let maxSlot = -1;
+        for(const ent of existing){
+          const parts = ent.name.split('-');
+          if(parts.length >= 3){
+            const s = parseInt(parts[2], 10);
+            if(!isNaN(s) && s > maxSlot) maxSlot = s;
+          }
+        }
+        tierState.idx = (maxSlot + 1) % tier.count;
+        tierState.lastTs = now;
+        tierState.bkVersion = 1;
+        bkLocalSave(bk);
+      }catch(e){
+        tierState.bkVersion = 1;
+      }
+    }
+
+    const slot = tierState.idx;
+    const path = _bkPath(tierKey, slot, now);
+    const text = await blob.text();
+    await dbxUploadText(path, text);
+
+    // Slot rotation
+    const existing = await _bkListTier(deviceShort, tier.prefix);
+    const slotMap = {};
+    for(const ent of existing){
+      const parts = ent.name.split('-');
+      if(parts.length < 4) continue;
+      const s = parseInt(parts[2], 10);
+      if(isNaN(s)) continue;
+      const stampStr = parts.slice(3).join('-').replace(/\.json$/, '');
+      if(!slotMap[s]) slotMap[s] = [];
+      slotMap[s].push({name: ent.name, stamp: stampStr, path: '/questa-backups/' + ent.name});
+    }
+
+    // Deduplicate: keep newest per slot
+    for(const s in slotMap){
+      if(slotMap[s].length > 1){
+        slotMap[s].sort((a, b) => b.stamp.localeCompare(a.stamp));
+        for(let i = 1; i < slotMap[s].length; i++){
+          try{ await dbxDelete(slotMap[s][i].path); }catch(e){ /* best-effort */ }
+        }
+        slotMap[s] = [slotMap[s][0]];
+      }
+    }
+
+    // If distinct slots occupied > count, delete oldest-per-slot
+    const occupiedSlots = Object.keys(slotMap).map(Number).sort((a,b) => a - b);
+    if(occupiedSlots.length > tier.count){
+      const slotOldest = occupiedSlots.map(s => ({
+        slot: s,
+        newestStamp: slotMap[s][0].stamp
+      })).sort((a, b) => a.newestStamp.localeCompare(b.newestStamp));
+
+      let toDelete = occupiedSlots.length - tier.count;
+      for(const entry of slotOldest){
+        if(toDelete <= 0) break;
+        if(entry.slot === slot) continue;
+        for(const file of slotMap[entry.slot]){
+          try{ await dbxDelete(file.path); }catch(e){ /* best-effort */ }
+        }
+        delete slotMap[entry.slot];
+        toDelete--;
+      }
+    }
+
+    // Advance index and persist
+    tierState.idx = (slot + 1) % tier.count;
+    tierState.lastTs = now;
+    bkLocalSave(bk);
+
+    if(typeof S !== 'undefined'){
+      S.prefs = S.prefs || {};
+      S.prefs.lastExportTs = Date.now();
+      if(typeof save === 'function') save();
+    }
+
+    if(typeof logEvent === 'function'){
+      logEvent({kind:'export', taskTitle:'Auto Backup (' + tier.prefix + ')', notes:'Uploaded ' + path + ' to Dropbox'});
+    }
+  }catch(e){
+    syncCfgSave({lastError: tierKey + ' backup failed: ' + ((e && e.message) || String(e))});
+  }finally{
+    _bkInFlight.delete(tierKey);
+  }
+}
+
+// Opportunistic scheduler -- rides on syncNow()'s success path. Best-effort:
+// any failure here must never break ordinary sync, hence the try/catch wrapping.
+async function syncMaybeAutoExport(){
+  try{
+    if(typeof S === 'undefined' || !S.prefs) return;
+    const enabled = S.prefs.autoBackupEnabled;
+    if(!enabled || typeof enabled !== 'object') return;
+    if(typeof buildBackupFile !== 'function') return;
+
+    const tiers = ['fourHour','daily','weekly','monthly'];
+    const due = [];
+    const now = Date.now();
+    const bk = bkLocalLoad();
+
+    for(const tierKey of tiers){
+      if(!enabled[tierKey]) continue;
+      const lastTs = bk[tierKey].lastTs;
+      if(now >= _bkNextBoundary(tierKey, lastTs)){
+        due.push(tierKey);
+      }
+    }
+    if(due.length === 0) return;
+
+    const eventsArr = (typeof getEvents === 'function') ? await getEvents({}).catch(() => []) : [];
+    const {blob} = await buildBackupFile(eventsArr);
+    if(!blob) return;
+
+    for(const tierKey of due){
+      await _bkFire(tierKey, blob);
+    }
+  }catch(e){ /* best-effort only, never throw into syncNow() chain */ }
 }
 
 // ---- 3.9 Event-log sync (plan: .omo/plans/2026-07-10-eventlog-sync.md) ----

@@ -763,6 +763,37 @@ function clearLifecycleEvents(){
     tx.onabort = ()=>resolve(removed);
   })).catch(()=>0);
 }
+// Merge-filter for incoming sync/import events: a pure union-insert used to
+// decide which records from an incoming batch (a downloaded sync file, or an
+// imported/reparented list) are genuinely new versus already known. Dedupes
+// on TWO independent keys -- the stable event uid, AND a content signature --
+// because reparentEventsForImport() (below) rewrites e.dev and rehashes
+// e.uid via eventUidOf() on the import path, and eventUidOf() hashes dev as
+// one of its input fields. So the SAME logical event can arrive once via
+// import (reparented, new uid) and once via cross-device sync (original
+// uid) -- two different uids for one real tap. uid-only dedup would let the
+// duplicate through; the signature catches it. Modeled on evtIncomingFilter
+// (sync.js) but pure: no IDB, no S, no globals, no mutation of inputs.
+//
+// Residual, accepted risk: sig() can in principle collide for two genuinely
+// distinct taps on the same task, same direction, same rep count, in the
+// same millisecond. That is not real user behaviour.
+function eventMergeSig(r){
+  return [r.ts, r.kind, r.taskId || '', r.dir || 0, r.reps || 0].join('|');
+}
+function eventMergeFilter(incoming, existingUidSet, existingSigSet){
+  const add = []; let skipped = 0; const seen = new Set();
+  (Array.isArray(incoming) ? incoming : []).forEach(r=>{
+    if(!r || typeof r !== "object" || !r.uid || typeof r.ts !== "number"){ skipped++; return; }
+    if(existingUidSet && existingUidSet.has(r.uid)){ skipped++; return; }
+    const sig = eventMergeSig(r);
+    if(existingSigSet && existingSigSet.has(sig)){ skipped++; return; }
+    if(seen.has(r.uid) || seen.has(sig)){ skipped++; return; }
+    seen.add(r.uid); seen.add(sig);
+    add.push(r);
+  });
+  return { add: add, skipped: skipped };
+}
 /* END_EVENTS_HELPERS */
 // Stable, synchronous event uid derived from content. Used when re-parenting
 // imported events so a re-import of the same merged file dedupes via the

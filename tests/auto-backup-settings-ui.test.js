@@ -58,14 +58,16 @@ assert('NO "exportInterval" settingRow in openSettings',
 const lines = appSrc.split('\n');
 function grab(a, b) { return lines.slice(a - 1, b).join('\n'); }
 
-// Extract: esc (5626), settingRow (5028-5032), closeOpt (5033)
+// Extract: esc (5657), settingRow (5059-5063), closeOpt (5064)
 // autoBackup block from openSettings (4896-4903)
-// openOpt autoBackup branch (5140-5158)
-// setAutoBackupTiers (4996)
+// openOpt autoBackup branch (5171-5189)
+// setAutoBackupTiers (5027)
+// Line numbers updated 2026-07-29 for eventMergeFilter addition (+31 shift,
+// everything from old line 766 onward moved down 31 lines).
 const code = [
-  grab(5626, 5626),       // esc
-  grab(5028, 5033),       // settingRow + closeOpt
-  grab(4996, 4996),       // setAutoBackupTiers
+  grab(5657, 5657),       // esc
+  grab(5059, 5064),       // settingRow + closeOpt
+  grab(5027, 5027),       // setAutoBackupTiers
   'return { esc, settingRow, closeOpt, setAutoBackupTiers };'
 ].join('\n');
 
@@ -156,11 +158,11 @@ assert('settingRow output is a button with setItem class',
 // --- Test openOpt('autoBackup') renders 4 tier checkboxes ---
 // Extract the openOpt function body. It is a large if/else chain; we only
 // need the autoBackup branch, so we build a minimal openOpt that calls it.
-// Extract the autoBackup branch from openOpt (lines 5141-5157).
-const openOptBlock = grab(5141, 5157);
+// Extract the autoBackup branch from openOpt (lines 5172-5188).
+const openOptBlock = grab(5172, 5188);
 
 const openOptCode = [
-  grab(5626, 5626),   // esc
+  grab(5657, 5657),   // esc
   'function openOpt(key){',
   '  var h="";',
   '  if(key==="autoBackup"){',

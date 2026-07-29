@@ -20,6 +20,14 @@
 !/sw.js
 !/README.md
 !/sync.js
+# === Documentation ===
+# Living docs live in docs/ and ARE version-controlled. Leaving them untracked is
+# what let the three join-daily-reset fixtures get silently overwritten in July
+# 2026 with no way to restore them.
+# README.md and INSTALL.md deliberately stay at the repo root (whitelisted above):
+# GitHub renders README.md from the root, and INSTALL.md is expected there too.
+!/docs/
+
 # === Test and tool directories ===
 !/tests/
 !/tools/

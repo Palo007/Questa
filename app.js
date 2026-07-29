@@ -1141,7 +1141,17 @@ function importEventsBackfill(ev){
       // mark everything from this load as synthetic so a re-load can replace it
       list.forEach(e=>{ if(e && typeof e==="object" && e.synthetic===undefined) e.synthetic=true; });
       const reparented = reparentEventsForImport(list);
-      clearSyntheticEvents().then(()=>bulkAddEvents(reparented)).then(added=>{
+      // reparentEventsForImport() strips the synthetic flag (by design -- the
+      // normal Settings->Import path wants imported history to become
+      // first-class owned data). This backfill path must NOT inherit that:
+      // re-stamp synthetic=true here so these reconstructed records stay
+      // excluded from evtUploadable/evtOwnMonthRecords (sync.js) and keep
+      // showing the "~ backfill" badge in the Activity Feed.
+      reparented.forEach(e=>{ if(e && typeof e==="object") e.synthetic = true; });
+      clearSyntheticEvents().then(removedCount=>{
+        if(removedCount>0) toast('Replacing '+removedCount+' previously reconstructed events.');
+        return bulkAddEvents(reparented);
+      }).then(added=>{
         toast('Loaded '+added+' events');
         if(TAB==='analytics') render();
       });

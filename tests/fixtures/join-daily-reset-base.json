@@ -1,0 +1,255 @@
+{
+ "version": 1,
+ "__seq": 100,
+ "__savedAt": 1784000000000,
+ "__hlcLast": 1784000000000,
+ "lastCron": 20260710,
+ "char": {
+  "name": "Pali",
+  "face": "🧙",
+  "cls": "Warrior",
+  "lvl": 119,
+  "xp": 3533,
+  "hp": 50,
+  "maxHp": 50,
+  "mp": 484,
+  "gold": 27399.96,
+  "faceImg": "",
+  "updatedAt": 1784183777929
+ },
+ "tasks": [
+  {
+   "id": "e3c73621-8dfb-4808-bdb2-fbe366dc0fb6",
+   "type": "daily",
+   "title": "Režim cvičenia ",
+   "notes": "",
+   "difficulty": "medium",
+   "value": -47.27,
+   "done": false,
+   "streak": 0,
+   "repeat": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+   ],
+   "checklist": [
+    {
+     "id": "c124eef6-c57d-442c-bae6-ca023af6df4a",
+     "text": "Pon: Kliky 100+",
+     "done": false
+    },
+    {
+     "id": "d42f7847-16fb-41a8-a1fb-57dbf140ea83",
+     "text": "Ut: Zdv. biceps 50+",
+     "done": false
+    }
+   ],
+   "_habiticaId": "e3c73621-8dfb-4808-bdb2-fbe366dc0fb6",
+   "_createdAt": "2025-03-27T09:54:03.894Z",
+   "_startDate": "2025-03-26T22:00:00.000Z",
+   "history": [
+    {
+     "date": 1743108568178,
+     "value": -8.622625317615398,
+     "scoredUp": 0,
+     "scoredDown": 0,
+     "scored": null,
+     "reps": 0,
+     "repCounted": false
+    },
+    {
+     "date": 1754039228782,
+     "value": 3.9123210492395453,
+     "scoredUp": 0,
+     "scoredDown": 0,
+     "scored": true,
+     "reps": 0,
+     "repCounted": false,
+     "completed": true,
+     "inferred": true
+    }
+   ],
+   "reminders": [],
+   "_gr": {
+    "xp": 35,
+    "gold": 6.04,
+    "mp": 2,
+    "delta": 3.3579129558543728
+   },
+   "updatedAt": 1784026994895,
+   "missedOn": 20260715
+  },
+  {
+   "id": "mrfh5rhr41bqy",
+   "type": "habit",
+   "title": "Spánok",
+   "notes": "",
+   "difficulty": "log",
+   "value": 0,
+   "done": false,
+   "checklist": [],
+   "repeat": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+   ],
+   "up": true,
+   "down": false,
+   "resetFreq": "daily",
+   "tags": [],
+   "reminders": [],
+   "createdAt": 1783720548207,
+   "updatedAt": 1784142565691,
+   "cUp": 0,
+   "history": [
+    {
+     "date": 1783720610632,
+     "value": 0,
+     "reps": 5,
+     "repCounted": true,
+     "scored": false
+    },
+    {
+     "date": 1783745543734,
+     "value": 0,
+     "reps": 5,
+     "repCounted": true,
+     "scored": false
+    }
+   ],
+   "cDown": 0
+  }
+ ],
+ "rewards": [
+  {
+   "id": "8c293b45-331c-471d-b42a-0f6f4a69c33a",
+   "title": "Reward yourself",
+   "notes": "Watch TV, play a game, eat a treat, it’s up to you!",
+   "cost": 10,
+   "updatedAt": 0
+  }
+ ],
+ "devices": [
+  {
+   "id": "mreome1nbfjqx",
+   "name": "localhost",
+   "updatedAt": 1783714906717
+  }
+ ],
+ "charHistory": [
+  {
+   "date": 1782474963691,
+   "hp": 23.39,
+   "maxHp": 50,
+   "xp": 4708,
+   "mp": 285,
+   "gold": 24834.39,
+   "lvl": 117
+  }
+ ],
+ "deletions": [
+  {
+   "id": "mrg2masrqy3wf",
+   "at": 1783892207099
+  }
+ ],
+ "events": [
+  {
+   "ts": 1783682634679,
+   "uid": "mreuayr8baf7d-mreul587-f03fux",
+   "dev": "mreuayr8baf7d",
+   "kind": "import",
+   "taskTitle": "Import Data",
+   "notes": "Restored 3856 events",
+   "id": 1289
+  },
+  {
+   "ts": 1783682799461,
+   "uid": "mreuayr8baf7d-mreuoodi-3h60v8",
+   "dev": "mreuayr8baf7d",
+   "kind": "export",
+   "taskTitle": "Export Data",
+   "notes": "Saved backup to Dropbox",
+   "id": 1290
+  }
+ ],
+ "prefs": {
+  "width": 480,
+  "notesLines": 3,
+  "lastTab": "habits",
+  "tipDelay": 0,
+  "haptics": true,
+  "cardThick": 0,
+  "notificationsEnabled": false,
+  "saveBtnTop": false,
+  "gfs": {
+   "daily": 20260716,
+   "weekly": 202628,
+   "monthly": 24318
+  },
+  "filter": {
+   "habits": "all",
+   "dailies": "due",
+   "todos": "active"
+  },
+  "sort": {
+   "habits": "manual",
+   "dailies": "manual",
+   "todos": "created-desc",
+   "rewards": "manual"
+  },
+  "tagFilter": {
+   "habits": [],
+   "dailies": [],
+   "todos": []
+  },
+  "filterOpen": true,
+  "scroll": {
+   "habits": 0,
+   "analytics": 626,
+   "dailies": 0,
+   "todos": 0
+  },
+  "lastExportTs": 1784180693698,
+  "sortOpen": false,
+  "an": {
+   "_viewsUpgraded": true,
+   "activeMetric": null,
+   "activeView": null,
+   "fromOff": 90,
+   "metricKw": "klik",
+   "snap": "90d",
+   "toOff": 0,
+   "views": [
+    {
+     "id": "mrd5j8o6on6pu",
+     "name": "Spánok",
+     "source": "metric",
+     "group": "day",
+     "chart": "line",
+     "tags": [],
+     "types": [],
+     "updatedAt": 1784149015231,
+     "metricId": "mrfhe0ui64d6x"
+    }
+   ],
+   "metrics": [
+    {
+     "id": "mrmhu4xhkx4h2",
+     "name": "Kliky",
+     "keyword": "klik",
+     "updatedAt": 0
+    }
+   ]
+  }
+ },
+ "monthlyBackups": []
+}

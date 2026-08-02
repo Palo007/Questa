@@ -181,7 +181,7 @@ function makeCtx(initialStore) {
     },
     bulkAddEvents: function (list) {
       (list || []).forEach(function (e) { state.list.push(Object.assign({}, e)); });
-      return Promise.resolve((list || []).length);
+      return Promise.resolve({added: (list || []).length, failed: 0, aborted: false});
     },
   };
   sandbox.globalThis = sandbox;

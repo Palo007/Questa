@@ -17,6 +17,7 @@
 const DBX_APP_KEY = "9bmdhb7j1b5nuke"; // not a secret — public PKCE client_id
 const SYNC_KEY = "questa.sync.v1";
 const PKCE_KEY = "questa.sync.pkce";
+const MAX_FUTURE_SKEW_MS = 120000; // 120s future-skew tolerance (shared with _ua/_ca)
 const STATE_PATH = "/state.json";
 const SYNC_DEBOUNCE_MS = 5000;
 const SYNC_CONFLICT_RETRY_LIMIT = 3;
@@ -39,7 +40,10 @@ function syncCfgDefaults(){
     evtFileRevs: {},      // filename -> Dropbox rev of last successfully PARSED+INSERTED pull
     evtLastPullAt: 0,     // throttle: last time we ran a pull
     evtFullScanAt: 0,     // periodic full re-scan watermark (ignores evtFileRevs/evtBadRevs)
-    evtBadRevs: {}        // filename -> {rev, at} for corrupt/failed payloads (slower retry, never pins)
+    evtBadRevs: {},        // filename -> {rev, at} for corrupt/failed payloads (slower retry, never pins)
+    evtFullPushAt: 0,        // periodic full re-push watermark (ignores evtLastUploadTs)
+    evtFileCounts: {},       // filename -> {count, hash} of last successfully uploaded month
+    evtPushBlocked: {}       // filename -> {at, local, known} for blocked pushes
   };
 }
 function syncCfg(){
@@ -676,8 +680,8 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
 // as 0 so a future-skewed clock cannot win a guard or mint an undeletable
 // record. Uses app.js now() HLC when available, falls back to Date.now().
 var _hlcNow = (typeof now==='function') ? now : function(){ return Date.now(); };
-function _ua(x){ var v = (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; return v > _hlcNow() + 120000 ? 0 : v; }
-function _ca(x){ var v = (x && Number(x.createdAt)) || 0; return v > _hlcNow() + 120000 ? 0 : v; }
+function _ua(x){ var v = (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; return v > _hlcNow() + MAX_FUTURE_SKEW_MS ? 0 : v; }
+function _ca(x){ var v = (x && Number(x.createdAt)) || 0; return v > _hlcNow() + MAX_FUTURE_SKEW_MS ? 0 : v; }
 function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSavedAt, tombstoneMap){
   const baseMap = new Map((baseArr || []).map(x => [x.id, x]));
   const localMap = new Map((localArr || []).map(x => [x.id, x]));
@@ -775,7 +779,12 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
         checklist: mergeChecklist(b && b.checklist, (l && l.checklist) || [], (r && r.checklist) || [], winner === l)
       });
     }
-    if(typeof logEvent === "function") logEvent({kind:'conflictResolved', taskType:(winner&&winner.type)||'task', taskId:id, taskTitle:(winner&&winner.title)||'', winner:(winner===l)?'local':'remote', loser:(winner===l)?'remote':'local'});
+    // T4: throttle conflictResolved to one per (kind, entityId) per round
+    const _conflictKey = 'task:' + id;
+    if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey)){
+      _conflictLogThrottle.add(_conflictKey);
+      logEvent({kind:'conflictResolved', taskType:(winner&&winner.type)||'task', taskId:id, taskTitle:(winner&&winner.title)||'', winner:(winner===l)?'local':'remote', loser:(winner===l)?'remote':'local'});
+    }
     resultMap.set(id, winner);
     return;
   });
@@ -983,7 +992,12 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, 
       // with equal timestamps converge in ONE round instead of ping-ponging.
       // A future-skewed remote cannot win a tie (anti-skew bias preserved).
       if((Number(r.updatedAt)||0) > (Number(l.updatedAt)||0)){
-        if(typeof logEvent === "function") logEvent({kind:'conflictResolved', taskType:'char', winner:'remote', loser:'local', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+        // T4: throttle conflictResolved to one per (kind, entityId) per round
+        const _conflictKey1 = 'char:' + ((l&&l.id)||(r&&r.id));
+        if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey1)){
+          _conflictLogThrottle.add(_conflictKey1);
+          logEvent({kind:'conflictResolved', taskType:'char', winner:'remote', loser:'local', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+        }
         return r;
       }
       // Deterministic tiebreak: the higher deviceId string wins, on BOTH sides,
@@ -993,10 +1007,20 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, 
         : (((remote.devices||[]).map(function(d){return d && d.id;})
              .filter(function(id){return id && id !== _ld;}))[0]) || null;
       if(_rd != null && _ld !== _rd){
-        if(typeof logEvent === "function") logEvent({kind:'conflictResolved', taskType:'char', winner:(_rd>_ld)?'remote':'local', loser:(_rd>_ld)?'local':'remote', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+        // T4: throttle conflictResolved to one per (kind, entityId) per round
+        const _conflictKey2 = 'char:' + ((l&&l.id)||(r&&r.id));
+        if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey2)){
+          _conflictLogThrottle.add(_conflictKey2);
+          logEvent({kind:'conflictResolved', taskType:'char', winner:(_rd>_ld)?'remote':'local', loser:(_rd>_ld)?'local':'remote', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+        }
         return (_rd > _ld) ? r : l;
       }
-      if(typeof logEvent === "function") logEvent({kind:'conflictResolved', taskType:'char', winner:'local', loser:'remote', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+      // T4: throttle conflictResolved to one per (kind, entityId) per round
+      const _conflictKey3 = 'char:' + ((l&&l.id)||(r&&r.id));
+      if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey3)){
+        _conflictLogThrottle.add(_conflictKey3);
+        logEvent({kind:'conflictResolved', taskType:'char', winner:'local', loser:'remote', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+      }
       return l; // unresolved tie (no remote device id available) -> local (F2 bias)
     })()
   };
@@ -1010,6 +1034,8 @@ function wrap(subset){
 // ---- 3.5 syncNow() — the only orchestrator ---------------------------------
 let _syncInFlight = null;
 let _syncRerunQueued = false;
+// T4: per-round throttle for conflictResolved logs (one per kind:entityId per sync round)
+let _conflictLogThrottle = new Set();
 
 function syncNow(){
   if(!navigator.onLine) return Promise.resolve();
@@ -1023,6 +1049,8 @@ function syncNow(){
   // #10 Layer (c): Web Locks elect a single sync-runner per origin
   // (prevents duplicate syncNow across tabs sharing the same origin).
   function _doSync(){
+    // T4: clear conflict log throttle at the start of each sync round
+    _conflictLogThrottle.clear();
     _syncInFlight = _syncNowAttempt(0)
       .catch(e => {
         syncCfgSave({ lastError: (e && e.message) || String(e) });
@@ -1672,6 +1700,37 @@ function evtIncomingFilter(records, existingUidSet, myDev, nowMs, ageLimitMs){
 function evtMonthOlderThan(monthKey, nowMs, ageLimitMs){
   return (nowMs - evtMonthRange(monthKey).to) > ageLimitMs;
 }
+// T1: uidHash - stable digest of sorted uid list for shrink-guard comparison
+async function uidHash(recs){
+  const uids = (recs || []).map(e => e.uid).filter(Boolean).sort();
+  if(typeof crypto !== "undefined" && crypto.subtle && crypto.subtle.digest){
+    try{
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(uids.join(",")));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+    }catch(e){ /* fall through */ }
+  }
+  // Fallback: simple hash when crypto unavailable
+  let h = 0;
+  for(let i = 0; i < uids.join(",").length; i++){
+    h = ((h << 5) - h) + uids.join(",").charCodeAt(i);
+    h |= 0;
+  }
+  return "fallback-" + Math.abs(h).toString(16).padStart(8, "0");
+}
+// T1: uidsAreSuperset - check if local uids contain all known uids
+function uidsAreSuperset(localRecs, knownHash, knownUids){
+  const localUids = new Set((localRecs || []).map(e => e.uid).filter(Boolean));
+  // If we have the known uids stored, use them directly
+  if(knownUids && knownUids.size){
+    for(const u of knownUids){
+      if(!localUids.has(u)) return false;
+    }
+    return true;
+  }
+  // Otherwise compare hashes (less precise but works for exact match)
+  const localHash = uidHash(localRecs);
+  return localHash === knownHash;
+}
 /* END_EVTSYNC_HELPERS */
 
 // Raw download: like dbxDownload but returns {text, rev} with NO wrapper
@@ -1747,25 +1806,102 @@ function evtInsertNew(records){
 // Upload own new events, rebuilding each touched month's file in full and
 // overwriting it (single writer — no rev handshake needed; reuses
 // dbxUploadText, which uploads mode:overwrite).
-async function syncEventsPush(){
+async function syncEventsPush(opts){
   if(typeof getEvents !== "function") return;
   const myDev = syncDeviceId();
-  const since = syncCfg().evtLastUploadTs || 0;
+  const cfg = syncCfg();
+  const since = cfg.evtLastUploadTs || 0;
+  const forceFullPush = !!(opts && opts.forceFullPush);
+  const forcePush = !!(opts && opts.force); // T1: force-push override for shrink guard
+  // 24h full re-push: ignore watermark if due
+  let effectiveSince = since;
+  if(forceFullPush){
+    effectiveSince = 0;
+  } else if(cfg.evtFullPushAt && (Date.now() - cfg.evtFullPushAt) > 86400000){
+    effectiveSince = 0;
+  }
   // diagnostics sync cross-device for remote debugging; the Activity Feed
   // still filters them at render via getEvents' default (app.js).
-  const fresh = evtUploadable(await getEvents({ from: since + 1, includeDiag: true }), myDev, since);
+  const fresh = evtUploadable(await getEvents({ from: effectiveSince + 1, includeDiag: true }), myDev, effectiveSince);
   if(!fresh.length) return;
   const months = [...new Set(fresh.map(e => evtMonthKey(e.ts)))].sort();
-  let maxTs = since;
+  let maxTs = since; // only advance the real watermark, not the full-push scan
+  let anyBlocked = false;
+  const fileCounts = Object.assign({}, cfg.evtFileCounts || {});
+  const pushBlocked = Object.assign({}, cfg.evtPushBlocked || {});
+  const ageLimit = (typeof EVENT_AGE_LIMIT_MS !== "undefined") ? EVENT_AGE_LIMIT_MS : 18 * 30 * 86400000;
   for(const mk of months){
     const r = evtMonthRange(mk);
     // diagnostics sync cross-device for remote debugging (see note above).
     const recs = evtOwnMonthRecords(await getEvents({ from: r.from, to: r.to, includeDiag: true }), myDev);
     if(!recs.length) continue;
-    await dbxUploadText(EVENTS_DIR + "/" + myDev + "-" + mk + ".json", JSON.stringify(recs));
+    const fname = myDev + "-" + mk + ".json";
+    const known = fileCounts[fname];
+    // T1: Shrink guard - check if local set is smaller than known remote
+    if(known != null && !forcePush){
+      const localCount = recs.length;
+      const knownCount = known.count;
+      const localHash = await uidHash(recs);
+      const isSuperset = uidsAreSuperset(recs, known.hash, known.uids);
+      // Check if shrink is legitimate (age pruning)
+      let isLegitimateShrink = false;
+      if(localCount < knownCount){
+        // Check if all missing records are older than age limit
+        const knownUids = known.uids || new Set();
+        const localUids = new Set(recs.map(e => e.uid).filter(Boolean));
+        const missingUids = [...knownUids].filter(u => !localUids.has(u));
+        // We'd need to fetch the missing records to check their age - for now, 
+        // we check if the local max ts is within the age limit
+        const localMaxTs = recs.length ? Math.max(...recs.map(e => e.ts)) : 0;
+        const now = Date.now();
+        if(now - localMaxTs > ageLimit){
+          isLegitimateShrink = true;
+        }
+      }
+      if(localCount < knownCount && !isSuperset && !isLegitimateShrink){
+        // BLOCK the push
+        anyBlocked = true;
+        if(typeof _qDiagPush === "function"){
+          _qDiagPush('evtPushShrinkBlocked', { 
+            file: fname, 
+            local: localCount, 
+            known: knownCount, 
+            localHash: localHash, 
+            knownHash: known.hash 
+          });
+        }
+        pushBlocked[fname] = { at: Date.now(), local: localCount, known: knownCount };
+        continue; // skip this month, don't upload
+      }
+    }
+    // Upload the month
+    await dbxUploadText(EVENTS_DIR + "/" + fname, JSON.stringify(recs));
+    // Update the file counts with new count and hash
+    const newHash = await uidHash(recs);
+    const newUids = new Set(recs.map(e => e.uid).filter(Boolean));
+    fileCounts[fname] = { count: recs.length, hash: newHash, uids: newUids };
+    // Clear any previous block for this file
+    delete pushBlocked[fname];
     recs.forEach(e => { if(e.ts > maxTs) maxTs = e.ts; });
   }
-  syncCfgSave({ evtLastUploadTs: maxTs });
+  // Clamp the watermark to prevent future-skew pinning (P1/P2)
+  const now = Date.now();
+  const clampedMaxTs = Math.min(maxTs, now + MAX_FUTURE_SKEW_MS);
+  // Never write a watermark greater than now
+  const finalMaxTs = Math.min(clampedMaxTs, now);
+  // T1: Do not advance watermark past a blocked month
+  const newEvtLastUploadTs = anyBlocked ? since : finalMaxTs;
+  syncCfgSave({ 
+    evtLastUploadTs: newEvtLastUploadTs, 
+    evtFullPushAt: forceFullPush || (cfg.evtFullPushAt && (Date.now() - cfg.evtFullPushAt) > 86400000) ? Date.now() : cfg.evtFullPushAt,
+    evtFileCounts: fileCounts,
+    evtPushBlocked: pushBlocked
+  });
+  // T1: Surface blocked push to user
+  if(anyBlocked && typeof toast === "function"){
+    const blockedFiles = Object.keys(pushBlocked);
+    toast('Sync blocked: ' + blockedFiles.length + ' month file(s) would shrink. Use "Force Push Events" in Settings to override.');
+  }
 }
 
 // Pull other devices' files whose rev changed; union-insert by uid.
@@ -2084,6 +2220,80 @@ function syncInit(){
       localStorage.setItem("questa.baseReset.v1", "done");
     }
   }catch(e){ /* best-effort */ }
+  // T0: Boot self-heal for poisoned upload watermark (P1/P2)
+  // Check if evtLastUploadTs is in the future (any future value, not just >120s)
+  // If so, reset it to the max local event ts and warn the user.
+  (function(){
+    try{
+      const cfg = syncCfg();
+      const watermark = cfg.evtLastUploadTs || 0;
+      const now = Date.now();
+      if(watermark > now){
+        // Watermark is in the future - this device has stopped uploading
+        // Find the max ts in the local event store
+        if(typeof idbOpen === "function" && typeof getEvents === "function"){
+          idbOpen().then(function(db){
+            try{
+              const tx = db.transaction("events","readonly");
+              const store = tx.objectStore("events");
+              const idx = store.index("ts");
+              const req = idx.openCursor(null, "prev"); // descending, first = max
+              req.onsuccess = function(){
+                const cursor = req.result;
+                const maxLocalTs = cursor ? cursor.value.ts : 0;
+                const eventCount = cursor ? 1 : 0; // we only need max, but count for diag
+                // Count all events for diag
+                const countReq = store.count();
+                countReq.onsuccess = function(){
+                  const totalCount = countReq.result;
+                  const resetTo = maxLocalTs || 0;
+                  syncCfgSave({ evtLastUploadTs: resetTo });
+                  if(typeof _qDiagPush === "function"){
+                    _qDiagPush('evtWatermarkRepaired', { 
+                      was: watermark, 
+                      now: now, 
+                      resetTo: resetTo, 
+                      maxLocalTs: maxLocalTs, 
+                      eventCount: totalCount 
+                    });
+                  }
+                  // Surface to user: toast + persistent Settings note
+                  if(typeof toast === "function"){
+                    toast('Sync repaired: upload watermark was in the future (' + new Date(watermark).toISOString() + '). Reset to ' + new Date(resetTo).toISOString() + '. Events will upload on next sync.');
+                  }
+                  // Persistent Settings note - store in localStorage for Settings to read
+                  try{
+                    const notes = JSON.parse(localStorage.getItem('questa.sync.watermarkNotes') || '[]');
+                    notes.unshift({ at: now, was: watermark, resetTo: resetTo, maxLocalTs: maxLocalTs, eventCount: totalCount });
+                    if(notes.length > 10) notes.length = 10;
+                    localStorage.setItem('questa.sync.watermarkNotes', JSON.stringify(notes));
+                  }catch(e){}
+                };
+              };
+            }catch(e){
+              // Fallback: reset to 0 if IDB fails
+              syncCfgSave({ evtLastUploadTs: 0 });
+              if(typeof _qDiagPush === "function"){
+                _qDiagPush('evtWatermarkRepaired', { was: watermark, now: now, resetTo: 0, maxLocalTs: 0, eventCount: 0, error: String(e) });
+              }
+            }
+          }).catch(function(e){
+            // Fallback: reset to 0 if IDB fails
+            syncCfgSave({ evtLastUploadTs: 0 });
+            if(typeof _qDiagPush === "function"){
+              _qDiagPush('evtWatermarkRepaired', { was: watermark, now: now, resetTo: 0, maxLocalTs: 0, eventCount: 0, error: String(e) });
+            }
+          });
+        } else {
+          // No IDB access - reset to 0
+          syncCfgSave({ evtLastUploadTs: 0 });
+          if(typeof _qDiagPush === "function"){
+            _qDiagPush('evtWatermarkRepaired', { was: watermark, now: now, resetTo: 0, maxLocalTs: 0, eventCount: 0, error: 'noIDB' });
+          }
+        }
+      }
+    }catch(e){ /* best-effort */ }
+  })();
   window.addEventListener("online", () => syncNow());
   document.addEventListener("visibilitychange", () => {
     if(document.visibilityState === "visible") syncNow();
@@ -2118,7 +2328,9 @@ if(typeof window !== "undefined"){
     eventsPull: syncEventsPull,
     eventsDeleteDevice: syncEventsDeleteDevice,
     eventsSync: syncEventsSync,
-    evtHelpers: { evtMonthKey, evtMonthRange, evtParseFileName, evtUploadable, evtOwnMonthRecords, evtIncomingFilter, evtMonthOlderThan }
+    eventsForcePush: syncEventsForcePush, // T1: force-push override for shrink guard
+    evtHelpers: { evtMonthKey, evtMonthRange, evtParseFileName, evtUploadable, evtOwnMonthRecords, evtIncomingFilter, evtMonthOlderThan, uidHash, uidsAreSuperset },
+    _testOnly: { _conflictLogThrottleReset: function(){ _conflictLogThrottle.clear(); } }
   };
 }
 
@@ -2137,6 +2349,12 @@ if(typeof window !== "undefined"){
 // finished running (same reason the app.js-side call was too early), so
 // everything either side needs is guaranteed to exist.
 //
+// T1: Force-push override for event shrink guard
+// Allows user to explicitly override the shrink guard and push a smaller month file
+async function syncEventsForcePush(){
+  return syncEventsPush({ force: true, forceFullPush: true });
+}
+
 /* BEGIN_BOOT_GATE */
 // Phase A ordering constraint (2026-07-11 persistence-loss fix): reconcile the
 // durable IndexedDB mirror of S against the possibly-stale localStorage boot

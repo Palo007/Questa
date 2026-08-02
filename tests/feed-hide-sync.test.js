@@ -47,7 +47,7 @@ const code =
   'return { renderEventDetail, isFeedNoise, getEventCategory, DIAGNOSTIC_KINDS };';
 
 // Stub S with controllable prefs.
-const S = { prefs: { hideSyncDiag: false } };
+const S = { prefs: { hideSyncDiag: false, hideConflictDecisions: false } };
 
 // Minimal DOM stub. renderEventDetail writes rows into #evFeedContent (creating
 // it inside #anEventDetail when absent), and also touches querySelectorAll.
@@ -106,9 +106,10 @@ function assert(desc, cond) {
 function countRows(html) { return (html.match(/class="evRow"/g) || []).length; }
 
 // ---- Fixture events ----
-// 3 noise rows (conflictResolved, storagePersist, lifecycle) + 3 real rows
-// (habitTap, complete, export). The habitTap dev differs from the noise dev so
+// 2 noise rows (storagePersist, lifecycle) + 4 real rows
+// (habitTap, complete, export, conflictResolved). The habitTap dev differs from the noise dev so
 // we can confirm dev attribution survives on the kept rows.
+ // T7: conflictResolved is no longer noise; it has its own category/toggle.
 const fixture = [
   { ts: 1000, kind: 'habitTap', taskType: 'habit', taskTitle: 'Stay positive', dev: 'mrl770yaq56gl' },
   { ts: 2000, kind: 'complete', taskType: 'daily', taskTitle: 'Exercise', dev: 'mrg0grhu3mozs' },
@@ -133,7 +134,8 @@ pagerFixture.push({ ts: 28000, kind: 'export', notes: 'Real export', dev: 'mrg0g
 // =========================================================================
 // Unit: isFeedNoise
 // =========================================================================
-assert('isFeedNoise(conflictResolved) === true', isFeedNoise({ kind: 'conflictResolved' }) === true);
+// T7: conflictResolved is no longer in isFeedNoise; it has its own category/toggle
+assert('isFeedNoise(conflictResolved) === false', isFeedNoise({ kind: 'conflictResolved' }) === false);
 assert('isFeedNoise(storagePersist) === true', isFeedNoise({ kind: 'storagePersist' }) === true);
 assert('isFeedNoise(lifecycle) === true', isFeedNoise({ kind: 'lifecycle' }) === true);
 assert('isFeedNoise(habitTap) === false', isFeedNoise({ kind: 'habitTap' }) === false);
@@ -149,6 +151,7 @@ assert('isFeedNoise(export) === false', isFeedNoise({ kind: 'export' }) === fals
 function renderCase(hideDiag, events) {
   return new Promise(function (resolve) {
     S.prefs.hideSyncDiag = hideDiag;
+    S.prefs.hideConflictDecisions = false; // T7: conflictResolved has its own toggle, default false (visible)
     doc.getElementById('anEventDetail').innerHTML = '';
     doc.getElementById('evFeedContent').innerHTML = '';
     const caseApi = buildApiWithEvents(events || fixture);
@@ -167,30 +170,41 @@ function finish() {
 }
 
 renderCase(false).then(function (htmlOff) {
+  // T7: conflictResolved is now visible by default (separate category/toggle)
   assert('OFF: 6 rows (all kinds visible)', countRows(htmlOff) === 6);
   assert('OFF: habitTap row present', htmlOff.indexOf('Stay positive') >= 0);
   assert('OFF: complete row present', htmlOff.indexOf('Exercise') >= 0);
   assert('OFF: export row present', htmlOff.indexOf('Backup downloaded') >= 0);
+  assert('OFF: conflictResolved row present', htmlOff.indexOf('Stay positive') >= 0); // conflictResolved taskTitle
   assert('OFF: dev attribution preserved (mrl device label)', htmlOff.indexOf('mrl770yaq56gl') >= 0);
   return renderCase(true);
 }).then(function (htmlOn) {
-  assert('ON: 3 rows (sync/diagnostic hidden)', countRows(htmlOn) === 3);
+  // T7: conflictResolved has its own toggle (hideConflictDecisions), not controlled by hideSyncDiag
+  // So with hideSyncDiag=true: lifecycle/storagePersist hidden, but conflictResolved visible
+  assert('ON: 4 rows (sync/diagnostic hidden, conflictResolved visible)', countRows(htmlOn) === 4);
   assert('ON: habitTap row present', htmlOn.indexOf('Stay positive') >= 0);
   assert('ON: complete row present', htmlOn.indexOf('Exercise') >= 0);
   assert('ON: export row present', htmlOn.indexOf('Backup downloaded') >= 0);
+  assert('ON: conflictResolved row present', htmlOn.indexOf('Stay positive') >= 0); // conflictResolved taskTitle
   assert('ON: dev attribution preserved (mrl device label)', htmlOn.indexOf('mrl770yaq56gl') >= 0);
-  assert('ON: lifecycle row hidden', htmlOn.indexOf('boot') < 0 || countRows(htmlOn) === 3);
+  assert('ON: lifecycle row hidden', htmlOn.indexOf('boot') < 0);
   // Regression: pager count must reflect post-noise count, not total unfiltered count.
-  // 25 conflictResolved + 3 real = 28 total, but only 3 visible when hideSyncDiag=true.
-  // Before the fix, the pager would show 28 events / 2 pages with blank page 1.
-  // After the fix, the pager shows 3 events / 1 page and page 1 renders the 3 real rows.
+  // 25 conflictResolved + 3 real = 28 total. With hideSyncDiag=true, conflictResolved is NOT filtered
+  // (it has its own toggle hideConflictDecisions which defaults to false), so all 28 visible.
   return renderCase(true, pagerFixture);
 }).then(function (htmlPager) {
-  assert('PAGER ON: 3 rows visible (25 conflictResolved filtered out)', countRows(htmlPager) === 3);
-  assert('PAGER ON: real habit row present', htmlPager.indexOf('Real habit') >= 0);
-  assert('PAGER ON: real daily row present', htmlPager.indexOf('Real daily') >= 0);
-  assert('PAGER ON: real export row present', htmlPager.indexOf('Real export') >= 0);
-  assert('PAGER ON: no blank page (noise rows not rendered)', countRows(htmlPager) === 3);
+  // T7: conflictResolved has its own toggle (hideConflictDecisions), not controlled by hideSyncDiag
+  // So with hideSyncDiag=true: all 28 events pass the filter (25 conflictResolved + 3 real)
+  // But pagination (EV_PAGE_SIZE=25) means only 25 rows render on page 0.
+  // Page 0 shows first 25 events (3 real + 22 conflictResolved). The conflictResolved rows
+  // render via generic else branch with their taskTitle ('Noise event X').
+  // The row count (25) and pager (2 pages) already verify conflictResolved are NOT filtered.
+  // Additional check: verify conflictResolved taskTitle text appears in the feed
+  assert('PAGER ON: 25 rows visible on page 0 (first page of 28)', countRows(htmlPager) === 25);
+  assert('PAGER ON: conflictResolved taskTitle present on page 0', htmlPager.indexOf('Noise event') >= 0);
+  assert('PAGER ON: no blank page', countRows(htmlPager) > 0);
+  // Verify pager shows 2 pages (28 events / 25 per page = 2 pages)
+  assert('PAGER ON: pager shows 2 pages', htmlPager.indexOf('Page 1 / 2') >= 0 || htmlPager.indexOf('1 / 2') >= 0);
   finish();
 }).catch(function (e) {
   console.error('\nERROR: ' + (e && e.stack || e));

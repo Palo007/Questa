@@ -46,8 +46,9 @@ serializes as `{ "__error": "..." }`.
 | Key | Meaning |
 |-----|---------|
 | `questa.save.v1` | The **full persisted state `S`** (JSON string). Contains `tasks` (each with `type`, `title`, `streak`, `repeat`, `done`, `doneAt`, `updatedAt`, `createdAt`, `checklist`, `tags`), `char`, `rewards`, `tags`, `prefs`, `lastCron`, and `deletions` (tombstones). Parse with `fromjson`. |
-| `questa.sync.v1` | Sync config: `enabled`, `refreshToken` (presence only), `lastRev`, `lastSyncAt`, `lastError`, `evtLastUploadTs`, `deviceId`, `deviceName`, `evtFileRevs` (per-file Dropbox rev cache for the event pull — `filename -> rev`, written only after that file's payload is successfully parsed and its events inserted), `evtLastPullAt` (timestamp gating the 60-second event-pull throttle), `evtFullScanAt` (**new 2026-07-29** — watermark for a 24-hour full re-scan that ignores `evtFileRevs`/`evtBadRevs`, so a stale cached rev can no longer pin a file out of the pull permanently), `evtBadRevs` (**new 2026-07-29** — quarantine map `filename -> {rev, at}` for corrupt/failed payloads, retried on a ~15-minute backoff, capped at 200 entries with oldest evicted first). |
+| `questa.sync.v1` | Sync config: `enabled`, `refreshToken` (presence only), `lastRev`, `lastSyncAt`, `lastError`, `evtLastUploadTs`, `deviceId`, `deviceName`, `evtFileRevs` (per-file Dropbox rev cache for the event pull — `filename -> rev`, written only after that file's payload is successfully parsed and its events inserted), `evtLastPullAt` (timestamp gating the 60-second event-pull throttle), `evtFullScanAt` (watermark for a 24-hour full re-scan that ignores `evtFileRevs`/`evtBadRevs`, so a stale cached rev can no longer pin a file out of the pull permanently), `evtBadRevs` (quarantine map `filename -> {rev, at}` for corrupt/failed payloads, retried on a ~15-minute backoff, capped at 200 entries with oldest evicted first), `evtFullPushAt` (24h full re-push watermark, ignores `evtLastUploadTs`), `evtFileCounts` (per-file `{count, hash, uids}` for shrink-guard comparison), `evtPushBlocked` (blocked push tracking `filename -> {at, local, known}`). |
 | `questa.baseReset.v1` | One-time sync-base-purge marker (`"done"` once run). |
+| `questa.sync.watermarkNotes` | **NEW 2026-08-02** — persistent log of watermark repairs: array of `{at, was, resetTo, maxLocalTs, eventCount}` for the upload watermark self-heal feature. |
 
 ## IndexedDB stores (database `questa`)
 
@@ -75,6 +76,9 @@ serializes as `{ "__error": "..." }`.
 - **Divergence between memory and disk.** Diff `liveS` against `localStorage["questa.save.v1"]`
   (parsed). They should match after a save; a mismatch points at a persistence/timing issue.
 - **Quota pressure.** `storageEstimate.usage` near `quota` can cause failed writes.
+- **Upload watermark poisoning.** Check `localStorage["questa.sync.v1"].evtLastUploadTs` > `meta.generatedAt` (future timestamp). If so, the watermark self-heal should have fired — look for `evtWatermarkRepaired` in `errors` and `questa.sync.watermarkNotes` in localStorage.
+- **Event shrink guard blocks.** Look for `evtPushShrinkBlocked` in `errors` — indicates local event count < known remote count for a month file, push blocked.
+- **Event pull divergence.** The diagnostic overlay's per-device divergence readout (also in `liveS` if you diff) flags devices with 0 local events but a remote file cached — the 2026-07-28 failure signature.
 
 ## Why monolithic (not split files)
 

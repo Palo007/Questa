@@ -10,7 +10,7 @@ Questa can keep your progress the same across multiple devices (e.g. desktop and
 - **Day to day:** you don't do anything. It syncs automatically a few seconds after any change, when you switch tabs/apps, and when you come back online.
 - **To sync right now:** Settings → **Sync now**.
 - **To stop syncing this device:** Settings → **Disconnect**. Your local data is untouched.
-- **"Force push" / "Force pull"** are emergency/one-time tools, not normal buttons — see their own sections below before you touch either.
+- **"Force push" / "Force pull" / "Force Push Events"** are emergency/one-time tools, not normal buttons — see their own sections below before you touch either.
 - **Want a full backup copy in Dropbox too** (not just the lean sync data)? Settings → **Auto-backup to Dropbox** → pick a schedule, or use **Export → Save to Dropbox** any time. See "Automatic full backups to Dropbox" below.
 
 ---
@@ -31,6 +31,7 @@ If you only use Questa on one device, none of this matters — sync is entirely 
 The items in "Not synced" above aren't unbacked-up, though — see "Automatic full backups to Dropbox" below for a way to get everything (including those) into Dropbox too, just on a slower schedule and without merging.
 
 ### Why the Dropbox file is much smaller than an export file
+
 If you compare `state.json` in Dropbox to a file from Settings → **Export**, the export is usually several times bigger. That's expected — the export is a *complete* backup, sync is a *lean* one, and they're deliberately built for different jobs:
 
 - **The export still carries the full tap/completion/subtask event log, but so does sync now (see "Event log sync" below).** The export bundles it as one big file rebuilt from your device's own IndexedDB each time; sync instead trickles it in per-device, per-month, so the export remains the bigger file even though both eventually contain the same events.
@@ -63,6 +64,7 @@ Questa never blindly overwrites one device with another during a normal sync —
 - **New items** (a task added on either device) always come through as an addition — merging is a union, not a pick-one.
 
 ### Worked example
+
 You add "Buy groceries" on your phone while offline. Meanwhile, on your desktop (also offline), you rename an existing habit and complete a daily. Once both come back online and sync:
 - "Buy groceries" appears on both devices (it's new, no conflict).
 - The habit's new name appears on both (only the desktop touched it).
@@ -70,6 +72,7 @@ You add "Buy groceries" on your phone while offline. Meanwhile, on your desktop 
 Nothing collided, so nothing was lost — this is the common case.
 
 ### Where it can lose a little data (by design, not a bug)
+
 - **Character stats (level/XP/gold/HP):** if you score a habit on *both* devices before either has had a chance to sync, whichever device syncs second "wins" for your stats — you might lose a few XP/gold from the other device's tap. Your tasks and history are unaffected; this is purely the character numbers.
 - **Task list order:** if you reordered your habits/tasks list by dragging on one device while adding a new task on another, the new task lands at the end of the list rather than exactly where it "should" be. A quick manual drag fixes it. (This is about the order of your *list of tasks* — for the order of *subtasks within one task*, see "Subtask and checklist merging" below, which works a little differently.)
 - **Both devices offline overnight:** if both devices are offline when the daily reset happens and both come online and run their own reset before syncing, a missed daily's HP damage could in rare cases apply twice. Staying online (or syncing before/after the day rolls over) avoids this.
@@ -90,6 +93,7 @@ As of 2026-07-11, checking off, adding, editing, or deleting subtasks (checklist
 - **Checking the exact same subtask "done" on both devices** — not actually a conflict (you both said the same thing); it just stays done.
 
 ### Worked example
+
 You're at the store with your phone (offline): you check off "milk" and "eggs" on a shared shopping-list task, and add "bread" as a new subtask. Meanwhile, on the tablet (also offline, hasn't seen your changes yet), your partner checks off "bananas" on the same task and renames "eggs" to "eggs (dozen)". Once both devices come back online and sync:
 - milk and bananas are both checked
 - bread is on the list (your addition)
@@ -98,6 +102,7 @@ You're at the store with your phone (offline): you check off "milk" and "eggs" o
 Nothing from either device is lost.
 
 ### The one thing that still doesn't merge: subtask *order*
+
 If you drag-reorder a task's subtasks on one device, and don't make any other change to that same task anywhere else before syncing, your new order carries over cleanly — this is the common case and works fine. But if you reorder subtasks on one device *while* another device also edits or checks something on that same task before either syncs, the final order follows whichever device's edit to the task counts as more recent overall — your reorder can be silently reverted even though every check-mark and text edit involved is still correctly merged in, nothing is deleted. A quick manual drag afterward fixes the order if this happens.
 
 *(Historical note: earlier versions of this guide warned that editing the same task's subtasks on two unsynced devices could silently drop one entire side's checklist changes — ticks and additions alike. That was fixed on 2026-07-11; subtask merging is now per-item, as described above, and that old warning no longer applies.)*
@@ -114,6 +119,23 @@ The detailed tap/subtask/completion event log (used by the Analytics → Event l
 - **Events older than about 18 months age out** and are not re-fetched from other devices once they do — same retention window your device already applies to its own event log.
 - **The log can end up disagreeing with the task itself.** If the "editing the same task on two unsynced devices" case above discarded one device's checklist ticks, those taps still show up in the Activity Feed / Event log detail forever — event sync never discards anything. So you may see a subtask logged as checked off at a time when the task now shows it unchecked. That's expected: the log records what was tapped, not what "won" the merge.
 - **Each event now shows which device it came from.** Settings has a **Device name** field (next to "Sync now") — give a device a name like "Phone" or "Laptop" and it'll show up next to that device's events in the Activity Feed. Leave it blank and the event just shows the device's short ID instead (the same one shown in Settings), so events are still distinguishable even before you name anything. Device names sync the same way tasks do, so once you name a device, every other synced device shows that name too. Renaming a device also writes one small "device name" event of its own, recording the id→name mapping at that moment — handy for tracing old events back to a device if you rename it again later or it gets wiped.
+- **Conflict decisions have their own category and toggle.** Conflicts resolved during sync (where the same item was edited on two devices and a winner was picked) are now shown in a separate **Conflict** category in the Activity Feed, independent of the "Hide sync & diagnostic events" toggle. Settings → **Hide conflict decisions** (default **Off**) controls their visibility. Turn it On to declutter the feed; leave it Off to see every merge decision for debugging.
+- **Conflict entries now carry device-relative labels.** A conflict entry records `winnerDev` / `loserDev` / `reason` so it reads *"kept Phone's copy"* on *both* devices — not reversed on the loser's side.
+- **Conflict logs are throttled.** Only one `conflictResolved` entry is emitted per (kind, entityId) per sync round, even if retries occur. No more log spam from conflict retry loops.
+
+---
+
+## Conflict decisions in the Activity Feed
+
+When a sync merges two versions of the same task/reward/tag/view, a **Conflict** event is logged. You'll see it in the Analytics → Event log detail view (and the Activity Feed) as a row with a ⚖️ icon and a **Conflict** badge.
+
+| Field | What it means |
+|---|---|
+| **Winner** | The device whose edit was kept (e.g. "kept Phone's copy"). This is *device-relative*: it reads the same way on both devices. |
+| **Loser** | The device whose edit was discarded. |
+| **Reason** | Why the winner won (e.g. "newer edit", "device id tiebreak"). |
+
+These entries are **not** controlled by "Hide sync & diagnostic events". They have their own toggle: Settings → **Hide conflict decisions** (default **Off**).
 
 ---
 
@@ -128,6 +150,7 @@ The detailed tap/subtask/completion event log (used by the Analytics → Event l
 You'll be asked to confirm once before anything happens — there's no accidental version of this button. The confirmation dialog also shows this device's local event count, with a note if it's under 50 that this may not be the most up-to-date device — that's a hint about *this* device's own history, not a claim that events are at risk in Dropbox, since (as above) force push never touches the event log either way.
 
 ### Worked example (the scenario this was built for)
+
 You set up sync on a test/throwaway device while getting things working, and it pushed a handful of test tasks to Dropbox. Now you're ready to connect your real phone, and you don't want that test data anywhere near your real tasks.
 1. On your real phone, connect Dropbox as usual.
 2. Settings → **Force push** → confirm.
@@ -147,11 +170,27 @@ This is the mirror image of Force push, for the opposite situation: **this** dev
 Also asks for confirmation once before doing anything, same as Force push.
 
 ### Worked example
+
 Your desktop has your real, long-running data. You set up Questa fresh on a new phone and connect it to the same Dropbox account — an ordinary sync would already pull your desktop's data down correctly in this case, so you'd only reach for Force pull if, say, you'd tapped a couple of things on the new phone first (creating a small local task or two) and want to be certain none of that gets merged in — you just want the phone to become an exact copy of what's in Dropbox.
 1. On the new phone: Settings → **Force pull** → confirm.
 2. The phone's data becomes byte-for-byte whatever was in Dropbox, discarding anything the phone had that wasn't already synced there.
 
 > **Reminder:** in the *ordinary* case — a brand-new device with nothing on it yet, or a device that hasn't touched its data since its last sync — you don't need Force pull at all. A normal **Sync now** already takes everything from Dropbox with nothing to conflict against. Force pull is only for making sure, when this device might have some unsynced changes you want to discard on purpose.
+
+---
+
+## "Force Push Events" — overriding the shrink guard
+
+**What it's for:** Questa now tracks how many events you have per month in Dropbox. If your local event count for a month is *smaller* than what Dropbox already has (and it's not just old events aging out), the push for that month is **blocked** to prevent accidental data loss. You'll see a toast: *"Sync blocked: N month file(s) would shrink. Use 'Force Push Events' in Settings to override."*
+
+This can happen if:
+- Your local IndexedDB was corrupted or partially wiped
+- A bug caused events to be dropped locally but not in Dropbox
+- You're intentionally trying to push a smaller set (rare)
+
+**What it does:** Settings → **Force Push Events** ignores the shrink check and pushes whatever you have locally, overwriting the month files in Dropbox. It also does a **full re-push** (ignores the upload watermark, pushes all months). Use this only if you're sure your local copy is the one you want in Dropbox.
+
+**Before you press it, ask:** "Is my local event log definitely the correct, complete one?" If another device has events you don't, those will be lost in Dropbox for the affected months.
 
 ---
 
@@ -204,10 +243,15 @@ Settings always shows the most recent problem, if any, right under "Last sync." 
 - **"sync conflict — retry later"** — two devices tried to write at the exact same moment. It retries automatically; if you still see this after a minute, tap Sync now.
 - **Anything mentioning a numeric error code (401/409/429/5xx)** — transient network/Dropbox issues retry automatically. If it persists, check you still have internet, then Sync now.
 - **"auto backup failed"** or **"Dropbox backup failed"** — a full-backup upload hit a problem (shown with the underlying reason appended, and naming which cadence failed). This is about the backup files — `/questa-backups/…` for the automatic cadences, `export-backup.json` for the manual button — not ordinary sync; `state.json` sync can keep working fine even if this fails. Try the manual **Save to Dropbox** button once you're back online to confirm it's resolved. Each cadence fails independently, so one failing tier doesn't stop the others.
+- **"Sync blocked: N month file(s) would shrink"** — the push shrink guard detected that your local event count for one or more months is smaller than what Dropbox already has. Tap **Force Push Events** in Settings to override and push anyway, or investigate why events were lost locally first.
 
 If Settings still just shows **Connect Dropbox** after you thought you connected: the connection attempt didn't complete. Try again, and make sure you don't close or reload the tab in the few seconds right after Dropbox's approval page sends you back.
 
 **Double-checking that event sync is actually keeping up:** the diagnostic overlay (Settings → tap the version number 5× within 3 seconds) includes a per-device event divergence readout — this device's local event count for every known device, next to what the last Dropbox pull cached for that device's files. A device showing zero local events while its file still exists in Dropbox is flagged in red — that combination means this device's copy of that device's history hasn't actually arrived, even if ordinary sync otherwise looks healthy.
+
+**Watermark self-heal:** if the app detects that the upload watermark (`evtLastUploadTs`) is in the future (caused by a device clock skew), it automatically resets it to your latest local event timestamp on boot, shows a toast, and writes a persistent note in Settings. This prevents the "stuck upload" failure mode where a future-dated watermark silently stops all uploads.
+
+**24-hour full re-push:** once per day, the event push ignores the watermark and pushes all months from scratch. This self-heals any month that got skipped or blocked.
 
 ---
 

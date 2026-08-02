@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.07.29-2240";
+const APP_VERSION = "v2026.08.02-1745";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -110,7 +110,7 @@ function freshState(){
     history:[], charHistory:[],
     monthlyBackups: [],
     deletions: [],
-    prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false, autoBackupEnabled:{fourHour:false,daily:false,weekly:false,monthly:false} }
+    prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false, autoBackupEnabled:{fourHour:false,daily:false,weekly:false,monthly:false}, hideConflictDecisions:false, hideSyncDiag:true }
   };
 }
 var lastIssued = 0;
@@ -155,7 +155,7 @@ function legacySubtaskId(taskId, text, occurrence){
 }
 function migrate(s){ const f=freshState();
   const out=Object.assign(f,s,{char:Object.assign(f.char,s.char||{})});
-  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardThick:0, notificationsEnabled:false, saveBtnTop:false, hideSyncDiag:true}, s.prefs||{});
+  out.prefs=Object.assign({width:480, notesLines:3, lastTab:'habits', tipDelay:0, haptics:true, cardThick:0, notificationsEnabled:false, saveBtnTop:false, hideSyncDiag:true, hideConflictDecisions:false}, s.prefs||{});
   if(out.prefs.cardPad !== undefined){
     let cp = parseInt(out.prefs.cardPad, 10);
     if(isFinite(cp)){
@@ -716,6 +716,7 @@ function questaFullDiagnostic(){
       schemaVersion: 1,
       generatedAt: meta.generatedAt,
       appVersion: meta.appVersion,
+      syncEventlogHardeningVersion: 2,
       note: "Read this block first to triage. Then slice the section you need with jq/python -- do NOT load the whole file into an LLM context. See DIAGNOSTIC-FORMAT.md in the repo.",
       sizesBytes: { meta:bytes(meta), localStorage:bytes(ls), indexedDB:bytes(idb), caches:bytes(caches_), serviceWorker:bytes(sw), storageEstimate:bytes(est), errors:bytes(errors), liveS:bytes(live) },
       counts: {
@@ -1211,11 +1212,22 @@ function eventImportSummaryHTML(sum){
     + '</div>';
 }
 function bulkAddEvents(list){
-
-
+  // Returns {added, failed, aborted} on ALL paths (including 4 failure paths):
+  // 0. synchronous db.transaction() throw (store missing, DB closing)
+  // 1. tx.onerror (constraint violation, quota, etc.)
+  // 2. tx.onabort (explicit abort)
+  // 3. idbOpen() rejection (DB unavailable)
+  // Pushes _qDiagPush('bulkAddEventsFailed', {...}) on paths 1-3 for diagnostics.
   return idbOpen().then(db=>new Promise((resolve)=>{
-    let added=0, tx;
-    try{ tx = db.transaction(EVENTS_STORE,"readwrite"); }catch(e){ resolve(0); return; }
+    let added=0, failed=0, aborted=false, tx;
+    try{ tx = db.transaction(EVENTS_STORE,"readwrite"); }catch(e){
+      // Path 0: synchronous transaction throw
+      if(typeof _qDiagPush === "function"){
+        _qDiagPush('bulkAddEventsFailed', { attempted: (list||[]).length, added: 0, failed: (list||[]).length, aborted: true, path: 'txThrow' });
+      }
+      resolve({added:0, failed:(list||[]).length, aborted:true});
+      return;
+    }
     const store = tx.objectStore(EVENTS_STORE);
     list.forEach(ev=>{
       if(!ev || typeof ev!=="object") return;
@@ -1223,12 +1235,30 @@ function bulkAddEvents(list){
       if(typeof rec.ts!=="number") rec.ts = Date.now();
       const req = store.add(rec);
       req.onsuccess = ()=>{ added++; };
-      req.onerror = ()=>{};
+      req.onerror = ()=>{ failed++; };
     });
-    tx.oncomplete = ()=>resolve(added);
-    tx.onerror = ()=>resolve(added);
-    tx.onabort = ()=>resolve(added);
-  })).catch(()=>0);
+    tx.oncomplete = ()=>resolve({added, failed, aborted:false});
+    tx.onerror = ()=>{
+      // Path 1: transaction error
+      if(typeof _qDiagPush === "function"){
+        _qDiagPush('bulkAddEventsFailed', { attempted: (list||[]).length, added, failed, aborted: false, path: 'txError' });
+      }
+      resolve({added, failed, aborted:false});
+    };
+    tx.onabort = ()=>{
+      // Path 2: transaction abort
+      if(typeof _qDiagPush === "function"){
+        _qDiagPush('bulkAddEventsFailed', { attempted: (list||[]).length, added, failed, aborted: true, path: 'txAbort' });
+      }
+      resolve({added, failed, aborted:true});
+    };
+  })).catch(()=>{
+    // Path 3: idbOpen() rejection
+    if(typeof _qDiagPush === "function"){
+      _qDiagPush('bulkAddEventsFailed', { attempted: (list||[]).length, added: 0, failed: (list||[]).length, aborted: true, path: 'idbOpenReject' });
+    }
+    return {added:0, failed:(list||[]).length, aborted:true};
+  });
 }
 // SHA-256 hash for backup integrity verification. Falls back to a simple
 // length-based digest when Web Crypto is unavailable (e.g. insecure context).
@@ -1428,8 +1458,13 @@ function importEventsBackfill(ev){
       clearSyntheticEvents().then(removedCount=>{
         if(removedCount>0) toast('Replacing '+removedCount+' previously reconstructed events.');
         return bulkAddEvents(reparented);
-      }).then(added=>{
-        toast('Loaded '+added+' events');
+      }).then(result=>{
+        const added = result.added;
+        if(result.failed > 0 || result.aborted){
+          toast('Loaded ' + added + ' of ' + (reparented||[]).length + ' events (some failed)');
+        } else {
+          toast('Loaded '+added+' events');
+        }
         if(TAB==='analytics') render();
       });
     });
@@ -2525,17 +2560,22 @@ function anSpan(){
   ev.forEach(e=>{ if(e.date<mn)mn=e.date; if(e.date>mx)mx=e.date; });
   return [mn, Math.max(mx, Date.now())];
 }
-function anWindow(){
+function anWindow(noFloor){
   const p=anPrefs(); const now=Date.now();
   const [mn]=anSpan();
   let to=now - (p.toOff||0)*DAY;
   let from=now - (p.fromOff||90)*DAY;
-  if(p.snap==='all'){ from=mn; to=now; }
-  if(from<mn) from=mn;
+  if(p.snap==='all'){ 
+    if(noFloor){ from=0; to=now; } else { from=mn; to=now; }
+  }
+  if(!noFloor && from<mn) from=mn;
   if(to>now) to=now;
   if(from>to) from=to;
   return [from,to];
 }
+/**
+ * @note Feed-only noFloor mode creates a deliberate chart/feed x-axis divergence — charts use clamped window, feed uses unclamped.
+ */
 function repsPerTap(title){ const m=(title||'').match(/\d+/); return m?parseInt(m[0],10):1; }
 function repsPerTapTitle(t){ return t; }
 function anCumulativeReps(metric,from,to){
@@ -3400,6 +3440,7 @@ function importViews(ev){
 }
 function refreshAnalytics(){
   const p=anPrefs(); const w=anWindow(); const from=w[0], to=w[1];
+  const wf = anWindow(true); // unclamped window for feed
   const body=document.getElementById('anBody'); if(!body)return;
   const oldDetails = document.querySelector('.anDetails');
   const wasOpen = oldDetails ? oldDetails.hasAttribute('open') : false;
@@ -3417,7 +3458,7 @@ function refreshAnalytics(){
   if(VDRAFT){ if(MBUILD) drawMetricEditor(); else drawViewBuilder(); }
   bindMetricChips();
   if(MEDIT && !MBUILD) drawMetricEditor();
-  renderEventDetail(from,to);
+  renderEventDetail(wf[0], wf[1]);
 }
 function anDetailDashboard(from,to){
   const p=anPrefs();
@@ -3553,6 +3594,7 @@ function evGoPage(n){
 }
 
 function getEventCategory(e) {
+  if (e.kind === 'conflictResolved') return CONFLICT_CATEGORY;
   if (e.kind === 'habitTap' || e.kind === 'habitReps' || e.taskType === 'habit') return 'habit';
   if (e.kind === 'import' || e.kind === 'export' || e.kind === 'devicename') return 'system';
   if (e.taskType === 'daily' || e.kind === 'miss') return 'daily';
@@ -3566,9 +3608,10 @@ function getEventCategory(e) {
   return 'system';
 }
 function isFeedNoise(e){
-  return e.kind === 'conflictResolved' || DIAGNOSTIC_KINDS.indexOf(e.kind) >= 0;
+  return DIAGNOSTIC_KINDS.indexOf(e.kind) >= 0;
 }
-function _evCatBadgeName(cat){ return {habit:'Habit',daily:'Daily',todo:'To-do',system:'System'}[cat]||'Event'; }
+const CONFLICT_CATEGORY = 'conflict';
+function _evCatBadgeName(cat){ return {habit:'Habit',daily:'Daily',todo:'To-do',system:'System',conflict:'Conflict'}[cat]||'Event'; }
 function _evCatBadgeClass(cat){ return {habit:'evBadge-habit',daily:'evBadge-daily',todo:'evBadge-todo',system:'evBadge-system'}[cat]||'evBadge-default'; }
 function _evDeltaSpan(val,unit){
   if(!val) return '';
@@ -3629,11 +3672,25 @@ function renderEventDetail(from,to){
         devNameFromEvents[ev.deviceId] = ev.deviceName.trim();
       }
     });
+    // T7: Build device name cache Map for this render pass (avoids repeated deviceDisplayName calls)
+    const deviceNameCache = new Map();
+    function getCachedDeviceName(devId){
+      if(!devId) return '';
+      if(deviceNameCache.has(devId)) return deviceNameCache.get(devId);
+      const name = deviceDisplayName(S.devices, devId) || devNameFromEvents[devId] || String(devId).slice(0,6);
+      deviceNameCache.set(devId, name);
+      return name;
+    }
 
     // Filter events
     const filtered = sorted.filter(e=>{
-      if(S.prefs && S.prefs.hideSyncDiag && isFeedNoise(e)) return false;
       const cat = getEventCategory(e);
+      // T7: conflictResolved has its own toggle, separate from hideSyncDiag
+      if(cat === CONFLICT_CATEGORY){
+        if(S.prefs && S.prefs.hideConflictDecisions) return false;
+      } else if(S.prefs && S.prefs.hideSyncDiag && isFeedNoise(e)){
+        return false;
+      }
       if(_evFilterType!=='all' && cat!==_evFilterType) return false;
       if(_evSearchQuery.trim()){
         const q=_evSearchQuery.toLowerCase().trim();
@@ -3828,13 +3885,24 @@ function renderEventDetail(from,to){
           icon = '🏷️';
           desc = 'Device name updated';
           if (e.notes) desc += ' &middot; <span class="evNotes">' + esc(e.notes) + '</span>';
-        } else if (e.kind === 'conflictResolved') {
-          icon = '⚖️';
-          var _ct = e.taskTitle || e.charTitle || 'item';
-          desc = 'Sync conflict resolved \u00b7 ' + esc(_ct) + ' \u00b7 kept ' + (e.winner === 'remote' ? 'remote' : 'local');
         } else {
           icon = '⚙️';
           desc = esc(e.taskTitle || 'System action');
+        }
+      } else if (cat === 'conflict') {
+        badgeName = 'Conflict';
+        badgeClass = 'evBadge-conflict';
+        if (e.kind === 'conflictResolved') {
+          icon = '⚖️';
+          var _ct = e.taskTitle || e.charTitle || 'item';
+          // T4/T7: prefer new winnerDev/loserDev/reason fields, fall back to legacy winner/loser
+          var _winner = e.winnerDev || e.winner || 'remote';
+          var _loser = e.loserDev || e.loser || 'local';
+          var _reason = e.reason ? ' \u00b7 ' + esc(e.reason) : '';
+          desc = 'Sync conflict resolved \u00b7 ' + esc(_ct) + ' \u00b7 kept ' + esc(_winner) + '\'s copy' + _reason;
+        } else {
+          icon = '⚖️';
+          desc = esc(e.taskTitle || 'Conflict event');
         }
       }
 
@@ -3883,10 +3951,7 @@ function renderEventDetail(from,to){
       const fullTime = dateStr + ' @ ' + timeStr;
 
       const mark = e.synthetic ? ' <span class="anEvSyn" title="Backfilled from Habitica">~ backfill</span>' : '';
-      const _devName0 = (typeof deviceDisplayName==="function")?deviceDisplayName(S.devices,e.dev):e.dev.slice(0,6);
-      // If the live lookup fell back to the short id, prefer the last-known name
-      // recorded in the event log for this device (plan §3A/§3B).
-      const _devLabelName = (_devName0===String(e.dev).slice(0,6) && devNameFromEvents[e.dev]) ? devNameFromEvents[e.dev] : _devName0;
+      const _devLabelName = getCachedDeviceName(e.dev);
       const devLabel = e.dev ? ' <span class="evDevice" style="opacity:.65" title="Device ID: '+esc(e.dev)+'">&middot; '+esc(_devLabelName)+'</span>' : '';
 
       listHtml+='<div class="evRow">'+
@@ -5196,6 +5261,7 @@ function openSettings(){
   h+=settingRow('saveBtnTop','Save button position','Put the Save button at the top of the edit sheet, centered next to the title, instead of at the bottom.',(S.prefs.saveBtnTop?'Top':'Bottom'));
   h+=settingRow('notifications','Notifications','Browser-based notification permission and status.',(S.prefs.notificationsEnabled?'On':'Off'));
   h+=settingRow('hideSyncDiag','Hide sync & diagnostic events','Hide background sync (conflict resolved) and diagnostic events from the Activity Feed. Task activity and exports stay visible.',(S.prefs.hideSyncDiag?'On':'Off'));
+  h+=settingRow('hideConflictDecisions','Hide conflict decisions','Hide sync conflict resolution events from the Activity Feed. Turn Off to see conflict history for debugging.',(S.prefs.hideConflictDecisions?'On':'Off'));
   h+='</div>';
   const syncTip='Sync via Dropbox (your account, no server) keeps this device and your other devices up to date automatically.';
   h+='<div class="colTitle"><h2 style="font-size:13px;flex:none">Sync</h2>'+infoIcon('Sync\n'+syncTip)+'</div>';
@@ -5331,6 +5397,7 @@ function setWidth(px){ S.prefs.width=px; applyWidth(); save(); closeOpt(); openS
 function setNotesLines(n){ S.prefs.notesLines=n; save(); closeOpt(); openSettings(); }
 function setHaptics(n){ S.prefs.haptics=!!n; save(); closeOpt(); openSettings(); }
 function setHideSyncDiag(n){ S.prefs.hideSyncDiag=!!n; save(); closeOpt(); openSettings(); render(); }
+function setHideConflictDecisions(n){ S.prefs.hideConflictDecisions=!!n; save(); closeOpt(); openSettings(); render(); }
 function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.min(60,Math.max(0,n)); S.prefs.cardThick=n; applyCardThick(); save(); closeOpt(); openSettings(); }
 function setSaveBtnTop(n){ S.prefs.saveBtnTop=!!n; save(); closeOpt(); if(EDIT) drawSheet(); else if(REDIT) openReward(REDIT.id); openSettings(); }
 function setExportIntervalDays(){ /* retained as defensive no-op; no live callers after autoBackup migration */ }
@@ -5517,6 +5584,14 @@ function openOpt(key){
     h+='<div class="optChoices">';
     h+='<button type="button" class="'+(hd?'on':'')+'" onclick="setHideSyncDiag(1)">On</button>';
     h+='<button type="button" class="'+(hd?'':'on')+'" onclick="setHideSyncDiag(0)">Off</button>';
+    h+='</div>';
+  } else if(key==='hideConflictDecisions'){
+    const hc=!!S.prefs.hideConflictDecisions;
+    h+='<h4>Hide conflict decisions</h4>';
+    h+='<p class="optHint">When On, sync conflict resolution events are hidden from the Activity Feed. This is independent of "Hide sync & diagnostic events". Turn Off to see conflict history for debugging.</p>';
+    h+='<div class="optChoices">';
+    h+='<button type="button" class="'+(hc?'on':'')+'" onclick="setHideConflictDecisions(1)">On</button>';
+    h+='<button type="button" class="'+(hc?'':'on')+'" onclick="setHideConflictDecisions(0)">Off</button>';
     h+='</div>';
   }
   h+='<button class="btn ghost optClose" type="button" onclick="closeOpt()">Done</button>';
@@ -5981,8 +6056,9 @@ async function confirmRestore(id){
     if(events.length > 0 && typeof indexedDB !== "undefined"){
       const merge = eventMergeFilter(events, existingUidSet, existingSigSet);
       const add = merge.add, skipped = merge.skipped;
-      await bulkAddEvents(add);
-      logEvent({kind: 'restore', taskTitle: 'Restore from snapshot', notes: 'Restored ' + add.length + ' events (' + skipped + ' already present, skipped)'});
+      const bulkResult = await bulkAddEvents(add);
+      const added = bulkResult.added;
+      logEvent({kind: 'restore', taskTitle: 'Restore from snapshot', notes: 'Restored ' + added + ' events (' + skipped + ' already present, skipped)'});
     }
 
     closeSheet();

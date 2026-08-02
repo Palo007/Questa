@@ -14,11 +14,21 @@ Rules (mirror of the app state schema — keep in sync with AGENTS.md):
   charHistory           : key=date,    ts=date       -> union, de-dup by date
   deletions (tombstone) : key=id,      ts=at         -> union, newest at wins
   events                : key=id,      ts=ts         -> union by id (disjoint epochs)
+    New fields on conflictResolved events (2026-08-02 sync-eventlog-hardening-v2):
+      winnerDev, loserDev, reason  (device-relative, preferred over legacy
+      winner/loser). These are just additional properties — union-by-id keeps them.
+    New diagnostic event kinds:
+      evtWatermarkRepaired, evtPushBlocked, evtPushShrinkBlocked
   prefs                 : key=pref key,ts=__savedAt  -> union, newest export wins
     prefs.autoBackupEnabled : 4-tier backup toggle {fourHour,daily,weekly,monthly}
       (boolean per tier). Added 2026-07-23. Sync-excluded (prefs never sync via
       syncSubset()). Handled generically by the prefs dict merge — no special rule.
       Legacy prefs.exportIntervalDays is preserved for backward compat but unused.
+    prefs.hideConflictDecisions : boolean (default false). Added 2026-08-02.
+      Toggles visibility of conflictResolved events in Activity Feed. Independent
+      of hideSyncDiag. Handled generically by prefs dict merge.
+    prefs.hideSyncDiag : boolean (default true). Toggles visibility of lifecycle/
+      storagePersist/diagnostic events in Activity Feed. Handled generically.
   habiticaHistory       : present-in-any              -> kept
   monthlyBackups        : union of strings
   top meta __seq/__savedAt/__hlcLast/version : max across inputs
@@ -89,6 +99,7 @@ def _detok_events(env):
         "ls": "liveSeq", "wn": "winner", "lo": "loser", "ctt": "charTitle",
         "dyy": "day", "lt": "late", "o": "source", "sy": "synthetic",
         "rc": "repCounted", "in": "inferred",
+        "wd": "winnerDev", "ld": "loserDev", "rn": "reason",
     }
     out = []
     for o in e:

@@ -113,7 +113,7 @@ function makeCtx(opts) {
     startDay: function () {},
     getEvents: function (o) { calls.getEvents++; return (opts.getEvents || function () { return Promise.resolve([]); })(o); },
     clearAllEvents: function () { calls.clearAllEvents++; return Promise.resolve(true); },
-    bulkAddEvents: function (list) { calls.bulkAddEvents.push(list); return Promise.resolve(list.length); },
+    bulkAddEvents: function (list) { calls.bulkAddEvents.push(list); return Promise.resolve({added: list.length, failed: 0, aborted: false}); },
     logEvent: function (rec) { calls.logEvent.push(rec); },
     alertDialog: function (title, text, html) { calls.alertDialog.push({ title: title, text: text, html: html }); },
     // Stubs: eventImportSummary/*Text/*HTML are display-only reconciliation

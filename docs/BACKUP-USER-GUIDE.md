@@ -16,9 +16,11 @@ Questa protects your progress with a three-tier backup system. **Tier 1** keeps 
 ## Tier 1 — Automatic Local Snapshots
 
 ### What it is
+
 Questa stores rolling backups inside your browser's **IndexedDB** (a local database on your device). These are separate from your live `localStorage` state, so a corrupted edit or a bad day's damage can be rolled back.
 
 ### When a snapshot is created
+
 A snapshot is written automatically when **all** of these are true:
 1. You **changed something** (added a task, checked a habit, completed a daily, etc.). The app tracks this with an internal "dirty" flag set on every save.
 2. The app detects you are leaving — either the tab becomes hidden (`visibilitychange`) or the page is being unloaded (`pagehide`).
@@ -32,12 +34,14 @@ Additionally, on app **startup**:
 > **Nuance:** Snapshots are only written when you actually changed data. If you just opened and closed the app without editing, no new snapshot is made (the dirty flag stays false). This avoids useless duplicates.
 
 ### Full vs. Delta snapshots
+
 - **Full snapshot** — contains your complete app state **plus the entire event history** (all analytics events). Created when no baseline exists yet, or as a fallback.
 - **Delta snapshot** — contains your current state **plus only the events since the last full snapshot**. Smaller and faster.
 
 > **Why events are embedded:** Questa prunes old live events after 18 months. By embedding the event list inside each snapshot, backups stay self-contained and are **not corrupted** when the live app prunes old events. A full snapshot is a complete standalone archive; a delta is a partial archive that needs its baseline to be fully meaningful.
 
 ### Write-then-verify integrity
+
 Every snapshot is checked immediately after writing:
 1. The record is written to IndexedDB.
 2. It is read back and its SHA-256 hash is recomputed.
@@ -47,6 +51,7 @@ Every snapshot is checked immediately after writing:
 Only **verified** snapshots appear in the restore picker.
 
 ### GFS rotation (automatic cleanup)
+
 To bound storage space, old snapshots are pruned on app startup using a **Grandfather-Father-Son** scheme:
 - Keep the **newest 7 daily** snapshots (one per calendar day).
 - Keep up to **4 weekly** snapshots.
@@ -58,6 +63,7 @@ The single newest snapshot is always kept regardless of age.
 > **Nuance:** Rotation only deletes snapshots that don't fit the retention windows. Your most recent backup is never pruned.
 
 ### Where the data lives
+
 IndexedDB store named `backups`, inside the same browser/profile where you use Questa. It is **device-local and browser-local** — clearing site data or using a different browser/profile will not have these snapshots.
 
 ---
@@ -65,21 +71,25 @@ IndexedDB store named `backups`, inside the same browser/profile where you use Q
 ## Tier 2 — Off-Device Export
 
 ### What it is
+
 A manual export that produces a single `.json` file you can save anywhere (Google Drive, Files app, email to yourself). This is your safety net against device loss or clearing browser data.
 
 ### How to export
+
 1. Open **Settings** (gear icon).
 2. Tap **Export**.
 3. On supported mobile browsers, the native **Share sheet** opens (share to Drive, Files, etc.).
 4. If sharing isn't available, the file downloads automatically (`questa-backup-YYYYMMDD-HHMM.json`).
 
 ### What the export file contains
+
 - Your full app state (`S`).
 - All analytics events (`events` array).
 - A `_backup` block with metadata: `exportedAt`, `appVersion`, `eventCount`, item counts, and `lastActivityAt`.
 - A **SHA-256 hash** of the file contents (computed before the hash field is added, then injected).
 
 ### Staleness nudge
+
 The Settings gear icon (⚙) blinks red when your last off-device export is more than 7 days old (or you've never exported). There is no text label — the red blink is the reminder. After a successful Export, the app records the export timestamp and the gear stops blinking.
 
 Settings also shows a **"Last full backup: [date & time]"** line in the footer (or "None" if no full snapshot exists yet) — this is the date of your last **Tier 1 snapshot** (local backup), not your last off-device export. This tells you exactly when your last complete baseline was made, separate from the delta snapshots that happen daily. A **"Last export: [date & time]"** line (or "None") appears right alongside it — this tracks your last Tier 2 off-device export, so you can see both dates at a glance.
@@ -91,11 +101,13 @@ Settings also shows a **"Last full backup: [date & time]"** line in the footer (
 ## Tier 3 — Scheduled Dropbox Backups
 
 ### What it is
+
 The same full export as Tier 2, uploaded to Dropbox automatically on cadences you choose — so an off-device copy exists even in the weeks you forget to tap Export. Requires Dropbox to be connected (Settings → Connect Dropbox). Off by default.
 
 This is a **different feature from ordinary Dropbox sync**, which keeps devices in step by merging a lean subset of your data into `state.json`. Tier 3 uploads complete, standalone snapshots that are never merged. See `SYNC-USER-GUIDE.md` for sync itself.
 
 ### How to turn it on
+
 Settings → **Auto-backup to Dropbox** → tick any combination of four independent cadences:
 
 | Cadence | Fires | How many kept |
@@ -108,9 +120,11 @@ Settings → **Auto-backup to Dropbox** → tick any combination of four indepen
 They stack rather than override: Daily + Monthly gives you a rolling week of dailies *and* four months of monthlies, each in its own rotating window, so the frequent tier can't crowd out the coarse one. Ticking a cadence uploads a first backup on the next sync rather than waiting for the window to come round.
 
 ### Where the files go
+
 A `/questa-backups/` folder in your Dropbox app folder, named `<cadence>-<device>-<slot>-<date>-<time>.json`, e.g. `daily-123456-03-20260729-2041.json`. The device id in the name means several devices can back up to one Dropbox without overwriting each other. Within a cadence the slot numbers cycle, so the oldest copy is the one eventually replaced.
 
 ### Nuances worth knowing
+
 - **The tick-boxes are per device and are deliberately not synced.** Enabling Monthly on your desktop does not enable it on your phone — set them on each device you want backing up.
 - **There's no background clock.** The check rides along with ordinary sync (which runs on change, tab switch, and reconnect), so a backup fires shortly after its window opens, not at the stroke of midnight. If Questa was closed, overdue backups run next time you open it and a sync succeeds.
 - **Missed windows don't stack.** Three weeks closed gives you one catch-up backup per cadence, not twenty.
@@ -119,6 +133,7 @@ A `/questa-backups/` folder in your Dropbox app folder, named `<cadence>-<device
 > **If you switched this on before 29 July 2026, check your Dropbox.** Only the **4-hourly** cadence actually worked until then. Daily, Weekly and Monthly could be ticked and appeared enabled, but a scheduling bug meant they never fired — if those were your only ticked cadences, nothing was ever uploaded. Fixed in `v2026.07.29-2041`. Open `/questa-backups/` once to confirm files are now appearing.
 
 ### Recovering from a Tier 3 file
+
 Download any file from `/questa-backups/` and use Settings → **Import**. The format is identical to a Tier 2 export, hash verification included — see Option B below.
 
 ---
@@ -126,6 +141,7 @@ Download any file from `/questa-backups/` and use Settings → **Import**. The f
 ## Restoring Your Data
 
 ### Option A — Restore from a local Tier 1 snapshot
+
 1. Settings → **Restore Local Snapshot**.
 2. A list of **verified** snapshots appears, each showing date/time, type (Full/Delta), event count, and size.
 3. Tap **Restore** on the one you want.
@@ -137,6 +153,7 @@ Download any file from `/questa-backups/` and use Settings → **Import**. The f
 > **Nuance:** Only verified snapshots are offered. If you see "No verified local snapshots found," you haven't triggered any yet — make an edit, then open Settings (which creates one) and tap Restore.
 
 ### Option B — Import a Tier 2 export file
+
 1. Settings → **Import**.
 2. Choose your `questa-backup-*.json` file.
 3. Questa **validates the hash**: it recomputes the SHA-256 over the file (excluding the hash field) and compares it to the stored hash.
@@ -162,21 +179,27 @@ Download any file from `/questa-backups/` and use Settings → **Import**. The f
 ## Examples
 
 ### Example 1 — Normal daily use (zero effort)
+
 You check off habits, complete dailies, add a todo. You switch to another app. Questa writes a **delta** snapshot (your state + today's new events). Tomorrow the same happens. You never touch Settings. If you later botch an edit, you open Settings → Restore and pick yesterday's snapshot.
 
 ### Example 2 — First run creates a baseline
+
 Fresh install, you add your first task, then close the tab. No baseline exists, so Questa writes a **full** snapshot (state + all events). All future snapshots are deltas referencing it.
 
 ### Example 3 — Weekly off-device backup
+
 Every Sunday you open Settings, tap **Export**, and share to Google Drive. The file `questa-backup-20260709-1430.json` lands in Drive with a SHA-256 hash. If your phone is wiped, you reinstall Questa, Import that file, and everything returns exactly.
 
 ### Example 4 — Corrupted file blocked
+
 Someone edits your backup `.json` to change a task name but leaves the hash unchanged. On Import, Questa recomputes the hash, sees it doesn't match, and **refuses** with a tamper warning. Your live data is safe.
 
 ### Example 5 — Delta without baseline
+
 You restore a delta from 20 days ago, but the weekly/monthly rotation already deleted its full baseline. Questa warns "only partial data may be restored" — you proceed knowing analytics history before that delta may be incomplete, or you cancel and pick a full snapshot instead.
 
 ### Example 6 — Staleness reminder
+
 You haven't exported in 9 days. The Settings gear icon (⚙) blinks red. You tap Export, share to Files, and the gear stops blinking.
 
 ---

@@ -32,8 +32,9 @@ assert('myDevLabel variable no longer defined',
 
 // The friendly-name helper must remain wired into the event log, so we did not
 // accidentally break cross-device name display when fixing the disconnect label.
-assert('deviceDisplayName still used by the event log',
-  /deviceDisplayName\(S\.devices,e\.dev\)/.test(code));
+// T7: now uses getCachedDeviceName which internally calls deviceDisplayName
+assert('deviceDisplayName still used by the event log (via getCachedDeviceName)',
+  /getCachedDeviceName\(e\.dev\)/.test(code));
 
 // ---------------------------------------------------------------------------
 // 2. Behavioral: render the real sync-panel block and inspect the label

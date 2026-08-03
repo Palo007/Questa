@@ -88,9 +88,14 @@ const gainXpFn = extractFunction(appSrc, /^function gainXp\(xp\)\{/, 'gainXp');
 const deathFn = extractFunction(appSrc, /^function death\(\)\{/, 'death');
 const nowFn = extractFunction(appSrc, /^function now\(\)\{/, 'now');
 const charSigFn = extractFunction(appSrc, /^function _charSig\(c\)\{/, '_charSig');
+const xpToLevelFn = extractFunction(appSrc, /^function xpToLevel\(lvl\)\{/, 'xpToLevel');
+const isDailyDueTodayFn = extractFunction(appSrc, /^function isDailyDueToday\(t\)\{/, 'isDailyDueToday');
+const completeTaskFn = extractFunction(appSrc, /^function completeTask\(t, ev\)\{/, 'completeTask');
+const creditYesterdayFn = extractFunction(appSrc, /^function creditYesterday\(t\)\{/, 'creditYesterday');
 
 // Build test code
 const code = [
+  'const DIFF = { trivial:0.1, easy:1, medium:1.5, hard:2, log:0 };',
   escFn,
   settingRowFn + '\n' + closeOptFn,
   setPauseFn,
@@ -111,7 +116,11 @@ const code = [
   deathFn,
   nowFn,
   charSigFn,
-  'return { esc, settingRow, closeOpt, setPause, ensureUiPrefs, save, dayStamp, clamp, valueDelta, missDamage, takeDamage, logHistory, logEvent, logCharSnapshot, runCron, isDailyDueOn, completionReward, gainXp, death, now, uid, _charSig };'
+  xpToLevelFn,
+  isDailyDueTodayFn,
+  completeTaskFn,
+  creditYesterdayFn,
+  'return { esc, settingRow, closeOpt, setPause, ensureUiPrefs, save, dayStamp, clamp, valueDelta, missDamage, takeDamage, logHistory, logEvent, logCharSnapshot, runCron, isDailyDueOn, completionReward, gainXp, death, now, uid, _charSig, xpToLevel, isDailyDueToday, completeTask, creditYesterday };'
 ].join('\n');
 
 // Stub S
@@ -159,6 +168,7 @@ const sandbox = {
   Array: Array, Object: Object, Number: Number, String: String, Boolean: Boolean, Promise: Promise,
   logEvent: noop, toast: noop, render: noop, esc: function(x){ return x; }, save: noop,
   uid: function(){ return 'x'; }, idbOpen: function(){ return Promise.resolve(null); },
+  buzz: noop, bumpAvatar: noop, floatFx: noop, fxGain: noop, levelFlash: noop,
   _charSig: function(c){ if(!c) return ""; var o={}; for(var k in c){ if(k!=="updatedAt") o[k]=c[k]; } try{ return JSON.stringify(o); }catch(e){ return ""; } },
   _prevCharSig: null,
   IS_DIRTY: false,
@@ -177,7 +187,68 @@ const fn = new vm.Script(
 
 const api = fn(S, sandbox.document, sandbox.window, sandbox.setTimeout, sandbox.clearTimeout, sandbox.Object, sandbox.console, sandbox.JSON, sandbox.Math, sandbox.Date, sandbox.Map, sandbox.Set, sandbox.WeakSet, sandbox.Array, sandbox.Number, sandbox.String, sandbox.Boolean, sandbox.Promise, sandbox.logEvent, sandbox.toast, sandbox.render, sandbox.esc, sandbox.save, sandbox.uid, sandbox.localStorage, sandbox.indexedDB, sandbox.navigator, sandbox._charSig, sandbox.openSettings, sandbox.renderStats);
 
-const { esc, settingRow, closeOpt, setPause, ensureUiPrefs, save, dayStamp, clamp, valueDelta, missDamage, takeDamage, logHistory, logEvent, logCharSnapshot, runCron, isDailyDueOn, completionReward, gainXp, death, now, uid, _charSig } = api;
+const { esc, settingRow, closeOpt, setPause, ensureUiPrefs, save, dayStamp, clamp, valueDelta, missDamage, takeDamage, logHistory, logEvent, logCharSnapshot, runCron, isDailyDueOn, completionReward, gainXp, death, now, uid, _charSig, xpToLevel, isDailyDueToday, completeTask, creditYesterday } = api;
+
+// =========================================================================
+// Test 6: streak growth freezes while paused (review P1-3 fix)
+// completeTask / creditYesterday must gate ONLY the streak increment on
+// !S.prefs.paused -- XP/gold/history/reward recording stays unconditional.
+// =========================================================================
+function freshDaily(id){
+  return { id:id, type:'daily', title:'Daily '+id, difficulty:'medium', value:0,
+           streak:3, checklist:[], repeat:[1,1,1,1,1,1,1], history:[] };
+}
+function freshChar(){ return { hp:50, maxHp:50, xp:0, lvl:1, gold:0, mp:0, name:'Test', face:'🧙', cls:'Wizard' }; }
+
+// 6a. completeTask while paused: streak frozen, rewards still granted
+{
+  S.prefs.paused = true;
+  const t = freshDaily('d-pause-ct');
+  S.tasks = [t];
+  S.char = freshChar();
+  completeTask(t, { clientX:0, clientY:0 });
+  assert('6a paused: completeTask(daily) leaves streak unchanged', t.streak === 3);
+  assert('6a paused: completeTask(daily) still grants XP', S.char.xp > 0);
+  assert('6a paused: completeTask(daily) still marks done', t.done === true);
+  assert('6a paused: completeTask(daily) still records history point',
+    Array.isArray(t.history) && t.history.length >= 1 && t.history[t.history.length-1].completed === true);
+}
+
+// 6b. completeTask while unpaused: streak increments by exactly 1
+{
+  S.prefs.paused = false;
+  const t = freshDaily('d-open-ct');
+  S.tasks = [t];
+  S.char = freshChar();
+  completeTask(t, { clientX:0, clientY:0 });
+  assert('6b unpaused: completeTask(daily) increments streak by exactly 1', t.streak === 4);
+  assert('6b unpaused: completeTask(daily) still grants XP', S.char.xp > 0);
+  assert('6b unpaused: completeTask(daily) marks done', t.done === true);
+}
+
+// 6c. creditYesterday while paused: streak frozen, rewards credited, done
+{
+  S.prefs.paused = true;
+  const t = freshDaily('d-pause-cy');
+  S.tasks = [t];
+  S.char = freshChar();
+  creditYesterday(t);
+  assert('6c paused: creditYesterday leaves streak unchanged', t.streak === 3);
+  assert('6c paused: creditYesterday still credits XP', S.char.xp > 0);
+  assert('6c paused: creditYesterday marks done', t.done === true);
+}
+
+// 6d. creditYesterday while unpaused: streak increments by exactly 1
+{
+  S.prefs.paused = false;
+  const t = freshDaily('d-open-cy');
+  S.tasks = [t];
+  S.char = freshChar();
+  creditYesterday(t);
+  assert('6d unpaused: creditYesterday increments streak by exactly 1', t.streak === 4);
+  assert('6d unpaused: creditYesterday still credits XP', S.char.xp > 0);
+  assert('6d unpaused: creditYesterday marks done', t.done === true);
+}
 
 // Test 1: S.prefs.paused defaults to false in fresh state
 {

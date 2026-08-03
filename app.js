@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.08.03-1201";
+const APP_VERSION = "v2026.08.03-1219";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -1711,7 +1711,7 @@ function completeTask(t, ev){
   delete t.missedOn;
   buzz(50);
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };  // remember exactly what was granted
-  if(t.type==='daily'){ t.streak = (t.streak||0) + 1;
+  if(t.type==='daily'){ if(!S.prefs.paused) t.streak = (t.streak||0) + 1;
     const cl=(t.checklist||[]); const snap = cl.length? {checklist:cl.map(c=>({text:c.text,done:!!c.done}))} : {};
     logHistory(t,Object.assign({value:t.value,completed:true,isDue:true,reward:Object.assign({},t._gr),repeat:(t.repeat||[]).slice()},snap));
     // isDue:true is safe here: non-due dailies are gated above
@@ -1964,7 +1964,7 @@ function creditYesterday(t){
   t.doneAt = Date.now() - 86400000; // F3: backdated to match the history point below (yMs) — this IS yesterday's completion
   delete t.missedOn;
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };
-  t.streak = (t.streak||0) + 1;
+  if(!S.prefs.paused) t.streak = (t.streak||0) + 1;
   const cl=(t.checklist||[]);
   const yMs = Date.now() - 86400000; // backdate the point to yesterday
   t.history = t.history || [];

@@ -373,6 +373,95 @@ const tokenizeCode = [
   assert('export/import round-trip preserves prefs.paused', detok.prefs.paused === true);
 }
 
+// =========================================================================
+// Test 4: openOpt('pause') renders the pause chooser (review P0-1 fix)
+// =========================================================================
+// Structural: openOpt has a pause branch wired to setPause(1)/setPause(0)
+assert('openOpt handles key===\'pause\'',
+  /key==='pause'/.test(appSrc));
+assert('openOpt pause branch calls setPause(1) and setPause(0)',
+  /setPause\(1\)/.test(appSrc) && /setPause\(0\)/.test(appSrc));
+
+// Behavioral: extract the real width + pause branches (brace-balanced) and
+// render them through a minimal openOpt wrapper writing to #optMenu, exactly
+// like tests/auto-backup-settings-ui.test.js does for the autoBackup branch.
+const widthBlock = extractBraceBody(appSrc, /if\(key==='width'\)\{\s*$/, 'openOpt width branch');
+const pauseBlock = extractBraceBody(appSrc, /else if\(key==='pause'\)\{\s*$/, 'openOpt pause branch');
+
+const pauseOpenOptCode = [
+  'function openOpt(key){',
+  '  var h="";',
+  '  if(key==="width"){',
+  widthBlock,
+  '  } else if(key==="pause"){',
+  pauseBlock,
+  '  }',
+  '  document.getElementById("optMenu").innerHTML=h;',
+  '  document.getElementById("optScrim").classList.add("show");',
+  '}',
+  'return openOpt;'
+].join('\n');
+
+function makePauseEl(id) { return { _id: id, innerHTML: '', classList: { add: noop, remove: noop } }; }
+const pauseStore = {};
+const pauseDoc = {
+  getElementById: function (id) { if (!pauseStore[id]) pauseStore[id] = makePauseEl(id); return pauseStore[id]; }
+};
+const pauseSandbox = {
+  S: { prefs: { paused: false, width: 480 } },
+  window: {},
+  console: console,
+  setTimeout: noop, clearTimeout: noop,
+  Object: Object, Array: Array, String: String, Number: Number, Boolean: Boolean
+};
+pauseSandbox.globalThis = pauseSandbox;
+
+// document is passed as an explicit parameter (not a context global) --
+// same pattern as tests/auto-backup-settings-ui.test.js.
+let pauseOpenOpt;
+try {
+  const pauseOpenOptFn = new vm.Script(
+    '(function(S, document, window, Object, Array, String, Number, Boolean){ "use strict";\n' +
+    pauseOpenOptCode + '\n})'
+  ).runInNewContext(pauseSandbox);
+  pauseOpenOpt = pauseOpenOptFn(pauseSandbox.S, pauseDoc, pauseSandbox.window, Object, Array, String, Number, Boolean);
+} catch (e) { console.error('openOpt pause VM error:', e); process.exit(1); }
+
+// paused=false -> Off button active
+pauseOpenOpt('pause');
+const pauseHtmlOff = pauseStore['optMenu'].innerHTML;
+assert('openOpt("pause") renders "Pause tracking" heading',
+  pauseHtmlOff.includes('Pause tracking'));
+assert('openOpt("pause") renders an optHint paragraph',
+  /<p class="optHint">/.test(pauseHtmlOff));
+assert('openOpt("pause") has an optChoices div',
+  pauseHtmlOff.includes('class="optChoices"'));
+assert('openOpt("pause") has On button calling setPause(1)',
+  pauseHtmlOff.includes('onclick="setPause(1)"'));
+assert('openOpt("pause") has Off button calling setPause(0)',
+  pauseHtmlOff.includes('onclick="setPause(0)"'));
+assert('when paused=false, On button does NOT have "on" class',
+  !/<button type="button" class="on" onclick="setPause\(1\)"/.test(pauseHtmlOff));
+assert('when paused=false, Off button HAS "on" class',
+  /<button type="button" class="on" onclick="setPause\(0\)"/.test(pauseHtmlOff));
+
+// paused=true -> On button active
+pauseSandbox.S.prefs.paused = true;
+pauseOpenOpt('pause');
+const pauseHtmlOn = pauseStore['optMenu'].innerHTML;
+assert('when paused=true, On button HAS "on" class',
+  /<button type="button" class="on" onclick="setPause\(1\)"/.test(pauseHtmlOn));
+assert('when paused=true, Off button does NOT have "on" class',
+  !/<button type="button" class="on" onclick="setPause\(0\)"/.test(pauseHtmlOn));
+
+// width branch must NOT leak pause markup
+pauseOpenOpt('width');
+const widthHtml = pauseStore['optMenu'].innerHTML;
+assert('openOpt("width") does NOT contain "Pause tracking"',
+  !widthHtml.includes('Pause tracking'));
+assert('openOpt("width") does NOT contain setPause',
+  !widthHtml.includes('setPause'));
+
 // Summary
 if (failures > 0) {
   console.error('\n' + failures + ' test(s) failed');

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.08.03-1430";
+const APP_VERSION = "v2026.08.03-1150";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -5628,6 +5628,15 @@ function openOpt(key){
     h+='<div class="optChoices">';
     h+='<button type="button" class="'+(hc?'on':'')+'" onclick="setHideConflictDecisions(1)">On</button>';
     h+='<button type="button" class="'+(hc?'':'on')+'" onclick="setHideConflictDecisions(0)">Off</button>';
+    h+='</div>';
+  }
+  else if(key==='pause'){
+    const pv=!!S.prefs.paused;
+    h+='<h4>Pause tracking</h4>';
+    h+='<p class="optHint">When On, your character does not lose HP and your streak counters do not break while you are away. Dailies can still be completed for rewards.</p>';
+    h+='<div class="optChoices">';
+    h+='<button type="button" class="'+(pv?'on':'')+'" onclick="setPause(1)">On</button>';
+    h+='<button type="button" class="'+(pv?'':'on')+'" onclick="setPause(0)">Off</button>';
     h+='</div>';
   }
   h+='<button class="btn ghost optClose" type="button" onclick="closeOpt()">Done</button>';

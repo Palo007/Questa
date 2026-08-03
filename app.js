@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.08.03-1219";
+const APP_VERSION = "v2026.08.03-1255";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -1942,6 +1942,7 @@ function periodBoundaryCrossed(freq, lastStamp, now){
 // same scheduledYesterday test runCron() uses, so the two stay in sync.
 function missedYesterdayDailies(){
   if(S.lastCron === dayStamp(new Date())) return []; // already crossed today
+  const _yStamp=dayStamp(new Date(Date.now()-86400000)); if((S.prefs.pausedDays||[]).includes(_yStamp)) return [];
   const dow = new Date().getDay();
   return S.tasks.filter(t=>{
     if(t.type!=='daily') return false;
@@ -2034,28 +2035,33 @@ function startDay(){
 // yesterdayStamp is also local. Cross-TZ merge arbitrates via resolveDailyConflict
 // (sync.js) — newer event-day wins. NOT vm-testable (DOM, C12 gap);
 // coverage: code review + tests/daystamp.test.js cross-TZ tests (T1-T4).
+function _resetDailies(){
+  S.tasks.forEach(t=>{
+    if(t.type==='daily'){
+      t.done = false;
+      (t.checklist||[]).forEach(c=>c.done=false);
+    }
+  });
+}
 function runCron(){
   const today = dayStamp(new Date());
   if(S.lastCron === today) return;
   if(S.prefs.paused){
     S.lastCron = today;
-    S.tasks.forEach(t=>{
-      if(t.type==='daily'){
-        t.done = false;
-        (t.checklist||[]).forEach(c=>c.done=false);
-      }
-    });
+    S.prefs.pausedDays=((S.prefs.pausedDays||[]).concat([today])).filter((v,i,a)=>a.indexOf(v)===i).slice(-7);
+    _resetDailies();
     save();
     return;
   }
   const dow = new Date().getDay();
   const yesterdayStamp = dayStamp(new Date(Date.now() - 86400000)); // F3: device-local calendar day before today, for t.missedOn
+  const _cov=(S.prefs.pausedDays||[]).includes(yesterdayStamp);
   let totalDmg = 0;
   S.tasks.forEach(t=>{
     if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; } return; } // F3 (2026-07-11): cron no longer bumps updatedAt — see .omo/plans/2026-07-11-cron-merge-recency.md §3.1.4
     if(t.type!=='daily') return;
     const scheduledYesterday = isDailyDueOn(t, (dow+6)%7);  // intentional YESTERDAY test — do NOT use isDailyDueToday
-    if(scheduledYesterday && !t.done){
+    if(scheduledYesterday && !t.done && !_cov){
       const dmg = missDamage(t);
       totalDmg += dmg;
       t.value = clamp(t.value - valueDelta(t.value), -47.27, 99);
@@ -2068,13 +2074,12 @@ function runCron(){
                 repeat:(t.repeat||[]).slice(),
                 checklist:cl.map(c=>({id:c.id||null,text:c.text,done:!!c.done}))});
     }
-    t.done = false;
-    (t.checklist||[]).forEach(c=>c.done=false); // F4 (2026-07-11): never stamps touchedAt here either — cron is not a user edit; see mergeChecklist (sync.js)
     // F3 (2026-07-11): no updatedAt bump here any more — cron is a deterministic
     // day-boundary transform, not a user edit; recency must encode user intent
     // only, or it swallows same-day completions in mergeCollection's both-changed
     // tiebreak (see .omo/plans/2026-07-11-cron-merge-recency.md §1-§3).
   });
+  _resetDailies(); // F4 (2026-07-11): never stamps touchedAt here either — cron is not a user edit; see mergeChecklist (sync.js)
   S.lastCron = today;
   if(totalDmg>0){ takeDamage(totalDmg); toast('-'+totalDmg.toFixed(1)+' HP (missed dailies)'); }
   logCharSnapshot();

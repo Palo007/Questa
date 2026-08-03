@@ -92,6 +92,8 @@ const xpToLevelFn = extractFunction(appSrc, /^function xpToLevel\(lvl\)\{/, 'xpT
 const isDailyDueTodayFn = extractFunction(appSrc, /^function isDailyDueToday\(t\)\{/, 'isDailyDueToday');
 const completeTaskFn = extractFunction(appSrc, /^function completeTask\(t, ev\)\{/, 'completeTask');
 const creditYesterdayFn = extractFunction(appSrc, /^function creditYesterday\(t\)\{/, 'creditYesterday');
+const resetDailiesFn = extractFunction(appSrc, /^function _resetDailies\(\)\{/, '_resetDailies');
+const missedYesterdayDailiesFn = extractFunction(appSrc, /^function missedYesterdayDailies\(\)\{/, 'missedYesterdayDailies');
 
 // Build test code
 const code = [
@@ -120,7 +122,9 @@ const code = [
   isDailyDueTodayFn,
   completeTaskFn,
   creditYesterdayFn,
-  'return { esc, settingRow, closeOpt, setPause, ensureUiPrefs, save, dayStamp, clamp, valueDelta, missDamage, takeDamage, logHistory, logEvent, logCharSnapshot, runCron, isDailyDueOn, completionReward, gainXp, death, now, uid, _charSig, xpToLevel, isDailyDueToday, completeTask, creditYesterday };'
+  resetDailiesFn,
+  missedYesterdayDailiesFn,
+  'return { esc, settingRow, closeOpt, setPause, ensureUiPrefs, save, dayStamp, clamp, valueDelta, missDamage, takeDamage, logHistory, logEvent, logCharSnapshot, runCron, isDailyDueOn, completionReward, gainXp, death, now, uid, _charSig, xpToLevel, isDailyDueToday, completeTask, creditYesterday, _resetDailies, missedYesterdayDailies };'
 ].join('\n');
 
 // Stub S
@@ -187,7 +191,7 @@ const fn = new vm.Script(
 
 const api = fn(S, sandbox.document, sandbox.window, sandbox.setTimeout, sandbox.clearTimeout, sandbox.Object, sandbox.console, sandbox.JSON, sandbox.Math, sandbox.Date, sandbox.Map, sandbox.Set, sandbox.WeakSet, sandbox.Array, sandbox.Number, sandbox.String, sandbox.Boolean, sandbox.Promise, sandbox.logEvent, sandbox.toast, sandbox.render, sandbox.esc, sandbox.save, sandbox.uid, sandbox.localStorage, sandbox.indexedDB, sandbox.navigator, sandbox._charSig, sandbox.openSettings, sandbox.renderStats);
 
-const { esc, settingRow, closeOpt, setPause, ensureUiPrefs, save, dayStamp, clamp, valueDelta, missDamage, takeDamage, logHistory, logEvent, logCharSnapshot, runCron, isDailyDueOn, completionReward, gainXp, death, now, uid, _charSig, xpToLevel, isDailyDueToday, completeTask, creditYesterday } = api;
+const { esc, settingRow, closeOpt, setPause, ensureUiPrefs, save, dayStamp, clamp, valueDelta, missDamage, takeDamage, logHistory, logEvent, logCharSnapshot, runCron, isDailyDueOn, completionReward, gainXp, death, now, uid, _charSig, xpToLevel, isDailyDueToday, completeTask, creditYesterday, _resetDailies, missedYesterdayDailies } = api;
 
 // =========================================================================
 // Test 6: streak growth freezes while paused (review P1-3 fix)
@@ -652,6 +656,136 @@ assert('openOpt("width") does NOT contain "Pause tracking"',
   !widthHtml.includes('Pause tracking'));
 assert('openOpt("width") does NOT contain setPause',
   !widthHtml.includes('setPause'));
+
+// =========================================================================
+// Test 7: runCron + missedYesterdayDailies pause-day accounting (P1-4 fix)
+// Deterministic day stamps: the sandbox `Date` is a fake whose clock reads
+// the module-level `cronNow`. Mutate cronNow to simulate day progression.
+// Day X is the local calendar day of CRON_BASE; X+1 = next day, X-1 = prior.
+// =========================================================================
+const CRON_BASE = Date.UTC(2026, 7, 3, 12, 0, 0); // fixed noon, local day = X
+let cronNow = CRON_BASE;
+class FakeDate extends Date {
+  constructor(...args){ if (args.length === 0) super(cronNow); else super(...args); }
+  static now(){ return cronNow; }
+}
+const ds = d => d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate();
+const X   = ds(new Date(CRON_BASE));
+const Xm1 = ds(new Date(CRON_BASE - 86400000));
+const Xp1 = ds(new Date(CRON_BASE + 86400000));
+
+function makeCronSandbox(){
+  const S2 = {
+    prefs: { paused: false, pausedDays: [], width: 480, filter: {}, sort: {}, tagFilter: {}, filterOpen: false, scroll: {} },
+    tasks: [], rewards: [], tags: [], devices: [],
+    char: { hp: 50, maxHp: 50, xp: 0, lvl: 1, gold: 0, mp: 0, name: 'Test', face: '🧙', cls: 'Wizard' },
+    lastCron: 0, history: [], charHistory: [], monthlyBackups: [], deletions: [], events: []
+  };
+  const sb = { ...sandbox, S: S2, Date: FakeDate };
+  sb.globalThis = sb;
+  const f = new vm.Script(
+    '(function(S, document, window, setTimeout, clearTimeout, Object, console, JSON, Math, Date, Map, Set, WeakSet, Array, Number, String, Boolean, Promise, logEvent, toast, render, esc, save, uid, localStorage, indexedDB, navigator, _charSig, openSettings, renderStats){ "use strict";\n' +
+    code + '\n})'
+  ).runInNewContext(sb);
+  const a = f(S2, sb.document, sb.window, sb.setTimeout, sb.clearTimeout, sb.Object, sb.console, sb.JSON, sb.Math, sb.Date, sb.Map, sb.Set, sb.WeakSet, sb.Array, sb.Number, sb.String, sb.Boolean, sb.Promise, sb.logEvent, sb.toast, sb.render, sb.esc, sb.save, sb.uid, sb.localStorage, sb.indexedDB, sb.navigator, sb._charSig, sb.openSettings, sb.renderStats);
+  return { S: S2, api: a };
+}
+function freshCronDaily(id){
+  return { id:id, type:'daily', title:'Daily '+id, difficulty:'medium', value:0,
+           streak:3, checklist:[], repeat:[1,1,1,1,1,1,1], history:[], done:false };
+}
+
+// 7a. Paused cron on day X: lastCron advances, daily reset, hp unchanged,
+//     pausedDays stamped with X, no missedOn, streak unchanged.
+{
+  cronNow = CRON_BASE;
+  const { S, api } = makeCronSandbox();
+  S.prefs.paused = true;
+  S.lastCron = Xm1;
+  const t = freshCronDaily('d-pause7a');
+  t.done = true;
+  S.tasks = [t];
+  S.char = { hp:50, maxHp:50, xp:0, lvl:1, gold:0, mp:0, name:'Test', face:'🧙', cls:'Wizard' };
+  api.runCron();
+  assert('7a paused cron: lastCron advances to today (X)', S.lastCron === X);
+  assert('7a paused cron: daily reset (done=false)', t.done === false);
+  assert('7a paused cron: hp unchanged (no damage)', S.char.hp === 50);
+  assert('7a paused cron: pausedDays contains X', Array.isArray(S.prefs.pausedDays) && S.prefs.pausedDays.indexOf(X) !== -1);
+  assert('7a paused cron: no missedOn stamped', t.missedOn === undefined);
+  assert('7a paused cron: streak unchanged', t.streak === 3);
+}
+
+// 7b. Unpaused cron on day X+1 with pausedDays=[X]: yesterday X is
+//     pause-covered -> no damage, no missedOn, streak unchanged, daily reset.
+{
+  cronNow = CRON_BASE + 86400000;
+  const { S, api } = makeCronSandbox();
+  S.prefs.paused = false;
+  S.prefs.pausedDays = [X];
+  S.lastCron = X;
+  const t = freshCronDaily('d-cov7b');
+  t.done = true; // was never completed -> would otherwise be missed
+  S.tasks = [t];
+  S.char = { hp:50, maxHp:50, xp:0, lvl:1, gold:0, mp:0, name:'Test', face:'🧙', cls:'Wizard' };
+  api.runCron();
+  assert('7b covered yesterday: lastCron advances to X+1', S.lastCron === Xp1);
+  assert('7b covered yesterday: no HP loss', S.char.hp === 50);
+  assert('7b covered yesterday: no missedOn', t.missedOn === undefined);
+  assert('7b covered yesterday: streak unchanged', t.streak === 3);
+  assert('7b covered yesterday: daily still reset (done=false)', t.done === false);
+}
+
+// 7c. missedYesterdayDailies returns [] when yesterday is pause-covered;
+//     control without coverage still lists the missed daily.
+{
+  cronNow = CRON_BASE + 86400000; // yesterday = X
+  const { S, api } = makeCronSandbox();
+  S.prefs.pausedDays = [X];
+  S.lastCron = Xm1; // not today -> no early return
+  S.tasks = [freshCronDaily('d-miss7c')];
+  const missed = api.missedYesterdayDailies();
+  assert('7c covered yesterday: missedYesterdayDailies() returns []', Array.isArray(missed) && missed.length === 0);
+  S.prefs.pausedDays = [];
+  const missed2 = api.missedYesterdayDailies();
+  assert('7c control unpaused: missedYesterdayDailies() still lists the missed daily', missed2.length === 1);
+}
+
+// 7d. Multi-day pause pausedDays=[X-1, X]: cron on X+1 applies zero damage.
+{
+  cronNow = CRON_BASE + 86400000;
+  const { S, api } = makeCronSandbox();
+  S.prefs.paused = false;
+  S.prefs.pausedDays = [Xm1, X];
+  S.lastCron = Xm1; // two covered days since last cron
+  const t = freshCronDaily('d-pause7d');
+  S.tasks = [t];
+  S.char = { hp:50, maxHp:50, xp:0, lvl:1, gold:0, mp:0, name:'Test', face:'🧙', cls:'Wizard' };
+  api.runCron();
+  assert('7d multi-day pause: no HP loss', S.char.hp === 50);
+  assert('7d multi-day pause: no missedOn', t.missedOn === undefined);
+  assert('7d multi-day pause: streak unchanged', t.streak === 3);
+  assert('7d multi-day pause: daily still reset (done=false)', t.done === false);
+  assert('7d multi-day pause: lastCron advances to X+1', S.lastCron === Xp1);
+}
+
+// 7e. Unpaused control: cron on X+1 with pausedDays=[] still damages a
+//     missed due daily (regression guard vs pre-fix behavior).
+{
+  cronNow = CRON_BASE + 86400000;
+  const { S, api } = makeCronSandbox();
+  S.prefs.paused = false;
+  S.prefs.pausedDays = [];
+  S.lastCron = X;
+  const t = freshCronDaily('d-open7e');
+  S.tasks = [t];
+  S.char = { hp:50, maxHp:50, xp:0, lvl:1, gold:0, mp:0, name:'Test', face:'🧙', cls:'Wizard' };
+  api.runCron();
+  assert('7e unpaused control: missed due daily takes damage', S.char.hp < 50);
+  assert('7e unpaused control: missedOn stamped with yesterday (X)', t.missedOn === X);
+  assert('7e unpaused control: streak reset to 0', t.streak === 0);
+  assert('7e unpaused control: daily reset (done=false)', t.done === false);
+  assert('7e unpaused control: lastCron advances to X+1', S.lastCron === Xp1);
+}
 
 // Summary
 if (failures > 0) {

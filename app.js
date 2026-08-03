@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.08.02-1745";
+const APP_VERSION = "v2026.08.03-1430";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -2037,6 +2037,17 @@ function startDay(){
 function runCron(){
   const today = dayStamp(new Date());
   if(S.lastCron === today) return;
+  if(S.prefs.paused){
+    S.lastCron = today;
+    S.tasks.forEach(t=>{
+      if(t.type==='daily'){
+        t.done = false;
+        (t.checklist||[]).forEach(c=>c.done=false);
+      }
+    });
+    save();
+    return;
+  }
   const dow = new Date().getDay();
   const yesterdayStamp = dayStamp(new Date(Date.now() - 86400000)); // F3: device-local calendar day before today, for t.missedOn
   let totalDmg = 0;
@@ -2111,6 +2122,7 @@ function ensureUiPrefs(){
   if(!S.prefs.tagFilter) S.prefs.tagFilter = {habits:[], dailies:[], todos:[]};
   if(S.prefs.filterOpen===undefined) S.prefs.filterOpen=false;
   if(!S.prefs.scroll) S.prefs.scroll = {};
+  if(S.prefs.paused===undefined) S.prefs.paused=false;
   return S.prefs;
 }
 ensureUiPrefs();
@@ -2185,7 +2197,14 @@ function renderStats(){
   (function(){ var a=document.getElementById('avatarFace');
     if(c.faceImg){ a.textContent=''; a.style.backgroundImage='url("'+c.faceImg+'")';
       a.style.backgroundSize='cover'; a.style.backgroundPosition='center'; }
-    else { a.style.backgroundImage=''; a.textContent=c.face; } })();
+    else { a.style.backgroundImage=''; a.textContent=c.face; }
+    // Pause indicator: sleeping avatar
+    const avatarContainer = a.closest('.avatar');
+    if(avatarContainer){
+      if(S.prefs.paused){ avatarContainer.classList.add('paused'); }
+      else { avatarContainer.classList.remove('paused'); }
+    }
+  })();
   document.getElementById('charName').textContent=c.name;
   document.getElementById('charLvl').textContent=c.lvl;
   document.getElementById('charClass').textContent=c.cls;
@@ -2196,6 +2215,21 @@ function renderStats(){
   document.getElementById('xpFill').style.width=clamp(c.xp/need*100,0,100)+'%';
   document.getElementById('xpLab').textContent=Math.floor(c.xp)+' / '+need+' XP';
   document.body.classList.toggle('lowhp', c.hp/c.maxHp <= 0.3);
+  // Pause badge near stats
+  const statsContainer = document.getElementById('statGold')?.parentElement;
+  if(statsContainer){
+    let badge = statsContainer.querySelector('.pauseBadge');
+    if(S.prefs.paused){
+      if(!badge){
+        badge = document.createElement('span');
+        badge.className = 'pauseBadge';
+        badge.textContent = '⏸️ Paused';
+        statsContainer.appendChild(badge);
+      }
+    } else if(badge){
+      badge.remove();
+    }
+  }
 }
 function metaRow(t){
   const tagsHtml = tagChips(t);
@@ -5262,6 +5296,7 @@ function openSettings(){
   h+=settingRow('notifications','Notifications','Browser-based notification permission and status.',(S.prefs.notificationsEnabled?'On':'Off'));
   h+=settingRow('hideSyncDiag','Hide sync & diagnostic events','Hide background sync (conflict resolved) and diagnostic events from the Activity Feed. Task activity and exports stay visible.',(S.prefs.hideSyncDiag?'On':'Off'));
   h+=settingRow('hideConflictDecisions','Hide conflict decisions','Hide sync conflict resolution events from the Activity Feed. Turn Off to see conflict history for debugging.',(S.prefs.hideConflictDecisions?'On':'Off'));
+  h+=settingRow('pause','Pause tracking','Prevent HP loss and streak breaks when you are away. Dailies can still be completed for rewards.',S.prefs.paused?'On':'Off');
   h+='</div>';
   const syncTip='Sync via Dropbox (your account, no server) keeps this device and your other devices up to date automatically.';
   h+='<div class="colTitle"><h2 style="font-size:13px;flex:none">Sync</h2>'+infoIcon('Sync\n'+syncTip)+'</div>';
@@ -5402,6 +5437,7 @@ function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.m
 function setSaveBtnTop(n){ S.prefs.saveBtnTop=!!n; save(); closeOpt(); if(EDIT) drawSheet(); else if(REDIT) openReward(REDIT.id); openSettings(); }
 function setExportIntervalDays(){ /* retained as defensive no-op; no live callers after autoBackup migration */ }
 function setAutoBackupTiers(patch){ S.prefs.autoBackupEnabled = Object.assign({}, S.prefs.autoBackupEnabled||{fourHour:false,daily:false,weekly:false,monthly:false}, patch); save(); closeOpt(); openSettings(); }
+function setPause(n){ S.prefs.paused=!!n; save(); closeOpt(); openSettings(); renderStats(); }
 function setCharName(v){ S.char.name=(v||'').trim()||'Adventurer'; save(); renderStats(); }
 function setDeviceName(v){
   if(typeof syncDeviceId!=="function") return;

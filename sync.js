@@ -393,6 +393,7 @@ function deepEqual(a, b){ return stableStringify(a) === stableStringify(b); }
 // though today it is always []. Do not confuse this with t.history.
 function syncSubset(){
   const an = (S.prefs && S.prefs.an) ? { views: S.prefs.an.views || [], metrics: S.prefs.an.metrics || [] } : { views: [], metrics: [] };
+  const pause = { paused: !!(S.prefs && S.prefs.paused), pausedDays: (S.prefs && Array.isArray(S.prefs.pausedDays)) ? S.prefs.pausedDays : [], at: (S.prefs && S.prefs.pausedAt) || 0 };
   const raw = {
     char: S.char || {},
     tasks: S.tasks || [],
@@ -403,6 +404,7 @@ function syncSubset(){
     history: S.history || [],
     charHistory: S.charHistory || [],
     an: an,
+    pause: pause,
     monthlyBackups: S.monthlyBackups || [],
     deletions: S.deletions || []
   };
@@ -450,6 +452,11 @@ function syncApply(subset){
     S.prefs.an = S.prefs.an || {};
     S.prefs.an.views = (subset.an && Array.isArray(subset.an.views)) ? subset.an.views : [];
     S.prefs.an.metrics = (subset.an && Array.isArray(subset.an.metrics)) ? subset.an.metrics : [];
+    if(subset.pause){
+      S.prefs.paused = !!subset.pause.paused;
+      S.prefs.pausedDays = Array.isArray(subset.pause.pausedDays) ? subset.pause.pausedDays.slice() : [];
+      S.prefs.pausedAt = subset.pause.at || 0;
+    }
     const _after = (typeof syncSubset === "function") ? stableStringify(syncSubset()) : null;
     const _changed = (_before === null || _after === null) ? true : (_before !== _after);
     if(_changed){
@@ -952,6 +959,15 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, 
       views: mergeCollection(baseAn.views, localAn.views, remoteAn.views, remoteSavedAt, localSavedAt, _tomb),
       metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics, remoteSavedAt, localSavedAt, _tomb)
     },
+    pause: (function(){
+      const baseP = base.pause || {}, localP = local.pause || {}, remoteP = remote.pause || {};
+      const lAt = Number(localP.at) || 0, rAt = Number(remoteP.at) || 0;
+      const src = (lAt >= rAt) ? localP : remoteP; // LWW by `at` (base ignored), tie -> local; same philosophy as mergedLastCron's plain-max
+      const _union = [].concat(baseP.pausedDays || [], localP.pausedDays || [], remoteP.pausedDays || [])
+        .filter(v => typeof v === "number" && isFinite(v));
+      const pausedDays = Array.from(new Set(_union)).sort((a, b) => a - b).slice(-7);
+      return { paused: !!src.paused, pausedDays: pausedDays, at: Math.max(lAt, rAt) };
+    })(),
     history: mergeDayArray(local.history, remote.history), // DEAD WORK: S.history is never populated by app.js (per-task history lives at t.history). Kept for schema compat; syncApply writes it back to S.history.
     charHistory: mergeDayArray(local.charHistory, remote.charHistory),
     monthlyBackups: (function(){

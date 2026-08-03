@@ -306,6 +306,7 @@ const { esc, settingRow, closeOpt, setPause, ensureUiPrefs, save, dayStamp, clam
     openSettings: function(){},
     renderStats: function(){},
     closeOpt: function(){},
+    now: function(){ return 7; },
     S: { prefs: { paused: false } }
   };
   vm.createContext(testSandbox);
@@ -316,16 +317,18 @@ const { esc, settingRow, closeOpt, setPause, ensureUiPrefs, save, dayStamp, clam
   
   fn2(true);
   assert('setPause(true) sets prefs.paused = true', testSandbox.S.prefs.paused === true);
+  assert('setPause(true) stamps prefs.pausedAt (LWW timestamp)', testSandbox.S.prefs.pausedAt === 7);
   
   testSandbox.S = { prefs: { paused: true } };
   fn2(false);
   assert('setPause(false) sets prefs.paused = false', testSandbox.S.prefs.paused === false);
+  assert('setPause(false) stamps prefs.pausedAt', testSandbox.S.prefs.pausedAt === 7);
 }
 
 // Test 3: export/import round-trip preserves paused
 {
   const testS = {
-    prefs: { paused: true, width: 480, filter: {}, sort: {}, tagFilter: {}, filterOpen: false, scroll: {} },
+    prefs: { paused: true, pausedDays: [20260802, 20260803], pausedAt: 12345, width: 480, filter: {}, sort: {}, tagFilter: {}, filterOpen: false, scroll: {} },
     tasks: [],
     rewards: [],
     tags: [],
@@ -371,6 +374,123 @@ const tokenizeCode = [
   const detok = _detokenizeSnapshot(tok);
 
   assert('export/import round-trip preserves prefs.paused', detok.prefs.paused === true);
+  assert('export/import round-trip preserves prefs.pausedDays',
+    Array.isArray(detok.prefs.pausedDays) && detok.prefs.pausedDays.length === 2 &&
+    detok.prefs.pausedDays[0] === 20260802 && detok.prefs.pausedDays[1] === 20260803);
+  assert('export/import round-trip preserves prefs.pausedAt', detok.prefs.pausedAt === 12345);
+}
+
+// =========================================================================
+// Test 5: pause sync across devices (review P1-2 fix)
+// =========================================================================
+// Load sync.js into a vm sandbox (strip the boot gate) exactly like
+// tests/tombstone.test.js / tests/auto-backup-sync-exclusion.test.js.
+const syncSrc = fs.readFileSync(path.join(__dirname, '../sync.js'), 'utf8')
+  .replace(/\/\* BEGIN_BOOT_GATE \*\/[\s\S]*?\/\* END_BOOT_GATE \*\//, '/* boot gate stripped for test */');
+
+const syncSandbox = {
+  window: {}, navigator: { onLine: true },
+  document: { addEventListener: noop, getElementById: function(){ return null; },
+    createElement: function(){ return { style:{}, appendChild: noop, setAttribute: noop, click: noop }; },
+    body: { appendChild: noop, removeChild: noop } },
+  localStorage: { getItem: function(){ return null; }, setItem: noop, removeItem: noop, key: function(){ return null; }, length: 0 },
+  indexedDB: { open: function(){ return {}; } },
+  setTimeout: function(){ return 0; }, clearTimeout: noop, setInterval: function(){ return 0; }, clearInterval: noop,
+  console: console, JSON: JSON, Math: Math, Date: Date, Map: Map, Set: Set, WeakSet: WeakSet,
+  Array: Array, Object: Object, Number: Number, String: String, Boolean: Boolean, Promise: Promise,
+  logEvent: noop, toast: noop, render: noop, esc: function(x){ return x; }, save: noop,
+  uid: function(){ return 'x'; }, idbOpen: function(){ return Promise.resolve(null); },
+  S: {
+    char: { hp: 50, maxHp: 50, xp: 0, lvl: 1, gold: 0 },
+    tasks: [], rewards: [], tags: [], devices: [],
+    prefs: { paused: false, width: 480 },
+    lastCron: 0, history: [], charHistory: [], monthlyBackups: [], deletions: []
+  }
+};
+syncSandbox.self = syncSandbox.window; syncSandbox.globalThis = syncSandbox;
+vm.createContext(syncSandbox);
+try { vm.runInContext(syncSrc, syncSandbox); } catch(e) { console.error('FAIL: sync.js VM load threw:', e); process.exit(1); }
+const Q = syncSandbox.window.QuestaSync;
+if (!Q || typeof Q.merge !== 'function') { console.error('FAIL: QuestaSync.merge not found in sync.js'); process.exit(1); }
+
+// Minimal subset builder: only `pause` varies; everything else empty.
+function pauseSub(pause){
+  return { tasks: [], rewards: [], tags: [], devices: [], an: { views: [], metrics: [] },
+    history: [], charHistory: [], monthlyBackups: [], lastCron: 0, char: {}, deletions: [],
+    pause: pause };
+}
+
+// 5a. syncSubset() ships the pause whitelist (paused/pausedDays/at)
+{
+  syncSandbox.S.prefs = { paused: true, pausedDays: [20260802, 20260803], pausedAt: 5, width: 480 };
+  const sub = syncSandbox.syncSubset();
+  assert('5a syncSubset() ships pause.paused', sub.pause && sub.pause.paused === true);
+  assert('5a syncSubset() ships pause.pausedDays',
+    sub.pause && Array.isArray(sub.pause.pausedDays) && sub.pause.pausedDays.length === 2 &&
+    sub.pause.pausedDays[0] === 20260802 && sub.pause.pausedDays[1] === 20260803);
+  assert('5a syncSubset() ships pause.at', sub.pause && sub.pause.at === 5);
+  assert('5a syncSubset() still excludes raw prefs (whitelist only)', !('prefs' in sub));
+  syncSandbox.S.prefs = { paused: false, width: 480 };
+}
+
+// 5b. syncApply() restores pause and deep-copies pausedDays
+{
+  syncSandbox.S.prefs = { paused: false, width: 480 };
+  const sub = { pause: { paused: true, pausedDays: [20260802, 20260803], at: 5 }, tasks: [] };
+  const applied = syncSandbox.syncApply(sub);
+  assert('5b syncApply() returns true', applied === true);
+  assert('5b syncApply() restores paused', syncSandbox.S.prefs.paused === true);
+  assert('5b syncApply() restores pausedDays',
+    Array.isArray(syncSandbox.S.prefs.pausedDays) && syncSandbox.S.prefs.pausedDays.length === 2 &&
+    syncSandbox.S.prefs.pausedDays[0] === 20260802 && syncSandbox.S.prefs.pausedDays[1] === 20260803);
+  assert('5b syncApply() restores pausedAt', syncSandbox.S.prefs.pausedAt === 5);
+  sub.pause.pausedDays.push(999999);
+  assert('5b syncApply() deep-copies pausedDays (input mutation does not alias)',
+    Array.isArray(syncSandbox.S.prefs.pausedDays) && syncSandbox.S.prefs.pausedDays.length === 2 &&
+    syncSandbox.S.prefs.pausedDays.indexOf(999999) === -1);
+}
+
+// 5c. merge() LWW by `at` (base ignored), tie -> local
+{
+  const base = pauseSub({ paused: false, pausedDays: [], at: 0 });
+  const local = pauseSub({ paused: false, pausedDays: [], at: 5 });
+  const remote = pauseSub({ paused: true, pausedDays: [], at: 9 });
+  const m = Q.merge(base, local, remote, 1000, 1000);
+  assert('5c LWW: remote at=9 beats local at=5 -> paused=true', m.pause.paused === true && m.pause.at === 9);
+}
+{
+  const base = pauseSub({ paused: false, pausedDays: [], at: 0 });
+  const local = pauseSub({ paused: true, pausedDays: [], at: 9 });
+  const remote = pauseSub({ paused: false, pausedDays: [], at: 5 });
+  const m = Q.merge(base, local, remote, 1000, 1000);
+  assert('5c LWW: local at=9 beats remote at=5 -> local wins', m.pause.paused === true && m.pause.at === 9);
+}
+{
+  const base = pauseSub({ paused: false, pausedDays: [], at: 0 });
+  const local = pauseSub({ paused: true, pausedDays: [], at: 5 });
+  const remote = pauseSub({ paused: false, pausedDays: [], at: 5 });
+  const m = Q.merge(base, local, remote, 1000, 1000);
+  assert('5c LWW: tie at=5 resolves to local', m.pause.paused === true && m.pause.at === 5);
+}
+
+// 5d. merge() unions base+local+remote pausedDays, deduped, sorted, pruned to 7
+{
+  const base = pauseSub({ paused: false, pausedDays: [], at: 0 });
+  const local = pauseSub({ paused: false, pausedDays: [1], at: 1 });
+  const remote = pauseSub({ paused: false, pausedDays: [2], at: 1 });
+  const m = Q.merge(base, local, remote, 1000, 1000);
+  assert('5d union: [1] + [2] -> sorted [1,2]',
+    Array.isArray(m.pause.pausedDays) && m.pause.pausedDays.length === 2 &&
+    m.pause.pausedDays[0] === 1 && m.pause.pausedDays[1] === 2);
+}
+{
+  const base = pauseSub({ paused: false, pausedDays: [0], at: 0 });
+  const local = pauseSub({ paused: false, pausedDays: [1,2,3,4,5,6,7,2], at: 1 });
+  const remote = pauseSub({ paused: false, pausedDays: [8], at: 1 });
+  const m = Q.merge(base, local, remote, 1000, 1000);
+  assert('5d union: dedup + sort + prune to last 7 -> 2..8',
+    Array.isArray(m.pause.pausedDays) && m.pause.pausedDays.length === 7 &&
+    m.pause.pausedDays.join(',') === '2,3,4,5,6,7,8');
 }
 
 // =========================================================================

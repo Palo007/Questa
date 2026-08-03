@@ -278,7 +278,11 @@ function nextB4(){
     tasks: [{ id: 't1', title: 'CLEAN', type: 'habit', updatedAt: 100 }],
     char: { name: 'Test', lvl: 1, updatedAt: 1000 },
     rewards: [], tags: [], devices: [], an: { views: [], metrics: [] },
-    history: [], charHistory: [], monthlyBackups: [], lastCron: 0, deletions: []
+    history: [], charHistory: [], monthlyBackups: [], lastCron: 0, deletions: [],
+    // pause is part of the syncSubset whitelist (2026-08-03 pause-sync fix), so a
+    // current base snapshot always carries it; without it the nothingToPush
+    // comparison would always see a diff and fire an upload.
+    pause: { paused: false, pausedDays: [], at: 0 }
   };
   idbSyncmeta['base'] = JSON.stringify({b: JSON.stringify(cleanBase), r: 'r2'});
 
@@ -288,14 +292,15 @@ function nextB4(){
     rewards: [], tags: [], devices: [],
     an: { views: [], metrics: [] },
     history: [], charHistory: [], monthlyBackups: [],
-    lastCron: 0, deletions: [], __savedAt: Date.now()
+    lastCron: 0, deletions: [], prefs: { paused: false }, __savedAt: Date.now()
   };
 
   var remoteState = {
     tasks: [{ id: 't1', title: 'CLEAN', type: 'habit', updatedAt: 100 }],
     char: { name: 'Test', lvl: 1, updatedAt: 1000 },
     rewards: [], tags: [], devices: [], an: { views: [], metrics: [] },
-    history: [], charHistory: [], monthlyBackups: [], lastCron: 0, deletions: []
+    history: [], charHistory: [], monthlyBackups: [], lastCron: 0, deletions: [],
+    pause: { paused: false, pausedDays: [], at: 0 }
   };
 
   var uploadCalled = false;

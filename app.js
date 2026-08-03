@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.08.03-1150";
+const APP_VERSION = "v2026.08.03-1201";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -5437,7 +5437,7 @@ function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.m
 function setSaveBtnTop(n){ S.prefs.saveBtnTop=!!n; save(); closeOpt(); if(EDIT) drawSheet(); else if(REDIT) openReward(REDIT.id); openSettings(); }
 function setExportIntervalDays(){ /* retained as defensive no-op; no live callers after autoBackup migration */ }
 function setAutoBackupTiers(patch){ S.prefs.autoBackupEnabled = Object.assign({}, S.prefs.autoBackupEnabled||{fourHour:false,daily:false,weekly:false,monthly:false}, patch); save(); closeOpt(); openSettings(); }
-function setPause(n){ S.prefs.paused=!!n; save(); closeOpt(); openSettings(); renderStats(); }
+function setPause(n){ S.prefs.paused=!!n; S.prefs.pausedAt=now(); save(); closeOpt(); openSettings(); renderStats(); }
 function setCharName(v){ S.char.name=(v||'').trim()||'Adventurer'; save(); renderStats(); }
 function setDeviceName(v){
   if(typeof syncDeviceId!=="function") return;

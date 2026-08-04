@@ -42,8 +42,8 @@ assert('runCron has paused early-return',
   /save\(\);/.test(appSrc) &&
   /return;/.test(appSrc));
 
-assert('openSettings has pause settingRow',
-  /settingRow\('pause'/.test(appSrc));
+assert('openSettings has pause in Activity Feed category',
+  /openCat\(\\'activityFeed\\'\)/.test(appSrc) && /'pause'.*type.*'toggle'/.test(appSrc));
 
 assert('setPause function exists',
   /function setPause\(n\)\{/.test(appSrc));
@@ -398,6 +398,78 @@ function freshChar(){ return { hp:50, maxHp:50, xp:0, lvl:1, gold:0, mp:0, name:
   fn2(false);
   assert('setPause(false) sets prefs.paused = false', testSandbox.S.prefs.paused === false);
   assert('setPause(false) stamps prefs.pausedAt', testSandbox.S.prefs.pausedAt === 7);
+}
+
+// Test 2b: setPause(true) initializes pausedDays when missing
+{
+  const testSandbox = { 
+    console: console, 
+    JSON: JSON, 
+    Object: Object, 
+    Array: Array, 
+    String: String, 
+    Number: Number, 
+    Boolean: Boolean, 
+    Date: Date, 
+    Math: Math, 
+    Map: Map, 
+    Set: Set, 
+    WeakSet: WeakSet, 
+    Promise: Promise,
+    window: {},
+    navigator: { onLine: true },
+    document: {
+      addEventListener: function(){},
+      getElementById: function(){ return null; },
+      createElement: function(){ return { style:{}, appendChild: function(){}, setAttribute: function(){}, click: function(){} }; },
+      body: { appendChild: function(){}, removeChild: function(){} }
+    },
+    localStorage: { getItem: function(){ return null; }, setItem: function(){}, removeItem: function(){}, key: function(){ return null; }, length: 0 },
+    indexedDB: { open: function(){ return {}; } },
+    setTimeout: function(){ return 0; }, 
+    clearTimeout: function(){}, 
+    setInterval: function(){ return 0; }, 
+    clearInterval: function(){},
+    Math: Math, 
+    Date: Date, 
+    Map: Map, 
+    Set: Set, 
+    WeakSet: WeakSet,
+    Array: Array, 
+    Object: Object, 
+    Number: Number, 
+    String: String, 
+    Boolean: Boolean, 
+    Promise: Promise,
+    logEvent: function(){}, 
+    toast: function(){}, 
+    render: function(){}, 
+    esc: function(x){ return x; }, 
+    save: function(){},
+    uid: function(){ return 'x'; }, 
+    idbOpen: function(){ return Promise.resolve(null); },
+    _charSig: function(c){ if(!c) return ""; var o={}; for(var k in c){ if(k!=="updatedAt") o[k]=c[k]; } try{ return JSON.stringify(o); }catch(e){ return ""; } },
+    _prevCharSig: null,
+    IS_DIRTY: false,
+    lastIssued: 0,
+    _idbWriteState: function(){ return Promise.resolve(); },
+    _stateWritePromise: null,
+    openSettings: function(){},
+    renderStats: function(){},
+    closeOpt: function(){},
+    now: function(){ return 7; },
+    S: { prefs: { paused: false } }
+  };
+  vm.createContext(testSandbox);
+  
+  const fn2 = new vm.Script(
+    '(function(n){ "use strict";\n' + setPauseFn + '\nsetPause(n);\n})'
+  ).runInContext(testSandbox);
+  
+  fn2(true);
+  assert('setPause(true) initializes pausedDays when missing', Array.isArray(testSandbox.S.prefs.pausedDays) && testSandbox.S.prefs.pausedDays.length === 0);
+  assert('setPause(true) sets prefs.paused = true', testSandbox.S.prefs.paused === true);
+  assert('setPause(true) stamps prefs.pausedAt (LWW timestamp)', testSandbox.S.prefs.pausedAt === 7);
 }
 
 // Test 3: export/import round-trip preserves paused

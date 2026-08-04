@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.08.03-1238";
+const APP_VERSION = "v2026.08.04-2246";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -175,6 +175,7 @@ function migrate(s){ const f=freshState();
   if(!Array.isArray(out.devices)) out.devices=[];
   if(!Array.isArray(out.monthlyBackups)) out.monthlyBackups=[];
   if(!Array.isArray(out.deletions)) out.deletions=[];
+  if(!Array.isArray(out.prefs.pausedDays)) out.prefs.pausedDays = [];
   delete out.events;
   // GFS (grandfather-father-son) snapshot rotation counters — ensure prefs.gfs
   // is a {daily, weekly, monthly} numeric object; coerce any legacy/non-numeric
@@ -2128,6 +2129,7 @@ function ensureUiPrefs(){
   if(S.prefs.filterOpen===undefined) S.prefs.filterOpen=false;
   if(!S.prefs.scroll) S.prefs.scroll = {};
   if(S.prefs.paused===undefined) S.prefs.paused=false;
+  if(!Array.isArray(S.prefs.pausedDays)) S.prefs.pausedDays = [];
   return S.prefs;
 }
 ensureUiPrefs();
@@ -5288,20 +5290,11 @@ function openSettings(){
      '</div>';
   h+='<input type="file" id="faceFile" accept="image/jpeg,image/png,image/gif,.jpg,.jpeg,.png,.gif" style="display:none" onchange="uploadFace(event)">';
 
-  // Display preferences as tappable rows; each opens a foreground options menu (openOpt).
-  const widthLabels={430:'Slim',560:'Medium',720:'Wide',3000:'Full'};
-  const wv=(S.prefs.width||480);
-  const nl=(S.prefs.notesLines==null?3:S.prefs.notesLines);
-  h+='<div class="setList">';
-  h+=settingRow('width','Width','Caps the width on a monitor and keeps it centered.',(widthLabels[wv]||'Custom'));
-  h+=settingRow('notes','Note lines','Lines of a task\'s notes shown in the list preview.',(nl===0?'Off':(''+nl)));
-  h+=settingRow('haptics','Haptics','Vibration on taps and completions.',(S.prefs.haptics===false?'Off':'On'));
-  h+=settingRow('cardThick','Card thickness','Minimum height of each card. Short cards grow first; taller cards are only affected at higher values.',(S.prefs.cardThick||0)===0?'Default':('+'+(S.prefs.cardThick||0)+' px'));
-  h+=settingRow('saveBtnTop','Save button position','Put the Save button at the top of the edit sheet, centered next to the title, instead of at the bottom.',(S.prefs.saveBtnTop?'Top':'Bottom'));
-  h+=settingRow('notifications','Notifications','Browser-based notification permission and status.',(S.prefs.notificationsEnabled?'On':'Off'));
-  h+=settingRow('hideSyncDiag','Hide sync & diagnostic events','Hide background sync (conflict resolved) and diagnostic events from the Activity Feed. Task activity and exports stay visible.',(S.prefs.hideSyncDiag?'On':'Off'));
-  h+=settingRow('hideConflictDecisions','Hide conflict decisions','Hide sync conflict resolution events from the Activity Feed. Turn Off to see conflict history for debugging.',(S.prefs.hideConflictDecisions?'On':'Off'));
-  h+=settingRow('pause','Pause tracking','Prevent HP loss and streak breaks when you are away. Dailies can still be completed for rewards.',S.prefs.paused?'On':'Off');
+  // Category buttons for grouped settings (replaces horizontal setList)
+  h+='<div class="catBtnRow">';
+  h+='<button class="catBtn" type="button" onclick="openCat(\'appearance\')"><span class="catIcon">🎨</span><span class="catLabel">Appearance</span><span class="catChev">›</span></button>';
+  h+='<button class="catBtn" type="button" onclick="openCat(\'interaction\')"><span class="catIcon">⚙️</span><span class="catLabel">Interaction</span><span class="catChev">›</span></button>';
+  h+='<button class="catBtn" type="button" onclick="openCat(\'activityFeed\')"><span class="catIcon">📋</span><span class="catLabel">Activity Feed</span><span class="catChev">›</span></button>';
   h+='</div>';
   const syncTip='Sync via Dropbox (your account, no server) keeps this device and your other devices up to date automatically.';
   h+='<div class="colTitle"><h2 style="font-size:13px;flex:none">Sync</h2>'+infoIcon('Sync\n'+syncTip)+'</div>';
@@ -5442,7 +5435,7 @@ function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.m
 function setSaveBtnTop(n){ S.prefs.saveBtnTop=!!n; save(); closeOpt(); if(EDIT) drawSheet(); else if(REDIT) openReward(REDIT.id); openSettings(); }
 function setExportIntervalDays(){ /* retained as defensive no-op; no live callers after autoBackup migration */ }
 function setAutoBackupTiers(patch){ S.prefs.autoBackupEnabled = Object.assign({}, S.prefs.autoBackupEnabled||{fourHour:false,daily:false,weekly:false,monthly:false}, patch); save(); closeOpt(); openSettings(); }
-function setPause(n){ S.prefs.paused=!!n; S.prefs.pausedAt=now(); save(); closeOpt(); openSettings(); renderStats(); }
+function setPause(n){ S.prefs.paused=!!n; S.prefs.pausedAt=now(); if(n && !Array.isArray(S.prefs.pausedDays)) S.prefs.pausedDays=[]; save(); closeOpt(); openSettings(); renderStats(); }
 function setCharName(v){ S.char.name=(v||'').trim()||'Adventurer'; save(); renderStats(); }
 function setDeviceName(v){
   if(typeof syncDeviceId!=="function") return;
@@ -5520,6 +5513,100 @@ function testNotification(){
   }
   toast('Test notification sent');
 }
+// Category definitions for Level 2 settings modal
+const CATS = {
+  appearance: {
+    title: '🎨 Appearance',
+    settings: [
+      { key: 'width', type: 'multi', label: 'Interface width', desc: 'Caps the width on a monitor and keeps it centered.' },
+      { key: 'notes', type: 'multi', label: 'Note lines', desc: 'Lines of a task\'s notes shown in the list preview.' },
+      { key: 'cardThick', type: 'slider', label: 'Card thickness', desc: 'Minimum height of each card.', min: 0, max: 60, step: 1, unit: 'px', defLabel: 'Default' }
+    ]
+  },
+  interaction: {
+    title: '⚙️ Interaction',
+    settings: [
+      { key: 'haptics', type: 'toggle', label: 'Haptics', desc: 'Vibration on taps and completions.' },
+      { key: 'saveBtnTop', type: 'toggle', label: 'Save button position', desc: 'Top = centered next to title; Bottom = at foot of sheet.' },
+      { key: 'notifications', type: 'multi', label: 'Notifications', desc: 'Browser-based notification permission and status.' }
+    ]
+  },
+  activityFeed: {
+    title: '📋 Activity Feed',
+    settings: [
+      { key: 'hideSyncDiag', type: 'toggle', label: 'Hide sync & diagnostic events', desc: 'Hide background sync (conflict resolved) and diagnostic events from the Activity Feed.' },
+      { key: 'hideConflictDecisions', type: 'toggle', label: 'Hide conflict decisions', desc: 'Hide sync conflict resolution events from the Activity Feed.' },
+      { key: 'pause', type: 'toggle', label: 'Pause tracking', desc: 'Prevent HP loss and streak breaks when away. Dailies still give rewards.' }
+    ]
+  }
+};
+
+// Render the category modal (Level 2) for grouped settings
+function openCat(catKey){
+  const cat = CATS[catKey];
+  if(!cat) return;
+  let h = '<h4>'+cat.title+'</h4>';
+  cat.settings.forEach(function(s){
+    if(s.type === 'toggle'){
+      let val;
+      if(s.key === 'pause') val = !!S.prefs.paused;
+      else if(s.key === 'haptics') val = (S.prefs.haptics !== false);
+      else val = !!S.prefs[s.key];
+      h += '<div class="catSetting">'+
+        '<div class="catSettingMain">'+
+          '<div class="catSettingLabel">'+esc(s.label)+'</div>'+
+          '<label class="toggle"><input type="checkbox" '+(val?'checked':'')+' onchange="setCatToggle(\''+s.key+'\',this.checked);openCat(\''+catKey+'\')"><span class="slider"></span></label>'+
+        '</div>'+
+        '<div class="catSettingDesc">'+esc(s.desc)+'</div>'+
+      '</div>';
+    } else if(s.type === 'multi'){
+      let curVal = '';
+      if(s.key === 'width'){
+        const widthLabels={430:'Slim',560:'Medium',720:'Wide',3000:'Full'};
+        const wv=(S.prefs.width||480);
+        curVal = widthLabels[wv]||'Custom';
+      } else if(s.key === 'notes'){
+        const nl=(S.prefs.notesLines==null?3:S.prefs.notesLines);
+        curVal = nl===0?'Off':(nl+' line'+(nl===1?'':'s'));
+      } else if(s.key === 'notifications'){
+        curVal = S.prefs.notificationsEnabled?'On':'Off';
+      }
+      h += '<div class="catSetting" onclick="openOpt(\''+s.key+'\')">'+
+        '<div class="catSettingMain">'+
+          '<div class="catSettingLabel">'+esc(s.label)+'</div>'+
+          '<div class="catSettingVal">'+esc(curVal)+' ›</div>'+
+        '</div>'+
+        '<div class="catSettingDesc">'+esc(s.desc)+'</div>'+
+      '</div>';
+    } else if(s.type === 'slider'){
+      const cp = (S.prefs.cardThick==null?0:Math.min(60,Math.max(0,S.prefs.cardThick)));
+      const disp = cp===0?s.defLabel:('+'+cp+' '+s.unit);
+      h += '<div class="catSetting">'+
+        '<div class="catSettingMain">'+
+          '<div class="catSettingLabel">'+esc(s.label)+'</div>'+
+          '<div class="catSettingSlider">'+
+            '<input type="range" min="'+s.min+'" max="'+s.max+'" step="'+s.step+'" value="'+cp+'" id="catCardThick" oninput="S.prefs.cardThick=+this.value;applyCardThick();document.getElementById(\'catSliderVal\').textContent=(this.value===\'0\'?\''+esc(s.defLabel)+'\':(\'\'+this.value+\''+esc(s.unit)+'\'))">'+
+            '<span class="catSliderVal" id="catSliderVal">'+esc(disp)+'</span>'+
+          '</div>'+
+        '</div>'+
+        '<div class="catSettingDesc">'+esc(s.desc)+'</div>'+
+      '</div>';
+    }
+  });
+  h += '<button class="btn ghost optClose" type="button" onclick="closeOpt()">Done</button>';
+  document.getElementById('optMenu').innerHTML = h;
+  document.getElementById('optScrim').classList.add('show');
+}
+
+// Helper to set toggle values from category modal
+function setCatToggle(key, val){
+  if(key === 'haptics') setHaptics(val?1:0);
+  else if(key === 'saveBtnTop') setSaveBtnTop(val);
+  else if(key === 'hideSyncDiag') setHideSyncDiag(val?1:0);
+  else if(key === 'hideConflictDecisions') setHideConflictDecisions(val?1:0);
+  else if(key === 'pause') setPause(val?1:0);
+}
+
 // Render the foreground menu for a given setting key over a dim backdrop.
 function openOpt(key){
   let h='';

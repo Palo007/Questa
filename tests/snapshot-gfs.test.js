@@ -420,7 +420,8 @@ function run() {
       var fulls = remaining.filter(function(s) { return s.type === 'full'; });
       var newest7Kept = [3, 4, 5, 6, 7, 8, 9].every(function(i) { return rids[ids[i]]; });
       assert('7 newest distinct-day fulls all kept', newest7Kept);
-      assert('oldest full pruned (rotation actually deleted something)', !rids[ids[0]]);
+      var outsideDailyPruned = [0, 1, 2].some(function(i) { return !rids[ids[i]]; });
+      assert('at least one full outside the 7-day daily window was pruned', outsideDailyPruned);
       assert('fulls kept is between 7 and 10 (GFS tiers, not a hard 7)',
         fulls.length >= 7 && fulls.length < 10);
       var deltasKept = remaining.filter(function(s) { return s.type === 'delta'; }).length;
@@ -571,6 +572,66 @@ function run() {
     }, function(e) {
       restoreOriginals();
       throw e;
+    });
+  });
+
+  // ── T12: deterministic regression — rotation invariant on every fixed date ──
+  // The OLD T7 assertion `!rids[ids[0]]` failed ~100 days/year because rotation
+  // legitimately keeps the oldest full when it is the lone distinct ISO-week/
+  // month baseline. T12 uses FIXED dates (no wall clock): T12a pins the exact
+  // keep-set on Tue 2026-07-07 (the old assertion fails there); T12b sweeps
+  // every day of 2025-2026 proving the invariant on all boundary alignments.
+  chain = chain.then(function() {
+    function seedRun(nowMs) {
+      resetIDB();
+      var ids = [], p = Promise.resolve();
+      for (var idx = 0; idx < 10; idx++) {
+        (function(i) {
+          p = p.then(function() {
+            return seedBackup(makeFull(nowMs - (9 - i) * DAY, 'daily')).then(function(id) { ids[i] = id; });
+          });
+        })(idx);
+      }
+      p = p.then(function() { return seedBackup(makeDelta(nowMs - 0.5 * DAY)); })
+           .then(function() { return seedBackup(makeDelta(nowMs - 1.5 * DAY)); });
+      return p.then(function() { return ctx.rotateSnapshots(); }).then(function() {
+        return ctx.listSnapshots().then(function(remaining) {
+          var rids = {}; remaining.forEach(function(s) { rids[s.id] = true; });
+          return { ids: ids, rids: rids,
+            fullCount: remaining.filter(function(s) { return s.type === 'full'; }).length,
+            deltaCount: remaining.filter(function(s) { return s.type === 'delta'; }).length };
+        });
+      });
+    }
+    // T12a: Tue 2026-07-07 — f0 = Sun 2026-06-28 is the lone ISO-week-202625
+    // representative, so rotation keeps it as a week baseline (the OLD assertion
+    // `!rids[ids[0]]` would FAIL here); f1 = Mon 2026-06-29 is pruned.
+    return seedRun(new Date(2026, 6, 7).getTime()).then(function(r) {
+      var ids = r.ids, rids = r.rids;
+      assertEq('T12a: lone-week baseline full retained (old assertion failed here)', rids[ids[0]], true);
+      assert('T12a: oldest non-baseline full pruned', !rids[ids[1]]);
+      assert('T12a: 7 newest distinct-day fulls all kept',
+        [3, 4, 5, 6, 7, 8, 9].every(function(i) { return rids[ids[i]]; }));
+      assertEq('T12a: total fulls kept on boundary day', r.fullCount, 9);
+      assertEq('T12a: both son-window deltas kept', r.deltaCount, 2);
+    }).then(function() {
+      // T12b: sweep every calendar day of 2025-2026 (local-date loop, DST-safe).
+      var total = 0, failures = 0, p2 = Promise.resolve();
+      for (var dd = new Date(2025, 0, 1); dd <= new Date(2026, 11, 31); dd.setDate(dd.getDate() + 1)) {
+        (function(ms) {
+          p2 = p2.then(function() { return seedRun(ms).then(function(r) {
+            total++;
+            var ok = [3, 4, 5, 6, 7, 8, 9].every(function(i) { return r.rids[r.ids[i]]; })
+              && [0, 1, 2].some(function(i) { return !r.rids[r.ids[i]]; })
+              && r.fullCount >= 7 && r.fullCount < 10 && r.deltaCount === 2;
+            if (!ok) failures++;
+          }); });
+        })(dd.getTime());
+      }
+      return p2.then(function() {
+        assertEq('T12b: invariant holds on all ' + total + ' days (2025-2026)', failures, 0);
+        assert('T12b: sweep actually iterated (730 days)', total === 730);
+      });
     });
   });
 

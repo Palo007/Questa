@@ -64,3 +64,4 @@ __pycache__/
 *.bak-*
 *.7z
 *.zip
+docs/OPENCODE-NVIDIA.md

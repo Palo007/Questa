@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.08.04-2246";
+const APP_VERSION = "v2026.08.14-1945";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -3401,7 +3401,7 @@ function drawViewBuilder(){
   ensureTags();
   const seg=(f,opts)=>'<div class="seg vSeg">'+opts.map(o=>'<button class="'+(VDRAFT[f]===o[1]?'on':'')+'" onclick="vSet(\''+f+'\',\''+o[1]+'\')">'+o[0]+'</button>').join('')+'</div>';
   let h='<h3>'+(VDRAFT.id?'Edit view':'New view')+'</h3>';
-  h+='<label>Name</label><input type="text" id="vName" value="'+esc(VDRAFT.name)+'" placeholder="e.g. Weekly completions">';
+  h+='<label>Name</label><input type="text" id="vName" value="'+esc(VDRAFT.name)+'" oninput="VDRAFT.name=this.value" placeholder="e.g. Weekly completions">';
   h+='<label>Data</label>'+seg('source',V_SOURCES);
   if(VDRAFT.source==='metric'){
     const ms=(anPrefs().metrics||[]);
@@ -4830,7 +4830,7 @@ function drawSheet(){
   }
   h+='<button type="button" onclick="pasteEditTask()" title="Paste title, checklist & notes" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.3;padding:0 4px;line-height:1;color:inherit">📋</button>';
   h+='<button type="button" onclick="copyEditTask()" title="Copy title, checklist & notes" style="background:none;border:none;cursor:pointer;font-size:14px;opacity:0.3;padding:0 4px;line-height:1;color:inherit">⧉</button></div>';
-  h+='<label>Title</label><input type="text" id="eTitle" value="'+esc(t.title)+'" placeholder="What needs doing?">';
+  h+='<label>Title</label><input type="text" id="eTitle" value="'+esc(t.title)+'" oninput="EDIT.title=this.value" placeholder="What needs doing?">';
   const diffOpts = t.type==='habit' ? ['trivial','easy','medium','hard','log'] : ['trivial','easy','medium','hard'];
   h+='<label>Difficulty</label><div class="seg" id="eDiff">'+
     diffOpts.map(d=>'<button class="'+(t.difficulty===d?'on':'')+'" onclick="EDIT.difficulty=\''+d+'\';drawSheet()">'+d+'</button>').join('')+'</div>';
@@ -4871,7 +4871,7 @@ function drawSheet(){
       '<button class="btn ghost" style="padding:8px" onclick="EDIT.checklist.push({id:uid(),text:\'\',done:false});drawSheet()">+ Add subtask</button></div>';
   }
   h+=drawReminderEditor(t);
-  h+='<label>Notes / comments</label><textarea id="eNotes" placeholder="Notes, thoughts, log...">'+esc(t.notes)+'</textarea>';
+  h+='<label>Notes / comments</label><textarea id="eNotes" oninput="EDIT.notes=this.value" placeholder="Notes, thoughts, log...">'+esc(t.notes)+'</textarea>';
   h+=tagEditorBlock(t);
   h+='<div class="rowBtns">'+(t.id?'<button class="btn danger" onclick="deleteTask()">Delete</button>':'')+
     '<button class="btn ghost" onclick="closeSheet()">Cancel</button>'+

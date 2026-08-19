@@ -21,7 +21,18 @@ const PKCE_KEY = "questa.sync.pkce";
 // tolerance exists across both files. Literal fallback kept because both files are
 // classic scripts in one document and sync.js must still work if app.js is older --
 // the same pattern EVENT_AGE_LIMIT_MS uses below.
-const MAX_FUTURE_SKEW_MS = (typeof HLC_RATCHET_TOLERANCE_MS !== "undefined") ? HLC_RATCHET_TOLERANCE_MS : 120000; // 120s future-skew tolerance (shared with _ua/_ca)
+// J3 (2026-08-19): try-guarded IIFE, not a bare ternary. `typeof` does NOT protect
+// against the temporal dead zone: app.js's top-level `const` binding is created when
+// app.js is INSTANTIATED, so if app.js throws before reaching that declaration the
+// binding exists but is uninitialised and this lookup throws a ReferenceError at
+// script-parse time -- killing all of sync.js. Under the old plain literal, sync
+// survived a broken app.js (AGENTS.md §1). The bare identifier is deliberate: it
+// resolves through the shared global LEXICAL environment where app.js's const lives,
+// which `typeof globalThis.HLC_RATCHET_TOLERANCE_MS` would not. The fallback literal is
+// repeated in the catch on purpose, keeping the `: <N>;` shape that
+// tests/hlc-ratchet-tolerance.test.js 5e pins; both copies are asserted equal to
+// app.js's value by tests/max-future-skew-derive.test.js T3i.
+const MAX_FUTURE_SKEW_MS = (function(){ try{ return (typeof HLC_RATCHET_TOLERANCE_MS !== "undefined") ? HLC_RATCHET_TOLERANCE_MS : 120000; }catch(e){ return 120000; } })(); // 120s future-skew tolerance (shared with _ua/_ca)
 const STATE_PATH = "/state.json";
 const SYNC_DEBOUNCE_MS = 5000;
 const SYNC_CONFLICT_RETRY_LIMIT = 3;

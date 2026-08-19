@@ -2482,7 +2482,26 @@ function syncInit(){
     if(document.visibilityState === "visible") syncNow();
     else syncNow(); // hidden: best-effort push, fire-and-forget (do not await)
   });
-  setTimeout(() => syncNow(), 2000); // let the app finish booting first
+  setTimeout(() => {
+    // F2 / D3 todo 14: tell app.js the first sync round settled, so its boot
+    // day-rollover decision runs on POST-sync state instead of pre-sync state
+    // (app.js onQuestaFirstSyncRound -> _runDayRollover -> startDay).
+    // syncNow() ALWAYS fulfils and never rejects, so the rollover proceeds after a
+    // FAILED round too -- that is required, not incidental. Idempotence is app.js's
+    // _dayRolloverDone flag, not ours: firing twice is safe.
+    // Defensive on both sides. `fire` is typeof-guarded per AGENTS.md §1 so a
+    // missing or broken app.js cannot break syncInit(); the return value is only
+    // treated as a promise if it is actually thenable, because a naive .then() on an
+    // `undefined` return would throw inside this timer and the day would NEVER roll
+    // over -- the worst failure mode in the boot-gate plan.
+    var fire = function(){
+      try{ if(typeof onQuestaFirstSyncRound === "function") onQuestaFirstSyncRound(); }catch(e){}
+    };
+    var p;
+    try{ p = syncNow(); }catch(e){ fire(); return; }
+    if(p && typeof p.then === "function") p.then(fire, fire); // both handlers
+    else fire();
+  }, 2000); // let the app finish booting first
 }
 
 // Exposed for the Settings screen (Phase 4) and for manual console testing.

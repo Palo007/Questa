@@ -17,7 +17,11 @@
 const DBX_APP_KEY = "9bmdhb7j1b5nuke"; // not a secret — public PKCE client_id
 const SYNC_KEY = "questa.sync.v1";
 const PKCE_KEY = "questa.sync.pkce";
-const MAX_FUTURE_SKEW_MS = 120000; // 120s future-skew tolerance (shared with _ua/_ca)
+// F7 (2026-08-18): derived from app.js's HLC_RATCHET_TOLERANCE_MS so exactly ONE
+// tolerance exists across both files. Literal fallback kept because both files are
+// classic scripts in one document and sync.js must still work if app.js is older --
+// the same pattern EVENT_AGE_LIMIT_MS uses below.
+const MAX_FUTURE_SKEW_MS = (typeof HLC_RATCHET_TOLERANCE_MS !== "undefined") ? HLC_RATCHET_TOLERANCE_MS : 120000; // 120s future-skew tolerance (shared with _ua/_ca)
 const STATE_PATH = "/state.json";
 const SYNC_DEBOUNCE_MS = 5000;
 const SYNC_CONFLICT_RETRY_LIMIT = 3;
@@ -547,7 +551,10 @@ function dailyEventDay(x){
 // Both-changed-both-present tiebreak for type==='daily' entries only (called
 // from mergeCollection below). Pure function of (l, r) -- no S/base access --
 // so conflict-retry re-merges stay convergent (analysis Sec5/Sec8 invariant).
-function resolveDailyConflict(l, r){
+// localDeviceId / remoteDeviceId are OPTIONAL trailing parameters (added 2026-08-18 for
+// F1's tie-convergence). Omitting them keeps the exact pre-existing behaviour, so the
+// existing 2-argument callers in tests/ and archive/tests/ need no edit.
+function resolveDailyConflict(l, r, localDeviceId, remoteDeviceId){
   const led = dailyEventDay(l), red = dailyEventDay(r);
   if(led !== red) return led > red ? l : r; // rule 1: newer event day wins
   // rule 2: same event day -- a completion beats a miss recorded for that same
@@ -567,7 +574,20 @@ function resolveDailyConflict(l, r){
   // rule 3: no day-level signal distinguishes them -- fall back to the original
   // updatedAt tiebreak (remote wins on tie/missing), unchanged from before F3.
   const lu = (l && l.updatedAt) || 0, ru = (r && r.updatedAt) || 0;
-  return lu > ru ? l : r;
+  // F1 (2026-08-18): clamp future-skewed stamps so a fast clock cannot win this
+  // tiebreak. Both sides carry a real competing value here, so 0 only loses.
+  const luc = _clampFuture(lu), ruc = _clampFuture(ru);
+  // Clamping makes ties far more likely (two skewed sides both become 0), and the
+  // old unconditional "remote wins the tie" is non-convergent: "remote" is the OTHER
+  // device from each side, so A would adopt B's copy while B adopts A's. Break the tie
+  // on the lexically greater deviceId, which is the same answer on both devices.
+  // Same pattern as the char merge below. Dailies are the app's primary task type.
+  if(luc === ruc && remoteDeviceId != null){
+    const _ld = (localDeviceId != null) ? localDeviceId
+      : ((typeof syncDeviceId === "function") ? syncDeviceId() : null);
+    if(_ld != null && _ld !== remoteDeviceId) return (remoteDeviceId > _ld) ? r : l;
+  }
+  return luc > ruc ? l : r;
 }
 // Idempotent post-decision overlay applied to EVERY merged daily regardless of
 // which mergeCollection branch produced it (one-sided branches can also carry
@@ -629,6 +649,13 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
       const lTextChanged = l.text !== bText, rTextChanged = r.text !== bText;
       const lDoneChanged = !!l.done !== bDone, rDoneChanged = !!r.done !== bDone;
       const lt = l.touchedAt || 0, rt = r.touchedAt || 0;
+      // F1 (2026-08-18): SEPARATE clamped operands, used ONLY by the two comparisons
+      // below. Do NOT clamp lt/rt themselves: they also feed Math.max(lt, rt) further
+      // down, and two skewed sides would give Math.max(0,0) === 0, which executes
+      // "delete merged.touchedAt". The record would then persist with no edit-recency
+      // metadata, and in a LATER one-sided round the survivor-vs-deletion test reads
+      // survivor.touchedAt || 0, fails, and DROPS THE SUBTASK. Keep Math.max raw.
+      const ltc = _clampFuture(lt), rtc = _clampFuture(rt);
       // text: exactly one side changed it from base -> take that side
       // (matches mergeCollection's own one-sided-change rule, at field
       // granularity); both changed it to the SAME value -> no conflict;
@@ -639,7 +666,7 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
       else if(!lTextChanged && rTextChanged) text = r.text;
       else if(!lTextChanged && !rTextChanged) text = (bText !== undefined ? bText : (r.text != null ? r.text : l.text));
       else if(l.text === r.text) text = l.text;
-      else if(lt !== rt) text = lt > rt ? l.text : r.text;
+      else if(ltc !== rtc) text = ltc > rtc ? l.text : r.text;
       else text = preferLocal ? l.text : r.text;
       // done: see the design note above -- a shared boolean base can't
       // produce a genuine two-sided disagreement once both sides "changed"
@@ -650,7 +677,7 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
       else if(!lDoneChanged && rDoneChanged) done = !!r.done;
       else if(!lDoneChanged && !rDoneChanged) done = (bDone !== undefined ? bDone : !!r.done);
       else if(!!l.done === !!r.done) done = !!l.done;
-      else if(lt !== rt) done = lt > rt ? !!l.done : !!r.done;
+      else if(ltc !== rtc) done = ltc > rtc ? !!l.done : !!r.done;
       else done = preferLocal ? !!l.done : !!r.done;
       const touchedAt = Math.max(lt, rt);
       const merged = Object.assign({}, preferLocal ? l : r, { id: id, text: text, done: done });
@@ -666,6 +693,9 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
     // surviving side edited it strictly after the base snapshot -- edit wins.
     const survivorTouchedAt = survivor.touchedAt || 0;
     const baseTouchedAt = b.touchedAt || 0;
+    // Site 1 of 4 -- DIAGNOSTIC ONLY, never clamp here. The else-branch below is
+    // "deletion wins", so clamping a real-but-skewed edit to 0 would DELETE the subtask.
+    _skewDiagNote('skewChecklistSurvivor', survivorTouchedAt, id);
     if(survivorTouchedAt > baseTouchedAt){ resultMap.set(id, survivor); return; }
     // else: deletion wins -- item dropped, nothing added to resultMap
   });
@@ -689,7 +719,53 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
 var _hlcNow = (typeof now==='function') ? now : function(){ return Date.now(); };
 function _ua(x){ var v = (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; return v > _hlcNow() + MAX_FUTURE_SKEW_MS ? 0 : v; }
 function _ca(x){ var v = (x && Number(x.createdAt)) || 0; return v > _hlcNow() + MAX_FUTURE_SKEW_MS ? 0 : v; }
-function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSavedAt, tombstoneMap){
+// F1 (2026-08-18): clamp a RAW scalar timestamp for ARBITRATION only.
+// Use this ONLY where 0 means "loses the tiebreak". There are four sites where 0
+// means "destroy data" instead -- mergeChecklist's survivor-vs-deletion test, the
+// cleanDevices/mergeDevices isJunk+score pair, the tombstone overlay, and the
+// one-sided char guard. Those must NOT share this helper, and must keep reading raw
+// values. See the plan's Scope OUT section before adding a caller.
+function _clampFuture(v){ v = Number(v) || 0; return v > _hlcNow() + MAX_FUTURE_SKEW_MS ? 0 : v; }
+// Per-ROUND skew diagnostics for the four INVERTED-POLARITY sites (2026-08-18).
+// Those sites are deliberately left unclamped -- 0 there destroys data rather than
+// losing a tiebreak -- so this adds observability and NOTHING else. No merge result
+// changes. Aggregated per round on purpose: three of the four sit inside per-record
+// loops, and _qDiagPush (app.js:9) is a 50-entry ring with blind FIFO eviction, so
+// per-record pushes would evict the uncaught-error records the buffer exists for plus
+// evtWatermarkRepaired, which is _qDiagPush-only. One entry per site per round.
+// _skewDiag is null outside a merge() round, so a direct mergeCollection/mergeChecklist
+// call (as the unit tests make) accumulates nothing and cannot grow unbounded.
+var _skewDiag = null;
+function _skewDiagReset(){ _skewDiag = {}; }
+function _skewDiagNote(kind, ts, id){
+  if(!_skewDiag) return;
+  var t = Number(ts) || 0;
+  // Same threshold _ua uses, WITHOUT clamping the value.
+  if(t <= _hlcNow() + MAX_FUTURE_SKEW_MS) return;
+  var e = _skewDiag[kind] || (_skewDiag[kind] = { n: 0, maxTs: 0, worstId: null });
+  e.n++;
+  if(t > e.maxTs){ e.maxTs = t; e.worstId = (id == null) ? null : String(id); }
+}
+function _skewDiagFlush(){
+  if(!_skewDiag) return;
+  var d = _skewDiag; _skewDiag = null;
+  Object.keys(d).forEach(function(k){
+    var e = d[k];
+    if(e.n > 0 && typeof _qDiagPush === "function"){
+      _qDiagPush(k, { n: e.n, maxTs: e.maxTs, worstId: e.worstId });
+    }
+  });
+}
+// remoteDeviceId is an OPTIONAL trailing parameter (added 2026-08-18). It defaults to
+// undefined, and every consumer treats a missing id as "no remote id available" and
+// degrades to the pre-existing behaviour, so the older 3-, 4-, 5- and 6-argument call
+// sites in tests/ and archive/tests/ keep working unchanged. It must never reach the
+// user as a printed value.
+function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSavedAt, tombstoneMap, remoteDeviceId){
+  // Resolved ONCE per call, never per record: syncDeviceId() reads localStorage and
+  // lazily PERSISTS a new id when none exists, so calling it inside the per-task loop
+  // below would mean one localStorage read per task.
+  const _localDev = (typeof syncDeviceId === "function") ? syncDeviceId() : null;
   const baseMap = new Map((baseArr || []).map(x => [x.id, x]));
   const localMap = new Map((localArr || []).map(x => [x.id, x]));
   const remoteMap = new Map((remoteArr || []).map(x => [x.id, x]));
@@ -769,11 +845,23 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
     // type (todos, habits, rewards, tags, an.views/metrics) is unaffected.
     let winner;
     if((l && l.type==='daily') || (r && r.type==='daily')){
-      winner = resolveDailyConflict(l, r);
+      winner = resolveDailyConflict(l, r, _localDev, remoteDeviceId);
     } else {
       const lu = (l && l.updatedAt) || 0;
       const ru = (r && r.updatedAt) || 0;
-      winner = lu > ru ? l : r;
+      // F1 (2026-08-18): clamp so a fast clock cannot win. Both sides are gated as
+      // changed-since-base above, so each carries a real competing value and 0 only loses.
+      const luc = _clampFuture(lu), ruc = _clampFuture(ru);
+      // Deterministic tie-break on the lexically greater deviceId, so both devices
+      // compute the SAME winner. The old unconditional "remote wins the tie" is
+      // non-convergent: A would adopt B's copy while B adopts A's, forever.
+      if(luc === ruc && remoteDeviceId != null){
+        const _ld = _localDev;
+        if(_ld != null && _ld !== remoteDeviceId){ winner = (remoteDeviceId > _ld) ? r : l; }
+        else { winner = luc > ruc ? l : r; }
+      } else {
+        winner = luc > ruc ? l : r;
+      }
     }
     // F4 (2026-07-11): the whole-object winner above still discards the
     // OTHER side's checklist wholesale. Splice in a per-subtask merge
@@ -790,7 +878,15 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
     const _conflictKey = 'task:' + id;
     if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey)){
       _conflictLogThrottle.add(_conflictKey);
-      logEvent({kind:'conflictResolved', taskType:(winner&&winner.type)||'task', taskId:id, taskTitle:(winner&&winner.title)||'', winner:(winner===l)?'local':'remote', loser:(winner===l)?'remote':'local'});
+      // F5 (2026-08-18): winner/loser are RELATIVE words, so the same event reads as a
+      // different device on each side -- wrongly on one of them. Emit ABSOLUTE device ids
+      // too. LONG-FORM only: do NOT add these to app.js's _EXPORT_FIELD_MAP, or a
+      // new-build backup becomes unimportable by an old build (hash refusal).
+      // tools/join_exports.py already documents and maps these three names.
+      // Legacy winner/loser stay so older readers keep rendering.
+      const _cLd = _localDev;
+      const _cRd = (remoteDeviceId != null) ? remoteDeviceId : null;
+      logEvent({kind:'conflictResolved', taskType:(winner&&winner.type)||'task', taskId:id, taskTitle:(winner&&winner.title)||'', winner:(winner===l)?'local':'remote', loser:(winner===l)?'remote':'local', winnerDev:(winner===l)?_cLd:_cRd, loserDev:(winner===l)?_cRd:_cLd, reason:'updatedAt recency'});
     }
     resultMap.set(id, winner);
     return;
@@ -804,6 +900,10 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
   if(tombstoneMap && tombstoneMap.size){
     resultMap.forEach((v, id) => {
       const ts = tombstoneMap.get(id);
+      // Site 3 of 4 -- DIAGNOSTIC ONLY, never clamp `ts`. Clamping it to 0 makes the
+      // test 0 >= <positive> false, the delete never fires, and the deleted task
+      // survives every future merge.
+      _skewDiagNote('skewTombstoneOverlay', ts, id);
       if(ts != null && Number(ts) >= _ua(v)) resultMap.delete(id);
     });
   }
@@ -837,6 +937,11 @@ function cleanDevices(arr){
     const nameOf = x => x && typeof x.name === "string" ? x.name.trim() : "";
     const isJunk = x => !nameOf(x) && ((x.updatedAt) || 0) === 0;
     const score = x => isJunk(x) ? -1 : ((x.updatedAt) || 0) + (nameOf(x) ? 0.5 : 0);
+    // Site 2 of 4 -- DIAGNOSTIC ONLY, never clamp. A blank name with updatedAt > 0 is a
+    // DELIBERATE clear meant to win on recency; clamping it to 0 makes it
+    // indistinguishable from a never-touched placeholder (score -1), so it loses to the
+    // stale old name and a name the user deleted reappears.
+    _skewDiagNote('skewDeviceMerge', d && d.updatedAt, d && d.id);
     if(score(d) > score(prev)) byId.set(d.id, d);
   });
   return [...byId.values()];
@@ -865,6 +970,10 @@ function mergeDevices(baseArr, localArr, remoteArr, localDeviceId, remoteDeviceI
     // names get a tiny bonus so an equal-timestamp name beats an equal-timestamp
     // blank. Local breaks any remaining tie.
     const sl = score(l), sr = score(r);
+    // Site 2 of 4 (second location) -- DIAGNOSTIC ONLY, never clamp. Same polarity
+    // trap as cleanDevices above.
+    _skewDiagNote('skewDeviceMerge', l && l.updatedAt, l && l.id);
+    _skewDiagNote('skewDeviceMerge', r && r.updatedAt, r && r.id);
     let winner;
     if(sl > sr) winner = l;
     else if(sr > sl) winner = r;
@@ -919,6 +1028,7 @@ function mergeDayArray(localArr, remoteArr){
 }
 
 function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, remoteDeviceId){
+  _skewDiagReset(); // one merge() call == one round; see _skewDiagNote
   base = base || {};
   local = local || {};
   remote = remote || {};
@@ -951,18 +1061,23 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, 
   const _tomb = mergedDeletions;
 
   const merged = {
-    tasks: normalizeDailyResets(mergeCollection(base.tasks, local.tasks, remote.tasks, remoteSavedAt, localSavedAt, _tomb), mergedLastCron), // F3 (2026-07-11): reset overlay keyed to merged lastCron
-    rewards: mergeCollection(base.rewards, local.rewards, remote.rewards, remoteSavedAt, localSavedAt, _tomb),
-    tags: mergeCollection(base.tags, local.tags, remote.tags, remoteSavedAt, localSavedAt, _tomb),
+    tasks: normalizeDailyResets(mergeCollection(base.tasks, local.tasks, remote.tasks, remoteSavedAt, localSavedAt, _tomb, remoteDeviceId), mergedLastCron), // F3 (2026-07-11): reset overlay keyed to merged lastCron
+    rewards: mergeCollection(base.rewards, local.rewards, remote.rewards, remoteSavedAt, localSavedAt, _tomb, remoteDeviceId),
+    tags: mergeCollection(base.tags, local.tags, remote.tags, remoteSavedAt, localSavedAt, _tomb, remoteDeviceId),
     devices: mergeDevices(base.devices, local.devices, remote.devices, localDeviceId, remoteDeviceId),
     an: {
-      views: mergeCollection(baseAn.views, localAn.views, remoteAn.views, remoteSavedAt, localSavedAt, _tomb),
-      metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics, remoteSavedAt, localSavedAt, _tomb)
+      views: mergeCollection(baseAn.views, localAn.views, remoteAn.views, remoteSavedAt, localSavedAt, _tomb, remoteDeviceId),
+      metrics: mergeCollection(baseAn.metrics, localAn.metrics, remoteAn.metrics, remoteSavedAt, localSavedAt, _tomb, remoteDeviceId)
     },
     pause: (function(){
       const baseP = base.pause || {}, localP = local.pause || {}, remoteP = remote.pause || {};
       const lAt = Number(localP.at) || 0, rAt = Number(remoteP.at) || 0;
-      const src = (lAt >= rAt) ? localP : remoteP; // LWW by `at` (base ignored), tie -> local; same philosophy as mergedLastCron's plain-max
+      // F1 (2026-08-18): clamped copies for the WINNER choice only. Safe here because
+      // the returned `at` below keeps Math.max(lAt, rAt) on the RAW values, so the field
+      // is never deleted, and no consumer treats at === 0 as "never paused" -- they all
+      // branch on the paused boolean or on pausedDays. Do not clamp the raw pair.
+      const lAtc = _clampFuture(lAt), rAtc = _clampFuture(rAt);
+      const src = (lAtc >= rAtc) ? localP : remoteP; // LWW by `at` (base ignored), tie -> local; same philosophy as mergedLastCron's plain-max
       const _union = [].concat(baseP.pausedDays || [], localP.pausedDays || [], remoteP.pausedDays || [])
         .filter(v => typeof v === "number" && isFinite(v));
       const pausedDays = Array.from(new Set(_union)).sort((a, b) => a - b).slice(-7);
@@ -997,6 +1112,12 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, 
       if(!localChanged && !remoteChanged) return b;
       if(localChanged && !remoteChanged) return l;
       if(!localChanged && remoteChanged){
+        // Site 4 of 4 -- DIAGNOSTIC ONLY, never clamp. This branch fires ONLY when local
+        // made no edit at all, so there is no competing value: r.updatedAt belongs to
+        // remote's only real edit. Clamping it to 0 fails the guard, returns the untouched
+        // local char, and silently discards remote's real XP/gold/level/maxHp. The current
+        // unclamped behaviour here is CORRECT. Skew protection here needs a different rule.
+        _skewDiagNote('skewCharGuard', r && r.updatedAt, (r && r.id) || 'char');
         // GUARD (recency): accept remote char only if it is not OLDER than local.
         return ((Number(r.updatedAt)||0) >= (Number(l.updatedAt)||0)) ? r : l;
       }
@@ -1007,12 +1128,22 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, 
       // deterministic deviceId tiebreak (below) so two devices editing offline
       // with equal timestamps converge in ONE round instead of ping-ponging.
       // A future-skewed remote cannot win a tie (anti-skew bias preserved).
-      if((Number(r.updatedAt)||0) > (Number(l.updatedAt)||0)){
+      // F1 (2026-08-18): clamped. This is the BOTH-changed branch, so each side carries a
+      // real competing value and 0 only loses; an equal result falls through to the
+      // deterministic deviceId tiebreak below. NOTE: the ONE-SIDED branch above
+      // (!localChanged && remoteChanged) must stay UNCLAMPED -- there remote holds the
+      // only real edit, so clamping it to 0 would discard remote's real XP/gold/level.
+      if(_clampFuture(r.updatedAt) > _clampFuture(l.updatedAt)){
         // T4: throttle conflictResolved to one per (kind, entityId) per round
         const _conflictKey1 = 'char:' + ((l&&l.id)||(r&&r.id));
         if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey1)){
           _conflictLogThrottle.add(_conflictKey1);
-          logEvent({kind:'conflictResolved', taskType:'char', winner:'remote', loser:'local', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+          // F5: absolute device ids alongside the relative words. Computed inline rather
+          // than hoisted, because syncDeviceId() persists a new id when none exists and
+          // must stay inside the branch that actually emits.
+          const _e1Ld = (localDeviceId != null) ? localDeviceId : ((typeof syncDeviceId === "function") ? syncDeviceId() : null);
+          const _e1Rd = (remoteDeviceId != null) ? remoteDeviceId : null;
+          logEvent({kind:'conflictResolved', taskType:'char', winner:'remote', loser:'local', winnerDev:_e1Rd, loserDev:_e1Ld, reason:'updatedAt recency', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
         }
         return r;
       }
@@ -1027,7 +1158,7 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, 
         const _conflictKey2 = 'char:' + ((l&&l.id)||(r&&r.id));
         if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey2)){
           _conflictLogThrottle.add(_conflictKey2);
-          logEvent({kind:'conflictResolved', taskType:'char', winner:(_rd>_ld)?'remote':'local', loser:(_rd>_ld)?'local':'remote', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+          logEvent({kind:'conflictResolved', taskType:'char', winner:(_rd>_ld)?'remote':'local', loser:(_rd>_ld)?'local':'remote', winnerDev:(_rd>_ld)?_rd:_ld, loserDev:(_rd>_ld)?_ld:_rd, reason:'deviceId tiebreak', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
         }
         return (_rd > _ld) ? r : l;
       }
@@ -1035,11 +1166,14 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, 
       const _conflictKey3 = 'char:' + ((l&&l.id)||(r&&r.id));
       if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey3)){
         _conflictLogThrottle.add(_conflictKey3);
-        logEvent({kind:'conflictResolved', taskType:'char', winner:'local', loser:'remote', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+        // F5: unresolved-tie fallback -- _rd is null here, which is WHY we fell through.
+        // loserDev is therefore null and the renderer's || chain keeps the legacy wording.
+        logEvent({kind:'conflictResolved', taskType:'char', winner:'local', loser:'remote', winnerDev:_ld, loserDev:_rd, reason:'unresolved tie, local kept', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
       }
       return l; // unresolved tie (no remote device id available) -> local (F2 bias)
     })()
   };
+  _skewDiagFlush(); // exactly one diagnostic entry per site per round
   return merged;
 }
 
@@ -1736,8 +1870,11 @@ async function uidHash(recs){
 // T1: uidsAreSuperset - check if local uids contain all known uids
 function uidsAreSuperset(localRecs, knownHash, knownUids){
   const localUids = new Set((localRecs || []).map(e => e.uid).filter(Boolean));
-  // If we have the known uids stored, use them directly
-  if(knownUids && knownUids.size){
+  // If we have the known uids stored, use them directly.
+  // F8 (2026-08-18): uids persist as an ARRAY, not a Set — a Set becomes {} through
+  // JSON.stringify, so .size was undefined after every reload and this fast path was
+  // silently skipped forever. Arrays are still iterable by the for-of below.
+  if(knownUids && knownUids.length){
     for(const u of knownUids){
       if(!localUids.has(u)) return false;
     }
@@ -1862,15 +1999,20 @@ async function syncEventsPush(opts){
       // Check if shrink is legitimate (age pruning)
       let isLegitimateShrink = false;
       if(localCount < knownCount){
-        // Check if all missing records are older than age limit
-        const knownUids = known.uids || new Set();
-        const localUids = new Set(recs.map(e => e.uid).filter(Boolean));
-        const missingUids = [...knownUids].filter(u => !localUids.has(u));
-        // We'd need to fetch the missing records to check their age - for now, 
-        // we check if the local max ts is within the age limit
-        const localMaxTs = recs.length ? Math.max(...recs.map(e => e.ts)) : 0;
+        // F3 (2026-08-18): ask "could the records that disappeared have legitimately
+        // aged out?", not "is the NEWEST remaining record stale?". The old test
+        // (now - localMaxTs > ageLimit) blocked a month straddling the cutoff FOREVER.
+        // Two conditions, both computable here with zero extra Dropbox calls:
+        //   (a) nothing prunable remains locally — exactly what a completed prune leaves;
+        //   (b) the cutoff has swept into this month, so it genuinely held prunable records.
+        // Deliberately a heuristic: it cannot distinguish "aged out" from "real loss
+        // coinciding with an aging month". A precise rule would need a per-month download
+        // every round; judged not worth it against a permanent silent stall.
+        // recs is non-empty here (the !recs.length continue above), so Math.min is finite.
         const now = Date.now();
-        if(now - localMaxTs > ageLimit){
+        const cutoff = now - ageLimit;
+        const localMinTs = Math.min(...recs.map(e => e.ts));
+        if(localMinTs >= cutoff && r.from < cutoff){
           isLegitimateShrink = true;
         }
       }
@@ -1894,7 +2036,9 @@ async function syncEventsPush(opts){
     await dbxUploadText(EVENTS_DIR + "/" + fname, JSON.stringify(recs));
     // Update the file counts with new count and hash
     const newHash = await uidHash(recs);
-    const newUids = new Set(recs.map(e => e.uid).filter(Boolean));
+    // F8 (2026-08-18): a plain ARRAY, never a Set — this is persisted through
+    // JSON.stringify by syncCfgSave(), and JSON.stringify(new Set([...])) yields {}.
+    const newUids = recs.map(e => e.uid).filter(Boolean);
     fileCounts[fname] = { count: recs.length, hash: newHash, uids: newUids };
     // Clear any previous block for this file
     delete pushBlocked[fname];
@@ -2157,6 +2301,29 @@ async function confirmForcePush(){
     if(!ok) return;
     if(typeof toast==="function") toast('Pushing this device\'s data to Dropbox\u2026');
     syncForcePush();
+  });
+}
+// F4 (2026-08-18): the shrink-block toast tells the user to press "Force Push Events"
+// in Settings. That button did not exist, so the instruction was unfollowable.
+// This is FAR safer than a state force push: event files are an additive union with no
+// tombstones, so re-pushing them cannot delete anything on the other device. The copy
+// below stays calm for that reason -- do not reuse confirmForcePush's warning text.
+async function confirmEventsForcePush(){
+  if(typeof confirmDialog!=="function"){
+    if(typeof toast==="function") toast('Force push unavailable right now (confirmation dialog missing).');
+    return;
+  }
+  let text = "This re-uploads this device's event history to Dropbox, overriding a blocked push. Event files only ever get added together, so nothing on your other device can be deleted by this.";
+  try{
+    const _blocked = Object.keys((syncCfg().evtPushBlocked) || {}).length;
+    if(_blocked > 0){
+      text += " " + _blocked + " month file" + (_blocked === 1 ? " is" : "s are") + " blocked right now.";
+    }
+  }catch(e){ /* advisory only, never block the dialog */ }
+  confirmDialog('Force Push Events?', text).then(ok=>{
+    if(!ok) return;
+    if(typeof toast==="function") toast('Re-uploading events to Dropbox\u2026');
+    syncEventsForcePush();
   });
 }
 // Connect + force push in a single action, for the "fresh device, make Dropbox hold

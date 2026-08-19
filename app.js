@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.08.14-1945";
+const APP_VERSION = "v2026.08.18-2106";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -113,11 +113,20 @@ function freshState(){
     prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false, autoBackupEnabled:{fourHour:false,daily:false,weekly:false,monthly:false}, hideConflictDecisions:false, hideSyncDiag:true }
   };
 }
+// F7 (2026-08-18): the SINGLE future-skew tolerance for the whole app. sync.js's
+// MAX_FUTURE_SKEW_MS derives from this constant (app.js loads first and sync.js cannot
+// be read from here, so the dependency runs this way round -- the same cross-file
+// pattern EVENT_AGE_LIMIT_MS already uses). Before this, ratchetHlc tolerated a full
+// hour while the merge clamp tolerated 2 minutes: a remote stamp between the two lost
+// every arbitration yet still ratcheted the local clock and persisted to S.__hlcLast,
+// and because the clamp measures against the ratcheted clock the error compounded.
+// Accepting a value for the clock while rejecting it for merging is incoherent.
+const HLC_RATCHET_TOLERANCE_MS = 120000; // future-skew tolerance; sync.js MAX_FUTURE_SKEW_MS derives from this
 var lastIssued = 0;
 let S = load();
 lastIssued = (S && S.__hlcLast) || 0;
 function now(){ var p=Date.now(); lastIssued=Math.max(p, lastIssued+1); try{ if(S) S.__hlcLast=lastIssued; }catch(e){} return lastIssued; }
-function ratchetHlc(maxRemoteTs){ var p=Date.now(); if(maxRemoteTs > p + 3600000){ try{ logEvent({kind:'clockSkew', remoteTs:maxRemoteTs, localTs:p}); }catch(e){} return; } lastIssued = Math.max(lastIssued, maxRemoteTs); if(S) S.__hlcLast = lastIssued; }
+function ratchetHlc(maxRemoteTs){ var p=Date.now(); if(maxRemoteTs > p + HLC_RATCHET_TOLERANCE_MS){ try{ logEvent({kind:'clockSkew', remoteTs:maxRemoteTs, localTs:p}); }catch(e){} return; } lastIssued = Math.max(lastIssued, maxRemoteTs); if(S) S.__hlcLast = lastIssued; }
 function load(){
   try{ const raw = localStorage.getItem(STORE_KEY);
     if(raw){ return migrate(JSON.parse(raw)); } }catch(e){}
@@ -1292,6 +1301,33 @@ async function listSnapshots(){
     });
   }catch(e){ console.error("listSnapshots failed:",e); return []; }
 }
+// F6 (2026-08-18): decide whether the startup snapshot is worth writing.
+// Fires when ANY of: state changed this session; OR no snapshot exists at all;
+// OR the newest snapshot is older than 12 h. Matches docs/BACKUP-USER-GUIDE.md:30-34.
+// The "no snapshots" clause is NOT about fresh installs — it is the once-per-session
+// backstop for browsers where visibilitychange/pagehide never fire before the page is
+// killed (iOS Safari class, AGENTS.md §5). Do not remove it as redundant.
+// Cost: the "backups" store has no index and listSnapshots() cursors every record
+// pushing the whole value, payload included — using it here would deserialise every
+// snapshot on every boot. So read the newest ts with a REVERSE cursor and stop at the
+// first record. No IDB_VERSION bump: a reverse cursor needs no new index.
+async function _shouldStartupSnapshot(){
+  if(IS_DIRTY) return true;
+  try{
+    const db = await idbOpen();
+    const tx = db.transaction("backups","readonly");
+    const store = tx.objectStore("backups");
+    const newestTs = await new Promise((resolve,reject)=>{
+      const req = store.openCursor(null,"prev");
+      req.onsuccess = ()=>{ const c=req.result;
+        if(!c){ resolve(null); return; }
+        resolve(Number(c.value && c.value.ts) || 0); }; // first record only — never c.continue()
+      req.onerror = ()=>reject(req.error);
+    });
+    if(newestTs === null) return true;            // empty store: once-per-session backstop
+    return (Date.now() - newestTs) > 43200000;    // 12 h
+  }catch(e){ return true; }                        // cannot tell: prefer having a backup
+}
 async function readSnapshot(id){
   try{
     const db = await idbOpen();
@@ -2016,7 +2052,19 @@ function drawYesterCheck(){
   if(_ns) _ns.scrollTop = _sc;
 }
 function commitYesterCheck(){
-  _yesterMissed.forEach(t=>{ if(_yesterTick[t.id]) creditYesterday(t); });
+  // 2026-08-18: re-resolve each ticked id against the LIVE S.tasks before crediting.
+  // _yesterMissed holds object references captured when the modal opened, and any sync
+  // round that lands while it is open replaces them: syncApply deep-copies the subset
+  // (new identities) and then assigns S.tasks wholesale. Crediting the captured object
+  // would mutate a detached orphan and the user's credit would be silently lost.
+  // Pre-existing bug, not introduced by the boot gate: the online/visibilitychange
+  // listeners in sync.js can fire a round at any time, not just the first one.
+  _yesterMissed.forEach(t=>{
+    if(!_yesterTick[t.id]) return;
+    const live = S.tasks.find(x=>x.id===t.id);
+    if(!live) return; // id no longer exists -- skip cleanly, never throw
+    creditYesterday(live);
+  });
   const credited=_yesterMissed.filter(t=>_yesterTick[t.id]).length;
   document.getElementById('yScrim').classList.remove('show');
   document.getElementById('yScrim').innerHTML='';
@@ -2024,6 +2072,22 @@ function commitYesterCheck(){
   runCron();            // finalize the day; corrected dailies are now done, so cron skips them
   render();
   if(credited>0) toast('Credited '+credited+' daily'+(credited===1?'':'s')+' from yesterday');
+}
+// Mirrors the connected gate defined in sync.js:18 (SYNC_KEY = "questa.sync.v1") and
+// enforced in sync.js by `if(!cfg.enabled || !cfg.refreshToken) return Promise.resolve();`
+// inside syncNow(). The localStorage read is INLINED rather than calling syncCfg(),
+// because sync.js has not loaded yet at this point in boot -- same pattern as
+// showSyncDebugOverlay() further up this file. If those sync.js lines ever diverge from
+// this check, update this too: otherwise the boot gate silently stops waiting.
+// Must never throw -- it runs on the boot path.
+function _syncConfiguredForBoot(){
+  var cfg = {}; try{ cfg = JSON.parse(localStorage.getItem("questa.sync.v1") || "{}"); }catch(e){}
+  return !!(cfg && cfg.enabled && cfg.refreshToken);
+}
+// Pure: no globals, no DOM. Extracted so the boot gate's decision is unit-testable on
+// its own return value (AGENTS.md §4), not merely covered through its caller.
+function shouldDeferDayRollover(cfgConnected, elapsedMs, timeoutMs){
+  return !!cfgConnected && elapsedMs < timeoutMs;
 }
 // Startup gate: prompt if anything was missed yesterday, else run cron directly.
 function startDay(){
@@ -3937,7 +4001,17 @@ function renderEventDetail(from,to){
           icon = '⚖️';
           var _ct = e.taskTitle || e.charTitle || 'item';
           // T4/T7: prefer new winnerDev/loserDev/reason fields, fall back to legacy winner/loser
-          var _winner = e.winnerDev || e.winner || 'remote';
+          // F5 (2026-08-18): resolve winnerDev to a DISPLAY NAME, never print a raw
+          // device id. getCachedDeviceName wraps deviceDisplayName and memoises per
+          // render pass; it truncates with .slice(0,6) -- the display convention. Do NOT
+          // use sync.js's .slice(-6), which is the backup-FILENAME convention.
+          // A device id is absolute, so this now reads the SAME on both devices. That is
+          // the fix: the relative word "remote" meant a different device on each side.
+          // An old-shape event has no winnerDev and still falls through the || chain to
+          // the legacy wording, unchanged.
+          var _winner = (e.winnerDev ? getCachedDeviceName(e.winnerDev) : '') || e.winnerDev || e.winner || 'remote';
+          // _loser is emitted for tools/join_exports.py, which documents and maps it.
+          // It is deliberately not rendered -- do not delete it as unused.
           var _loser = e.loserDev || e.loser || 'local';
           var _reason = e.reason ? ' \u00b7 ' + esc(e.reason) : '';
           desc = 'Sync conflict resolved \u00b7 ' + esc(_ct) + ' \u00b7 kept ' + esc(_winner) + '\'s copy' + _reason;
@@ -5331,6 +5405,11 @@ function openSettings(){
         h+='<div class="settingsRow">'+
            (typeof confirmForcePush==="function"?'<button class="btn danger" onclick="confirmForcePush()">Force push</button>':'')+
            (typeof confirmForcePull==="function"?'<button class="btn danger" onclick="confirmForcePull()">Force pull</button>':'')+
+           // F4 (2026-08-18): label must match the shrink-block toast (sync.js) word for
+           // word, so the instruction the app gives is literally followable. Always shown
+           // when connected: evtPushBlocked is unreliable exactly when it matters, and the
+           // toast's instruction must survive a reload.
+           (typeof confirmEventsForcePush==="function"?'<button class="btn danger" onclick="confirmEventsForcePush()">Force Push Events</button>':'')+
            '</div>';
       }
       const _abtiers = S.prefs.autoBackupEnabled || {fourHour:false,daily:false,weekly:false,monthly:false};
@@ -6376,5 +6455,10 @@ checkExportStaleness();
 try{ if(navigator&&navigator.storage&&typeof navigator.storage.persist==="function"){ navigator.storage.persist().then(function(granted){ if(typeof logEvent==="function") logEvent({kind:"storagePersist", granted:!!granted}); }).catch(function(){}); } }catch(_){}
 
 setTimeout(()=>{
-  if(!_flushPromise){ _flushPromise = takeSnapshot().catch(()=>{}).finally(()=>{ _flushPromise=null; }); }
+  if(_flushPromise) return;
+  // F6 (2026-08-18): a no-op open no longer writes a snapshot. See _shouldStartupSnapshot().
+  _shouldStartupSnapshot().then(go=>{
+    if(!go) return;
+    if(!_flushPromise){ _flushPromise = takeSnapshot().catch(()=>{}).finally(()=>{ _flushPromise=null; }); }
+  }).catch(()=>{});
 }, 5000);

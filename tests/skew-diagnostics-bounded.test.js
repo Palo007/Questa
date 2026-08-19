@@ -198,11 +198,34 @@ const Q = M.Q, diagEntries = M.diagEntries;
 })();
 
 // ===========================================================================
-// TEST 3 -- ONE ENTRY PER SITE PER ROUND (RED on HEAD: today's count never
-// moves at all, so the required +1-per-round deltas both fail).
+// TEST 3 -- AT MOST ONE ENTRY PER KIND PER THROTTLE WINDOW, ACROSS ROUNDS.
+//
+// CHANGED 2026-08-19 by J1 finding 3 (plan todo 18). This test previously asserted
+// "+1 entry per ROUND": round 1 adds one, round 2 adds one more. That was the
+// correct contract before J1 and it is deliberately no longer true.
+//
+// Why it changed: there was no cross-round throttle. merge() runs once per round
+// and again on a conflict retry, SYNC_DEBOUNCE_MS is 5000, and _qDiagPush is a
+// 50-entry ring with blind FIFO eviction -- so a peer more than 120 s fast (far
+// likelier since todo 17 tightened the ratchet tolerance from 1 h to 2 min) flushed
+// 4-8 entries per ROUND and evicted every uncaught-error and evtWatermarkRepaired
+// record the ring exists for in roughly 7-13 rounds. sync.js now carries a per-kind
+// last-pushed timestamp (SKEW_DIAG_MIN_INTERVAL_MS, 60000) mirroring
+// _evtPullLastThrottleDiag, so repeat rounds inside one window emit nothing.
+//
+// The original per-round-not-per-record property is NOT lost: it is pinned by T1's
+// `entry.n === N_SUBTASKS` plus `site1.length === 1` assertions above, which prove a
+// single aggregate record carries the whole round's count instead of one record per
+// record. What T3 now pins is the throttle itself.
+//
+// This file shares one real (unsteppable) clock across all of its tests, and T1/T2
+// already emitted this kind's one record for the current window, so both rounds
+// below must add ZERO. The window-reopens-again half of the contract needs a
+// steppable clock and lives in tests/skew-diag-hardening.test.js (F3d/F3e).
 // ===========================================================================
 (function(){
   const before = countKind(diagEntries, 'skewChecklistSurvivor');
+  const ringBefore = diagEntries.length;
 
   const fx1 = buildChecklistFixture(N_SUBTASKS);
   Q.merge(fx1.base, fx1.local, fx1.remote, NOW, NOW); // round 1
@@ -212,10 +235,13 @@ const Q = M.Q, diagEntries = M.diagEntries;
   Q.merge(fx2.base, fx2.local, fx2.remote, NOW, NOW); // round 2
   const afterRound2 = countKind(diagEntries, 'skewChecklistSurvivor');
 
-  assert('T3 round 1 adds exactly ONE skewChecklistSurvivor entry (not ' + N_SUBTASKS + ')',
-    (afterRound1 - before) === 1);
-  assert('T3 round 2 adds exactly ONE more skewChecklistSurvivor entry (per-round, not per-record)',
-    (afterRound2 - afterRound1) === 1);
+  assert('T3 the window already holds this kind\'s one record (emitted by T1)', before >= 1);
+  assert('T3 round 1 inside the same throttle window adds NO further entry',
+    (afterRound1 - before) === 0);
+  assert('T3 round 2 inside the same throttle window adds NO further entry',
+    (afterRound2 - afterRound1) === 0);
+  assert('T3 two more skewed rounds grew the ring by 0, not by ' + (2 * 4) + ' -- the ring is protected',
+    (diagEntries.length - ringBefore) === 0);
 })();
 
 // ===========================================================================

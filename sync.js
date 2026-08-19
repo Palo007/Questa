@@ -736,12 +736,34 @@ function _clampFuture(v){ v = Number(v) || 0; return v > _hlcNow() + MAX_FUTURE_
 // _skewDiag is null outside a merge() round, so a direct mergeCollection/mergeChecklist
 // call (as the unit tests make) accumulates nothing and cannot grow unbounded.
 var _skewDiag = null;
-function _skewDiagReset(){ _skewDiag = {}; }
+// J1 finding 4 (2026-08-19): the tolerance boundary is captured ONCE PER ROUND here,
+// as a pure read of Date.now(). _skewDiagNote() used to call _hlcNow(), which is
+// bound to app.js's now() and is NOT a pure read -- it does
+// lastIssued = Math.max(p, lastIssued+1) and persists S.__hlcLast -- so every noted
+// record advanced the HLC and wrote it. Stamped in _skewDiagReset(), never at module
+// load: a long-lived tab would otherwise compare against a stale boundary forever.
+// NOT a literal no-op: Date.now() + MAX_FUTURE_SKEW_MS is not the same number as the
+// ratcheting _hlcNow() one, so which records get noted shifts slightly. That is
+// diagnostic-only and accepted -- no merge result depends on it.
+// SCOPE: _hlcNow()'s other three call sites (_ua, _ca, _clampFuture) are the
+// inverted-polarity clamp operands and MUST NOT be touched -- a 0 there destroys data.
+var _skewDiagThreshold = 0;
+// J1 finding 3 (2026-08-19): cross-round throttle, mirroring _evtPullLastThrottleDiag.
+// There was none. merge() runs once per round and again on a conflict retry,
+// SYNC_DEBOUNCE_MS is 5000, and _qDiagPush is a 50-entry ring with blind FIFO
+// eviction -- so a peer more than 120 s fast (far likelier since todo 17 tightened the
+// ratchet tolerance from 1 h to 2 min) flushed 4-8 entries per round and evicted every
+// uncaught-error and evtWatermarkRepaired record in roughly 7-13 rounds, well under
+// two minutes of use. Keyed PER KIND deliberately: a single global key would let a
+// skewDeviceMerge burst silently suppress a skewCharGuard note.
+var SKEW_DIAG_MIN_INTERVAL_MS = 60000; // matches EVT_PULL_MIN_INTERVAL_MS
+var _skewDiagLastPush = {};
+function _skewDiagReset(){ _skewDiag = {}; _skewDiagThreshold = Date.now() + MAX_FUTURE_SKEW_MS; }
 function _skewDiagNote(kind, ts, id){
   if(!_skewDiag) return;
   var t = Number(ts) || 0;
-  // Same threshold _ua uses, WITHOUT clamping the value.
-  if(t <= _hlcNow() + MAX_FUTURE_SKEW_MS) return;
+  // Same tolerance _ua uses, WITHOUT clamping the value and WITHOUT touching the HLC.
+  if(t <= _skewDiagThreshold) return;
   var e = _skewDiag[kind] || (_skewDiag[kind] = { n: 0, maxTs: 0, worstId: null });
   e.n++;
   if(t > e.maxTs){ e.maxTs = t; e.worstId = (id == null) ? null : String(id); }
@@ -749,9 +771,12 @@ function _skewDiagNote(kind, ts, id){
 function _skewDiagFlush(){
   if(!_skewDiag) return;
   var d = _skewDiag; _skewDiag = null;
+  var nowMs = Date.now(); // pure read; see finding 4 above
   Object.keys(d).forEach(function(k){
     var e = d[k];
     if(e.n > 0 && typeof _qDiagPush === "function"){
+      if(nowMs - (_skewDiagLastPush[k] || 0) < SKEW_DIAG_MIN_INTERVAL_MS) return; // finding 3
+      _skewDiagLastPush[k] = nowMs;
       _qDiagPush(k, { n: e.n, maxTs: e.maxTs, worstId: e.worstId });
     }
   });
@@ -932,16 +957,23 @@ function cleanDevices(arr){
   const byId = new Map();
   arr.forEach(d => {
     if(!d || !d.id) return;
+    // Site 2 of 4 -- DIAGNOSTIC ONLY, never clamp. A blank name with updatedAt > 0 is a
+    // DELIBERATE clear meant to win on recency; clamping it to 0 makes it
+    // indistinguishable from a never-touched placeholder (score -1), so it loses to the
+    // stale old name and a name the user deleted reappears.
+    // J1 finding 7 (2026-08-19): this note MUST sit BEFORE the !prev early return.
+    // It used to sit after it, so it only ever observed duplicate-id entries and a
+    // skewed device with a unique id was never reported here at all. cleanDevices() is
+    // now the SINGLE observer of device skew -- mergeDevices' two per-side notes were
+    // removed, because they fired once for `l` and once for `r` on the same id and
+    // double-counted one device as two. Since mergeDevices ends in cleanDevices(out)
+    // and `out` carries exactly one entry per id, n is now a true DEVICE COUNT.
+    _skewDiagNote('skewDeviceMerge', d && d.updatedAt, d && d.id);
     const prev = byId.get(d.id);
     if(!prev){ byId.set(d.id, d); return; }
     const nameOf = x => x && typeof x.name === "string" ? x.name.trim() : "";
     const isJunk = x => !nameOf(x) && ((x.updatedAt) || 0) === 0;
     const score = x => isJunk(x) ? -1 : ((x.updatedAt) || 0) + (nameOf(x) ? 0.5 : 0);
-    // Site 2 of 4 -- DIAGNOSTIC ONLY, never clamp. A blank name with updatedAt > 0 is a
-    // DELIBERATE clear meant to win on recency; clamping it to 0 makes it
-    // indistinguishable from a never-touched placeholder (score -1), so it loses to the
-    // stale old name and a name the user deleted reappears.
-    _skewDiagNote('skewDeviceMerge', d && d.updatedAt, d && d.id);
     if(score(d) > score(prev)) byId.set(d.id, d);
   });
   return [...byId.values()];
@@ -971,9 +1003,15 @@ function mergeDevices(baseArr, localArr, remoteArr, localDeviceId, remoteDeviceI
     // blank. Local breaks any remaining tie.
     const sl = score(l), sr = score(r);
     // Site 2 of 4 (second location) -- DIAGNOSTIC ONLY, never clamp. Same polarity
-    // trap as cleanDevices above.
-    _skewDiagNote('skewDeviceMerge', l && l.updatedAt, l && l.id);
-    _skewDiagNote('skewDeviceMerge', r && r.updatedAt, r && r.id);
+    // trap as cleanDevices above; the arbitration below is deliberately untouched.
+    // J1 finding 7 (2026-08-19): the two per-side _skewDiagNote calls that used to sit
+    // here were REMOVED. They noted `l` and `r` separately for the same device id, so
+    // one skewed device present on both sides counted as two, and then
+    // cleanDevices(out) re-noted every survivor on top. cleanDevices() is now the
+    // single observer -- see the comment there. Residual, stated rather than implied: a
+    // skewed entry that LOSES arbitration is no longer noted, because `out` holds only
+    // winners. That is the price of making n a true device count, and the merged state
+    // in that case is clean anyway.
     let winner;
     if(sl > sr) winner = l;
     else if(sr > sl) winner = r;
@@ -1027,8 +1065,24 @@ function mergeDayArray(localArr, remoteArr){
   return [...buckets.values()].sort((a, b) => (a.date || 0) - (b.date || 0));
 }
 
+// J1 finding 8 (2026-08-19): the flush now runs in a `finally`. If merge() threw
+// between _skewDiagReset() and _skewDiagFlush(), _skewDiag stayed non-null -- and
+// cleanDevices() is also reachable from syncSubset() and syncApply() OUTSIDE any merge
+// round, so those calls then wrote into the orphaned object and were misattributed to a
+// later round's flush. `finally`, never `catch`: the throw must still propagate
+// untouched, because the caller's error handling must not change.
+// The body lives in _mergeInner() rather than being wrapped in place purely to keep the
+// diff reviewable -- indenting ~145 lines of arbitration code into a try block would
+// bury the real change. merge() keeps its name, signature and registry entry.
 function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, remoteDeviceId){
   _skewDiagReset(); // one merge() call == one round; see _skewDiagNote
+  try{
+    return _mergeInner(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, remoteDeviceId);
+  } finally {
+    _skewDiagFlush(); // exactly one diagnostic entry per site per round, throw or not
+  }
+}
+function _mergeInner(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, remoteDeviceId){
   base = base || {};
   local = local || {};
   remote = remote || {};
@@ -1173,8 +1227,7 @@ function merge(base, local, remote, remoteSavedAt, localSavedAt, localDeviceId, 
       return l; // unresolved tie (no remote device id available) -> local (F2 bias)
     })()
   };
-  _skewDiagFlush(); // exactly one diagnostic entry per site per round
-  return merged;
+  return merged; // the flush is merge()'s finally -- see J1 finding 8 above
 }
 
 function wrap(subset){

@@ -77,6 +77,7 @@ const S = {
 };
 
 const noop = function () {};
+const toasts = [];
 const sandbox = {
   S: S,
   document: {
@@ -86,7 +87,11 @@ const sandbox = {
   },
   console: console, JSON: JSON, Math: Math, Date: Date,
   Object: Object, Array: Array, Number: Number, String: String, Boolean: Boolean, Promise: Promise,
-  toast: noop, render: noop, runCron: noop, drawYesterCheck: noop, levelFlash: noop,
+  // toast captures instead of no-opping: J4 asserts the NUMBER the user is actually
+  // shown, which is the observable boundary the bug crosses (AGENTS.md S4 -- assert on
+  // what was recorded, not that a function was called).
+  toast: function (m) { toasts.push(m); },
+  render: noop, runCron: noop, drawYesterCheck: noop, levelFlash: noop,
   idbOpen: function () { return Promise.resolve(null); },
   lastIssued: 0
 };
@@ -229,6 +234,104 @@ function freshChar() { return { hp: 50, maxHp: 50, xp: 0, lvl: 1, gold: 0, mp: 0
 
   assert('T5 unticked: ticked item is credited', t1.done === true);
   assert('T5 unticked: unticked item receives nothing', t2.done === false && t2.streak === 3);
+}
+
+// =========================================================================
+// T6-T8. ADDED 2026-08-19 by J4 (plan todo 21), review finding 9.
+//
+// The DATA outcome is already correct -- that is what T1-T3 above are for. What is
+// wrong is the NUMBER the user is told. `credited` was
+// `_yesterMissed.filter(t => _yesterTick[t.id]).length`, which counts the TICK, not
+// the credit. A task that vanished mid-modal is still counted, so the toast says
+// "Credited 2 dailies" when one was credited.
+//
+// A tick can fail to credit for three distinct reasons: the id no longer exists in
+// live S.tasks (T3's path), creditYesterday() early-returns on `if(t.done) return;`,
+// or the daily was not actually due yesterday. The fix counts credits where they
+// happen -- creditYesterday() returns a boolean -- rather than re-deriving its three
+// predicates at the call site.
+//
+// Asserted on the toast STRING the user sees and on creditYesterday()'s return value,
+// never on a call count.
+// =========================================================================
+function creditedCountFromToast() {
+  const m = toasts.filter(function (s) { return /^Credited /.test(String(s)); }).pop();
+  if (!m) return null;
+  const n = String(m).match(/^Credited (\d+) /);
+  return n ? Number(n[1]) : null;
+}
+
+// ---- T6: two ticked, one vanished from S.tasks -> the count must be 1 ----
+{
+  toasts.length = 0;
+  S.prefs = { paused: false };
+  S.lastCron = 0;
+  S.char = freshChar();
+  const t1 = freshDaily('d-j4-a');
+  const t2 = freshDaily('d-j4-b');
+  S.tasks = [t1, t2];
+
+  const missed = missedYesterdayDailies();
+  openYesterCheck(missed);
+  toggleYesterTick('d-j4-a');
+  toggleYesterTick('d-j4-b');
+  // A sync round removes d-j4-b from live S.tasks while the modal is open.
+  S.tasks = [t1];
+  commitYesterCheck();
+
+  assert('T6 J4: the surviving daily really was credited', t1.done === true && t1.streak === 4);
+  assert('T6 J4: the vanished daily was not credited (nothing to credit)', t2.done === false);
+  assert('T6 J4: the toast counts 1, not 2 -- credits, not ticks', creditedCountFromToast() === 1);
+}
+
+// ---- T7: a ticked id whose live task is ALREADY done -> not counted ------
+{
+  toasts.length = 0;
+  S.prefs = { paused: false };
+  S.lastCron = 0;
+  S.char = freshChar();
+  const t1 = freshDaily('d-j4-c');
+  const t2 = freshDaily('d-j4-d');
+  S.tasks = [t1, t2];
+
+  const missed = missedYesterdayDailies();
+  assert('T7 J4 setup: both dailies detected as missed', missed.length === 2);
+  openYesterCheck(missed);
+  toggleYesterTick('d-j4-c');
+  toggleYesterTick('d-j4-d');
+  // A sync round brings in d-j4-d already completed on the other device.
+  const t2done = Object.assign(freshDaily('d-j4-d'), { done: true, streak: 7 });
+  S.tasks = [t1, t2done];
+  commitYesterCheck();
+
+  assert('T7 J4: the already-done daily keeps its streak (creditYesterday skipped it)',
+    t2done.streak === 7);
+  assert('T7 J4: the other daily was credited', t1.done === true && t1.streak === 4);
+  assert('T7 J4: the toast counts 1, not 2 -- an already-done tick is not a credit',
+    creditedCountFromToast() === 1);
+}
+
+// ---- T8: creditYesterday()'s return value is the single source of truth --
+{
+  S.prefs = { paused: false };
+  S.char = freshChar();
+  const ok = freshDaily('d-j4-e');
+  S.tasks = [ok];
+  assert('T8a creditYesterday() returns true when it actually credits',
+    creditYesterday(ok) === true);
+  assert('T8b ...and the credit landed', ok.done === true);
+  assert('T8c creditYesterday() returns false on the `if(t.done) return` skip',
+    creditYesterday(ok) === false);
+
+  // A daily not due yesterday: repeat array false for yesterday's weekday.
+  const notDue = freshDaily('d-j4-f');
+  const yDow = (new Date().getDay() + 6) % 7;
+  notDue.repeat = [1, 1, 1, 1, 1, 1, 1];
+  notDue.repeat[yDow] = 0;
+  S.tasks = [notDue];
+  assert('T8d creditYesterday() returns false for a daily not due yesterday',
+    creditYesterday(notDue) === false);
+  assert('T8e ...and credited nothing', notDue.done === false && notDue.streak === 3);
 }
 
 // Summary

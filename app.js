@@ -1991,9 +1991,13 @@ function missedYesterdayDailies(){
 // Credit a daily the user forgot to tick yesterday. Mirrors completeTask()'s
 // reward/streak/history logic, but stamps the history point to YESTERDAY and
 // stays silent (no per-task toast, no render) for batch use by the modal.
+// Returns TRUE only when it actually credited (t.done flipped false->true), FALSE on
+// either skip. J4 (2026-08-19): the yester-check toast counts credits, and this return
+// value is its single source of truth -- the call site must not re-derive the two skip
+// predicates below (review finding 9).
 function creditYesterday(t){
-  if(t.done) return;
-  if(t.type==='daily' && !isDailyDueOn(t, (new Date().getDay()+6)%7)) return; // only credit dailies actually due yesterday; missedYesterdayDailies already filters, this is defense-in-depth
+  if(t.done) return false;
+  if(t.type==='daily' && !isDailyDueOn(t, (new Date().getDay()+6)%7)) return false; // only credit dailies actually due yesterday; missedYesterdayDailies already filters, this is defense-in-depth
   const r = completionReward(t);
   const delta = valueDelta(t.value);
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
@@ -2013,6 +2017,7 @@ function creditYesterday(t){
   logEvent({kind:'complete', taskType:'daily', taskId:t.id, taskTitle:t.title,
             streak:t.streak, reward:Object.assign({},t._gr), repeat:(t.repeat||[]).slice(),
             late:true, checklist:cl.map(c=>({id:c.id||null,text:c.text,done:true}))});
+  return true;
 }
 // Render the blocking check-in modal listing yesterday's unfinished dailies.
 let _yesterMissed = [];
@@ -2060,13 +2065,21 @@ function commitYesterCheck(){
   // would mutate a detached orphan and the user's credit would be silently lost.
   // Pre-existing bug, not introduced by the boot gate: the online/visibilitychange
   // listeners in sync.js can fire a round at any time, not just the first one.
+  // J4 (2026-08-19): count the CREDIT, not the tick. `credited` used to be
+  // _yesterMissed.filter(t=>_yesterTick[t.id]).length, so a task that vanished
+  // mid-modal was still counted and the toast said "Credited 2 dailies" when one was
+  // credited. A tick can fail to credit for three distinct reasons -- the id is gone
+  // from live S.tasks, creditYesterday()'s `if(t.done) return`, or the daily was not
+  // actually due yesterday -- so its boolean return is the single source of truth
+  // rather than re-deriving those predicates here. The data outcome was already
+  // correct (see the 2026-08-18 note above); only the number was wrong.
+  let credited = 0;
   _yesterMissed.forEach(t=>{
     if(!_yesterTick[t.id]) return;
     const live = S.tasks.find(x=>x.id===t.id);
     if(!live) return; // id no longer exists -- skip cleanly, never throw
-    creditYesterday(live);
+    if(creditYesterday(live)) credited++;
   });
-  const credited=_yesterMissed.filter(t=>_yesterTick[t.id]).length;
   document.getElementById('yScrim').classList.remove('show');
   document.getElementById('yScrim').innerHTML='';
   _yesterMissed=[]; _yesterTick={};

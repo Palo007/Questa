@@ -196,6 +196,55 @@ async function main(){
       !!blocked && typeof blocked.at === 'number' && blocked.local === 2 && blocked.known === 5);
   }
 
+  // ---- T3: WHOLLY-POST-CUTOFF month -- shrink must stay BLOCKED -----------
+  // ADDED 2026-08-19 by J2 finding 2 (plan todo 19). TEST-ONLY: the production
+  // rule is already correct and must not change.
+  //
+  // The rule is `if(localMinTs >= cutoff && r.from < cutoff)`. T1 and T2 above
+  // both use the SAME straddling month (evtMonthKey(CUTOFF)) and vary only
+  // clause (a), so clause (b) was never exercised. PROVEN BY MUTATION: deleting
+  // `&& r.from < cutoff` from sync.js left the whole file green; deleting clause
+  // (a) instead correctly failed 2 assertions.
+  //
+  // Clause (b) is the half that blocks a REAL loss. A month lying wholly AFTER
+  // the prune cutoff cannot have aged anything out -- nothing in it is old
+  // enough -- so a count drop there is unexplained and the push must stay
+  // blocked. Fixture: the CURRENT month (r.from is ~540 days newer than
+  // cutoff = NOW - 18*30 days, so r.from >= cutoff), holding one recent record
+  // so clause (a) IS satisfied (localMinTs >= cutoff) while clause (b) is not.
+  // With clause (b) deleted from sync.js, isLegitimateShrink would become true
+  // and this month would upload -- which is the data loss T3 exists to catch.
+  {
+    const mk3 = evtHelpers.evtMonthKey(NOW);
+    const r3 = evtHelpers.evtMonthRange(mk3);
+    const fname3 = MY_DEV + '-' + mk3 + '.json';
+    const uploadPath3 = '/events/' + fname3;
+    assert('T3: fixture sanity -- the month is a DIFFERENT month from T1/T2\'s straddling one',
+      mk3 !== mk);
+    assert('T3: fixture sanity -- the month lies WHOLLY POST-CUTOFF (r.from >= cutoff), so clause (b) is false',
+      r3.from >= CUTOFF);
+    const recs3 = [
+      { uid: 'u-t3-recent', dev: MY_DEV, ts: NOW - 1000, kind: 'tap' }
+    ];
+    assert('T3: fixture sanity -- clause (a) IS satisfied (localMinTs >= cutoff)',
+      Math.min.apply(null, recs3.map(function(e){ return e.ts; })) >= CUTOFF);
+    const c = makeCtx({
+      records: recs3,
+      cfg: {
+        evtFileCounts: {
+          [fname3]: { count: 4, hash: 'known-hash-does-not-match' }
+        }
+      }
+    });
+    await push(c);
+    const savedCfg = JSON.parse(c.store[CFG]);
+    const blocked3 = savedCfg.evtPushBlocked && savedCfg.evtPushBlocked[fname3];
+    assert('T3: wholly-post-cutoff month with an unexplained shrink is NOT uploaded',
+      !c.uploads.some(function(u){ return u.path === uploadPath3; }));
+    assert('T3: wholly-post-cutoff month IS recorded as blocked',
+      !!blocked3 && typeof blocked3.at === 'number' && blocked3.local === 1 && blocked3.known === 4);
+  }
+
   if(failures){ console.error('\n' + failures + ' evtpush-shrink-guard assertion(s) FAILED'); process.exit(1); }
   console.log('\nAll evtpush-shrink-guard assertions passed.');
 }

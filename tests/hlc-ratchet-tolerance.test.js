@@ -224,6 +224,46 @@ function makeSandbox(initialLastIssued, initialHlcLast) {
   );
 })();
 
+// ---------------------------------------------------------------------------
+// 5e -- ADDED 2026-08-19 by J2 finding 6 (plan todo 19). TEST-ONLY.
+//
+// The gap: nothing pinned sync.js's FALLBACK literal to app.js's DECLARED value.
+// 5c only asserts the derive line *mentions* HLC_RATCHET_TOLERANCE_MS (which is
+// the same weakness finding 6 calls out -- asserting on source text rather than a
+// parsed value). 6a compares app.js's constant against the value sync.js DERIVES
+// when app.js is present, and 6b compares the standalone fallback against a
+// hardcoded 120000.
+//
+// So change app.js's declared value to, say, 90000 and the whole suite stays
+// GREEN: 6a still matches (sync derives from app in the browser), and 6b still
+// matches its own hardcoded literal. Meanwhile the browser uses 90000 while every
+// test sandbox -- which has no app.js -- uses the stale 120000, and the suite
+// validates a tolerance production does not use.
+//
+// This assertion compares the two PARSED NUMBERS, so changing either literal
+// alone turns the suite red. Verified by temporarily editing each one.
+// ---------------------------------------------------------------------------
+(function () {
+  const appDeclMatch = appSrc.match(/^const HLC_RATCHET_TOLERANCE_MS\s*=\s*(\d+)\s*;/m);
+  // The fallback is the number after the ternary's `:` on the derive line.
+  const deriveLineMatch = syncSrc.match(/^const MAX_FUTURE_SKEW_MS\s*=.*$/m);
+  const fallbackMatch = deriveLineMatch ? deriveLineMatch[0].match(/:\s*(\d+)\s*;/) : null;
+  if (!appDeclMatch || !fallbackMatch) {
+    assert(
+      '5e app.js HLC_RATCHET_TOLERANCE_MS literal and sync.js MAX_FUTURE_SKEW_MS fallback literal both parseable',
+      false
+    );
+  } else {
+    const appValue = Number(appDeclMatch[1]);
+    const fallbackValue = Number(fallbackMatch[1]);
+    assert(
+      '5e app.js HLC_RATCHET_TOLERANCE_MS (' + appValue + ') === sync.js MAX_FUTURE_SKEW_MS fallback (' +
+        fallbackValue + ') -- the two numeric LITERALS, not the source text',
+      appValue === fallbackValue
+    );
+  }
+})();
+
 (function () {
   assert(
     "5d sync.js's unrelated EVT_FULL_SCAN_INTERVAL_MS 3600000 literal is still present",

@@ -2110,6 +2110,60 @@ function _syncConfiguredForBoot(){
 function shouldDeferDayRollover(cfgConnected, elapsedMs, timeoutMs){
   return !!cfgConnected && elapsedMs < timeoutMs;
 }
+// ---- boot gate, the decision (D3 / todo 13) ----
+// Only the miss/credit DECISION is deferred, never the first paint. startDay()'s body
+// is unchanged, so the decision path is identical whether it ran gated or ungated, and
+// both IMPORT call sites of startDay() keep working untouched.
+// Timeout rationale: sync.js waits 2000 ms before its first syncNow(), leaving ~6 s for
+// the round trip -- inside SYNC_TRANSIENT_RETRY_DELAYS_MS[0] (1000) and never exposing
+// the user to the 5 s / 25 s tiers. REASONED, NOT MEASURED: todo 16's on-device check
+// (b) measures real boot-to-rollover latency and may raise this.
+var BOOT_ROLLOVER_TIMEOUT_MS = 8000;
+var _bootRolloverT0 = 0, _dayRolloverDone = false;
+// Once-only runner. Whichever trigger fires first wins; the second is a no-op.
+// THIS IS THE SINGLE ENTRY POINT TO startDay() ON THE BOOT PATH -- both branches of
+// bootStartDay() go through it, configured and not, so _dayRolloverDone is always set
+// and _bootRolloverPending is always cleared. Why that matters: sync.js's boot gate
+// calls syncInit() UNCONDITIONALLY and syncInit() ends in setTimeout(syncNow, 2000),
+// with syncNow() resolving immediately when not configured -- so onQuestaFirstSyncRound()
+// fires ~2 s after EVERY boot, config or none. If the unconfigured branch called
+// startDay() directly, that callback would run startDay() a second time, re-enter
+// openYesterCheck() and its `_yesterTick = {}` would wipe every tick the user already
+// made: streak zeroed and HP damage on a daily they actually completed.
+function _runDayRollover(){
+  if(_dayRolloverDone) return;
+  _dayRolloverDone = true;
+  _bootRolloverPending = false; // release the inert-card gate (todo 11) before painting
+  startDay();
+}
+// The callback sync.js invokes when the first round settles. Top-level declaration so it
+// is both a global sync.js can find and extractable for tests. Name is fixed by the plan.
+function onQuestaFirstSyncRound(){ _runDayRollover(); }
+// Replaces the straight-line boot `startDay();` call. Named so tests/_extract.js can
+// reach it -- top-level script statements are not extractable.
+function bootStartDay(){
+  _bootRolloverT0 = Date.now();
+  // Defensive per the handover: if this predicate ever throws, both the timer and the
+  // synchronous fallback are skipped and the day NEVER rolls over -- the worst failure
+  // mode in this plan. A throw is treated as "not configured". Also satisfies
+  // AGENTS.md S1: a missing or broken sync.js must never break the app.
+  var cfgConnected = false;
+  try{ cfgConnected = _syncConfiguredForBoot(); }catch(e){ cfgConnected = false; }
+  if(shouldDeferDayRollover(cfgConnected, Date.now() - _bootRolloverT0, BOOT_ROLLOVER_TIMEOUT_MS)){
+    _bootRolloverPending = true; // ONLY in the branch that actually defers (todo 11)
+    render();                    // constraint 1: first paint stays synchronous and ungated
+    // Scheduled unconditionally here, BEFORE anything can await -- it is the only real
+    // guarantee. sync.js's `reconcileDurableState().then(syncInit).catch(syncInit)` never
+    // schedules syncInit()'s own 2000 ms timer if that promise never settles, so the
+    // sync-side callback can simply never arrive. One guaranteed trigger plus one
+    // best-effort early exit, not two equal triggers.
+    setTimeout(_runDayRollover, BOOT_ROLLOVER_TIMEOUT_MS);
+    return;
+  }
+  // Not configured (or already past the timeout): roll over synchronously, exactly as
+  // before -- but THROUGH THE RUNNER, never by calling startDay() directly.
+  _runDayRollover();
+}
 // Startup gate: prompt if anything was missed yesterday, else run cron directly.
 function startDay(){
   const missed=missedYesterdayDailies();
@@ -6446,7 +6500,7 @@ window.addEventListener('touchend', () => { if (typeof _tActive !== 'undefined' 
 window.addEventListener('touchcancel', () => { if (typeof _tActive !== 'undefined' && _tActive) endTouchDrag(); }, { passive: true });
 applyWidth();
 applyCardThick();
-startDay();
+bootStartDay(); // D3 todo 13: gates only the day-rollover decision, never the paint
 updateHeaderHeightVar();
 if('serviceWorker' in navigator){
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })

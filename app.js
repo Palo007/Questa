@@ -1805,6 +1805,7 @@ function uncompleteTodo(t){
   save(); render();
 }
 function scoreHabit(id, dir, ev){
+  if(bootGateBlocksInput()){ toast('Syncing…'); return; } // D3 todo 11: MUST stay the first statement
   if(_suppressHabitClick===id){ _suppressHabitClick=null; return; }  // ignore the click fired right after a long-press
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
   if(t.difficulty==='log'){
@@ -2073,6 +2074,26 @@ function commitYesterCheck(){
   render();
   if(credited>0) toast('Credited '+credited+' daily'+(credited===1?'':'s')+' from yesterday');
 }
+// ---- boot gate, layer 1: keep task cards inert until the first sync round settles ----
+// D3 / todo 11, direction C. The first paint stays synchronous and UNGATED and
+// _resetDailies() stays inside runCron() behind the gate, so a daily completed
+// yesterday is still painted TICKED for up to BOOT_ROLLOVER_TIMEOUT_MS. That tick is
+// stale-looking but correct; what must not happen is a tap on it reaching
+// uncompleteDaily(), which decrements t.streak, stamps t.updatedAt, save()s (pushing
+// to the other device) and flips t.done false so the later missedYesterdayDailies()
+// reports a genuine completion as missed. See the plan's todo 11 constraint 2.
+// `var`, not `let`: render()/toggle() are declared far above this line, so a TDZ
+// window here would be reachable if anything ever paints earlier in boot.
+// Set true ONLY by bootStartDay()'s deferring branch and cleared ONLY by its
+// once-only runner (todo 13), which is the single entry point to startDay() on both
+// boot branches -- so no boot path can leave a card permanently untappable.
+var _bootRolloverPending = false;
+// Pure predicate; guards the mutating card entry points as their FIRST statement.
+function bootGateBlocksInput(){ return _bootRolloverPending; }
+// Pure; prepended to the view HTML at render()'s single v.innerHTML assignment so the
+// gate is visible and assertable from the rendered string. Layer 2's CSS rule
+// (body.bootSyncing .task) lives in index.html and covers the whole card surface.
+function _bootGateBanner(){ return _bootRolloverPending ? '<div class="syncGate">syncing…</div>' : ''; }
 // Mirrors the connected gate defined in sync.js:18 (SYNC_KEY = "questa.sync.v1") and
 // enforced in sync.js by `if(!cfg.enabled || !cfg.refreshToken) return Promise.resolve();`
 // inside syncNow(). The localStorage read is INLINED rather than calling syncCfg(),
@@ -2238,6 +2259,7 @@ function toggleSort(){ SORTOPEN=!SORTOPEN; S.prefs.sortOpen=SORTOPEN; save(); re
 const EXPANDED={}; // taskId -> bool (checklist expanded on card)
 function toggleExpand(id){ EXPANDED[id]=!EXPANDED[id]; render(); }
 function toggleSub(taskId, subId, idxFallback){
+  if(bootGateBlocksInput()){ toast('Syncing…'); return; } // D3 todo 11: MUST stay the first statement
   const t=S.tasks.find(x=>x.id===taskId); if(!t||!t.checklist)return;
   let c = (subId!=null) ? t.checklist.find(x=>x && x.id===subId) : null;
   if(!c && idxFallback!=null) c = t.checklist[idxFallback]; // fallback: stale cached markup mid-deploy, or a subId that no longer exists
@@ -4133,9 +4155,10 @@ function render(){
   renderStats();
   updateHeaderHeightVar();
   const v=document.getElementById('view');
-  v.innerHTML = TAB==='habits'?viewHabits() : TAB==='dailies'?viewDailies() : TAB==='todos'?viewTodos() : TAB==='analytics'?viewAnalytics() : viewRewards();
+  v.innerHTML = _bootGateBanner() + (TAB==='habits'?viewHabits() : TAB==='dailies'?viewDailies() : TAB==='todos'?viewTodos() : TAB==='analytics'?viewAnalytics() : viewRewards());
   if(TAB==='analytics') initAnalytics();
   document.body.classList.toggle('tab-analytics', TAB==='analytics');
+  document.body.classList.toggle('bootSyncing', _bootRolloverPending); // D3 todo 11 layer 2
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===TAB));
   if(TAB!=='analytics') enableDragReorder();
   restoreScroll();
@@ -4822,6 +4845,7 @@ function bindHeatTooltips(){
   });
 }
 function toggle(id, ev){
+  if(bootGateBlocksInput()){ toast('Syncing…'); return; } // D3 todo 11: MUST stay the first statement
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
   if(t.type==='daily'){
     if(t.done){ uncompleteDaily(t); return; }

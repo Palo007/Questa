@@ -136,6 +136,10 @@
   .task.notdue .ttl{color:var(--muted)}
   .task.notdue .check{cursor:default;opacity:.55}
   .task.notdue .ckbox{border-color:var(--muted);opacity:.6}
+  /* D3 todo 11 layer 2: cards inert while the boot day-rollover waits for the first sync round. */
+  /* Scoped to .task only -- header, nav, filter/sort bars and Settings stay live. */
+  body.bootSyncing .task{pointer-events:none;opacity:.55}
+  .syncGate{padding:6px 11px;font-size:11px;color:var(--muted);text-align:center;letter-spacing:.04em}
   .railItem.notdue{color:var(--muted);border-color:var(--line);background:rgba(255,255,255,.03)}
   .ckbox{width:18px;height:18px;border:2px solid var(--muted);border-radius:5px;display:block}
   .ckmark{font-size:18px;font-weight:900;color:#fff;line-height:1}

@@ -724,19 +724,57 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
 
 // recency helpers (2026-07-11 recency-guard). _ua = effective edit time,
 // _ca = creation time. Numeric-safe; missing fields -> 0. Clamped (D3): a
-// timestamp more than 2 min ahead of the local HLC is untrusted -> treated
-// as 0 so a future-skewed clock cannot win a guard or mint an undeletable
-// record. Uses app.js now() HLC when available, falls back to Date.now().
-var _hlcNow = (typeof now==='function') ? now : function(){ return Date.now(); };
-function _ua(x){ var v = (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; return v > _hlcNow() + MAX_FUTURE_SKEW_MS ? 0 : v; }
-function _ca(x){ var v = (x && Number(x.createdAt)) || 0; return v > _hlcNow() + MAX_FUTURE_SKEW_MS ? 0 : v; }
+// timestamp more than 2 min ahead of the trust ceiling is untrusted -> treated
+// as 0 so a future-skewed clock cannot win a guard or mint an undeletable record.
+// K2 (2026-09-11): that ceiling is now the PHYSICAL clock, not app.js's HLC. It used
+// to be `_hlcNow()`, bound to now(), which is monotonic-FORWARD ONLY and persisted to
+// S.__hlcLast -- so (a) ONE clock excursion raised this device's ceiling permanently,
+// surviving both a clock correction and a reboot, and (b) now() is not a pure read (it
+// does lastIssued = Math.max(p, lastIssued+1) and writes S.__hlcLast), so the ceiling
+// crept ~1ms per comparison and the guard grew MORE permissive the bigger the state.
+// Physical is also strictly TIGHTER: ratchetHlc admits a peer up to physical+120s and
+// now() then bumps past it, so the old ceiling was worth up to 240s PLUS unbounded
+// per-merge drift, where MAX_FUTURE_SKEW_MS is the 120s the rest of the fleet actually
+// honours. Same reasoning and same per-round capture that J1 finding 4 applied to the
+// diagnostics path below; this NARROWS that fix's SCOPE line, which excluded these
+// three helpers on the grounds that "a 0 there destroys data" -- true of the
+// inverted-polarity sites, but those call _uaRaw/_caRaw or read raw values and never
+// reach here. The one site that did have inverted polarity is GUARD 1's sibling
+// GUARD 3, reclassified below. Paired with app.js now()'s heal: the heal may only drop
+// lastIssued because every value it drops reads as 0 HERE too, on every device
+// including the poisoned one, so no already-issued stamp can beat the new lower one.
+// See .omo/plans/K2-hlc-future-lock.md.
+var _clampCeil = 0;
+// The `||` fallback is LOAD-BEARING, not defensive. _clampCeil is stamped per round in
+// _skewDiagReset() and cleared in _skewDiagFlush(), but mergeCollection/mergeChecklist
+// are also reachable OUTSIDE a round -- the unit tests call them directly -- where a
+// 0 ceiling would clamp every timestamp in the suite to 0.
+function _futureCeil(){ return _clampCeil || (Date.now() + MAX_FUTURE_SKEW_MS); }
+// STATUS as of K2: _ua and _ca have ZERO callers in this file. GUARD 3 at line ~891 was
+// the last one, and K2 moved it to the raw twins. They are kept, not deleted, for two
+// reasons: tests/hlc.test.js H4a-H4d poke _ua directly and are the ONLY coverage of the
+// clamp rule itself, and they are the canonical object-shaped clamp for any future
+// arbitration site (use them where 0 means "loses a tiebreak"; use _uaRaw/_caRaw where
+// 0 would destroy data, and classify the polarity BEFORE you pick). Deleting them is a
+// separate decision that costs that coverage -- do not do it as a drive-by cleanup.
+function _ua(x){ var v = (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; return v > _futureCeil() ? 0 : v; }
+function _ca(x){ var v = (x && Number(x.createdAt)) || 0; return v > _futureCeil() ? 0 : v; }
+// K1 (2026-09-11): the UNCLAMPED twin of _ua, for the inverted-polarity sites where a
+// clamped 0 DESTROYS data instead of losing a tiebreak. Same field precedence and the
+// same numeric coercion as _ua -- the only difference is that it never returns 0 for a
+// future-skewed value. Three sites use it: the tombstone overlay's ENTITY operand,
+// mergeCollection's GUARD 1, and (K2) GUARD 3. See the block comments at each site.
+function _uaRaw(x){ return (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; }
+// K2 (2026-09-11): _ca's unclamped twin, for GUARD 3's local-absent branch. Exists so
+// both arms of that one test read raw; see the polarity comment at GUARD 3.
+function _caRaw(x){ return (x && Number(x.createdAt)) || 0; }
 // F1 (2026-08-18): clamp a RAW scalar timestamp for ARBITRATION only.
 // Use this ONLY where 0 means "loses the tiebreak". There are four sites where 0
 // means "destroy data" instead -- mergeChecklist's survivor-vs-deletion test, the
 // cleanDevices/mergeDevices isJunk+score pair, the tombstone overlay, and the
 // one-sided char guard. Those must NOT share this helper, and must keep reading raw
 // values. See the plan's Scope OUT section before adding a caller.
-function _clampFuture(v){ v = Number(v) || 0; return v > _hlcNow() + MAX_FUTURE_SKEW_MS ? 0 : v; }
+function _clampFuture(v){ v = Number(v) || 0; return v > _futureCeil() ? 0 : v; }
 // Per-ROUND skew diagnostics for the four INVERTED-POLARITY sites (2026-08-18).
 // Those sites are deliberately left unclamped -- 0 there destroys data rather than
 // losing a tiebreak -- so this adds observability and NOTHING else. No merge result
@@ -756,8 +794,13 @@ var _skewDiag = null;
 // NOT a literal no-op: Date.now() + MAX_FUTURE_SKEW_MS is not the same number as the
 // ratcheting _hlcNow() one, so which records get noted shifts slightly. That is
 // diagnostic-only and accepted -- no merge result depends on it.
-// SCOPE: _hlcNow()'s other three call sites (_ua, _ca, _clampFuture) are the
-// inverted-polarity clamp operands and MUST NOT be touched -- a 0 there destroys data.
+// SCOPE (superseded by K2, 2026-09-11): this used to read "_hlcNow()'s other three call
+// sites (_ua, _ca, _clampFuture) are the inverted-polarity clamp operands and MUST NOT
+// be touched -- a 0 there destroys data." The conclusion was right for the
+// inverted-polarity sites and wrong about which helpers they use: they call
+// _uaRaw/_caRaw or read raw values, so they never reach _ua/_ca/_clampFuture. Those
+// three now share this same physical ceiling (see _futureCeil above), _hlcNow is gone,
+// and no path from a merge can advance the HLC any more.
 var _skewDiagThreshold = 0;
 // J1 finding 3 (2026-08-19): cross-round throttle, mirroring _evtPullLastThrottleDiag.
 // There was none. merge() runs once per round and again on a conflict retry,
@@ -769,7 +812,11 @@ var _skewDiagThreshold = 0;
 // skewDeviceMerge burst silently suppress a skewCharGuard note.
 var SKEW_DIAG_MIN_INTERVAL_MS = 60000; // matches EVT_PULL_MIN_INTERVAL_MS
 var _skewDiagLastPush = {};
-function _skewDiagReset(){ _skewDiag = {}; _skewDiagThreshold = Date.now() + MAX_FUTURE_SKEW_MS; }
+// K2: _clampCeil rides along with _skewDiagThreshold -- deliberately the SAME number,
+// so the clamp and the diagnostic that reports on it can never disagree about what
+// "future" means within one round. Constant for the whole round, so it cannot creep
+// with state size the way the old _hlcNow() ceiling did.
+function _skewDiagReset(){ _skewDiag = {}; _skewDiagThreshold = Date.now() + MAX_FUTURE_SKEW_MS; _clampCeil = _skewDiagThreshold; }
 function _skewDiagNote(kind, ts, id){
   if(!_skewDiag) return;
   var t = Number(ts) || 0;
@@ -782,6 +829,7 @@ function _skewDiagNote(kind, ts, id){
 function _skewDiagFlush(){
   if(!_skewDiag) return;
   var d = _skewDiag; _skewDiag = null;
+  _clampCeil = 0; // K2: end of round -- any later out-of-round clamp re-reads the clock
   var nowMs = Date.now(); // pure read; see finding 4 above
   Object.keys(d).forEach(function(k){
     var e = d[k];
@@ -835,8 +883,19 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
       // not authoritative. A genuine edit/deletion always comes from a local
       // snapshot saved AFTER the record it touched, so this never suppresses
       // real user changes.
+      // K2 (2026-09-11) -- INVERTED POLARITY, and it was never classified as one.
+      // These operands used to run through _ua/_ca. Both arms compare ONE clamped
+      // value against an UNCLAMPED scalar (localSavedAt), and the operand is `b` --
+      // the agreed ANCESTOR, not a competitor trying to win a tiebreak. So a clamped
+      // 0 does not "lose": it makes staleLocal FALSE, this guard FAILS OPEN, and the
+      // stale local revert is kept AND uploaded -- exactly the amplifier loss the
+      // guard exists to stop. The question here is factual ("could local have known
+      // about base's current state?"), so a future-skewed base must be compared as it
+      // is. Both arms read RAW. This was already live on any peer whose HLC had not
+      // ratcheted to the skewed value; K2's physical ceiling would have made it fire
+      // on the skewed device too. Same reasoning as GUARD 1 above. Test: K2-D.
       if(b && localSavedAt != null){
-        const staleLocal = localHad ? (_ua(b) >= Number(localSavedAt)) : (_ca(b) >= Number(localSavedAt));
+        const staleLocal = localHad ? (_uaRaw(b) >= Number(localSavedAt)) : (_caRaw(b) >= Number(localSavedAt));
         if(staleLocal){ resultMap.set(id, b); return; }
       }
       if(localHad) resultMap.set(id, l);
@@ -850,7 +909,16 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
         // an untouched local has updatedAt == base < any real remote edit, so
         // remote still wins -- identical to old behavior. Only a poisoned base
         // (base == new local, remote older) is changed, and that is the bug.
-        if(localHad && _ua(l) > _ua(r)){
+        // K1 (2026-09-11) -- INVERTED POLARITY, site 5 of 6. This branch fires ONLY
+        // when local did NOT change vs base, so `r` holds the one and only real edit
+        // and `l` is just a copy of the agreed ancestor. Clamping r.updatedAt to 0
+        // here makes the guard true, keeps the stale local copy AND pushes it back
+        // over the remote edit -- the edit is discarded, not merely out-tiebroken.
+        // This is the exact reasoning the char one-sided guard already carries at
+        // "Site 4 of 4" below; that site was left raw and this one was not. Both
+        // operands must stay RAW. Skew protection here needs a different rule.
+        _skewDiagNote('skewGuard1', r && r.updatedAt, id);
+        if(localHad && _uaRaw(l) > _uaRaw(r)){
           let w = l;
           if(Array.isArray(l && l.checklist) || Array.isArray(r && r.checklist)){
             // still merge subtasks so a remote toggle is not lost (F4 parity)
@@ -910,6 +978,11 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
         checklist: mergeChecklist(b && b.checklist, (l && l.checklist) || [], (r && r.checklist) || [], winner === l)
       });
     }
+    // K3 (2026-09-11): same shape as the F4 splice above -- the whole-object winner also
+    // discarded the OTHER side's habit taps. cUp/cDown are additive quantities, not
+    // properties of the winning snapshot. MUST run AFTER the checklist splice, which
+    // tests `winner === l` by identity. See _accumCounters for the reset handling.
+    winner = _accumCounters(b, l, r, winner);
     // T4: throttle conflictResolved to one per (kind, entityId) per round
     const _conflictKey = 'task:' + id;
     if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey)){
@@ -939,8 +1012,15 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
       // Site 3 of 4 -- DIAGNOSTIC ONLY, never clamp `ts`. Clamping it to 0 makes the
       // test 0 >= <positive> false, the delete never fires, and the deleted task
       // survives every future merge.
+      // K1 (2026-09-11) -- the ENTITY operand is inverted-polarity too (site 6 of 6),
+      // and it used to read _ua(v). A task re-created or edited AFTER the delete, on a
+      // device more than MAX_FUTURE_SKEW_MS fast, clamps to 0 on every SLOWER device;
+      // `ts >= 0` is then always true, so the slower device deletes a live task and
+      // uploads the deletion, while the fast device keeps it -- a permanent ping-pong
+      // that loses the task on one side. Raw on BOTH operands: whoever acted last wins,
+      // which is exactly what the "resurrects" rule above promises.
       _skewDiagNote('skewTombstoneOverlay', ts, id);
-      if(ts != null && Number(ts) >= _ua(v)) resultMap.delete(id);
+      if(ts != null && Number(ts) >= _uaRaw(v)) resultMap.delete(id);
     });
   }
 
@@ -1048,11 +1128,170 @@ function mergeDevices(baseArr, localArr, remoteArr, localDeviceId, remoteDeviceI
   return cleanDevices(out);
 }
 
+// ---- K3 (2026-09-11) earnings accumulate helpers ---------------------------
+// P10c / docs row 4.28: char was one indivisible LWW record, so when two devices both
+// earned offline ONE snapshot won and the other device's xp/gold/mp was thrown away.
+// The tasks all merged correctly (mergeCollection unions by id), so the user saw five
+// completed tasks and the earnings of two. Design, costed alternatives and the reasons
+// the event-log replay was REJECTED: .omo/plans/K3-earnings-design.md
+//
+// The level curve lives in app.js (xpToLevel). sync.js loads after app.js and reads its
+// globals, so prefer the live function; the literal fallback exists only for the vm
+// sandbox the tests build. tests/earnings-accumulate.test.js K3-H asserts the two agree,
+// so a curve change in app.js cannot drift away from this copy unnoticed.
+function _xpNeed(lvl){
+  if(typeof xpToLevel === "function") return xpToLevel(lvl);
+  return Math.round(0.25 * lvl * lvl + 10 * lvl + 139.75);
+}
+const _XP_LVL_CAP = 9999; // loop bound only; the curve is quadratic so this is unreachable
+function _num(v){ return Number(v) || 0; }
+// char.xp is NOT lifetime xp: gainXp (app.js) subtracts xpToLevel(lvl) on every
+// level-up, so .xp is the residual INSIDE the current level. Summing two residuals adds
+// numbers on two different scales, so the accumulating quantity is the TOTAL and
+// (lvl, xp) is re-derived from it afterwards.
+function _charTotalXp(c){
+  const lvl = Math.max(1, Math.floor(_num(c && c.lvl) || 1));
+  let tot = Math.max(0, _num(c && c.xp));
+  for(let k = 1; k < lvl && k <= _XP_LVL_CAP; k++) tot += _xpNeed(k);
+  return tot;
+}
+// Exact inverse of _charTotalXp, using gainXp's own `>=` boundary.
+function _charFromTotalXp(total){
+  let rem = Math.max(0, _num(total)), lvl = 1, need = _xpNeed(1);
+  while(rem >= need && lvl <= _XP_LVL_CAP){ rem -= need; lvl++; need = _xpNeed(lvl); }
+  return { lvl: lvl, xp: rem };
+}
+// gainXp's invariant is xp < xpToLevel(lvl). A Habitica-imported character can carry a
+// TOTAL in .xp instead, and re-levelling one of those would rewrite a character nobody
+// edited. A single non-canonical side disqualifies the whole reconcile -> today's LWW.
+function _charCanonical(c){
+  if(!c || typeof c !== "object") return false;
+  return Math.max(0, _num(c.xp)) < _xpNeed(Math.max(1, Math.floor(_num(c.lvl) || 1)));
+}
+function _charTotals(c){
+  return { xp: _charTotalXp(c), gold: Math.max(0, _num(c && c.gold)), mp: Math.max(0, _num(c && c.mp)) };
+}
+// char.abs[deviceId] = {ua, xp, gold, mp}: the totals of THAT device's snapshot which
+// are already folded into this char. It exists because _pushWithConflictRetry re-merges
+// with the ALREADY-MERGED state as `local` while `base` is still the pre-round base --
+// syncBasePut only runs after a successful upload (sync.js:1475) -- so a plain
+// base-delta reconcile double-counts the remote contribution on every conflict retry.
+// LONG-FORM only: do NOT add `abs` to app.js's _EXPORT_FIELD_MAP, or a new-build backup
+// becomes unimportable by an older build (hash refusal). join_exports.py maps it.
+function _absEntry(c, dev){
+  const a = c && c.abs;
+  if(!a || typeof a !== "object" || dev == null) return null;
+  const e = a[dev];
+  if(!e || typeof e !== "object") return null;
+  return { ua: _num(e.ua), xp: Math.max(0, _num(e.xp)), gold: Math.max(0, _num(e.gold)), mp: Math.max(0, _num(e.mp)) };
+}
+// Strict total order on an abs entry, so carrying third-party entries over is
+// order-independent: merge(b,L,R) and merge(b,R,L) build the same map.
+function _absBetter(e, cur){
+  if(!cur) return true;
+  const a = [e.ua, e.xp, e.gold, e.mp], c = [cur.ua, cur.xp, cur.gold, cur.mp];
+  for(let i = 0; i < 4; i++){ if(a[i] !== c[i]) return a[i] > c[i]; }
+  return false;
+}
+// NEW INVERTED-POLARITY SITE (K3, 2026-09-11). Deliberately NOT numbered: the file
+// already carries two incompatible numbering schemes ("site 4 of 4" for the clamp-helper
+// sites, "site 6 of 6" after K1), so a third count would just add noise.
+// Read the _uaRaw block comment above
+// before touching this. Both operands are absorbed WATERMARKS -- factual records of
+// "have I already folded this contribution in?", not competitors in a tiebreak.
+// _clampFuture on either side makes this test FALSE, which falls back to the base
+// totals; on the conflict-retry path base does NOT yet contain the absorbed remote
+// contribution, so the same delta is counted a SECOND time and the user's earnings
+// DOUBLE. Both operands must stay RAW.
+function _accBaseline(baseTotals, baseAbs, otherAbs){
+  if(otherAbs && otherAbs.ua > (baseAbs ? baseAbs.ua : 0)) return otherAbs;
+  return baseTotals;
+}
+// Returns the accumulating fields to overlay on the arbitration winner, or null for
+// "not applicable" -- in which case the caller keeps exact pre-K3 LWW behaviour.
+function _charAccumulate(b, l, r, localDeviceId, remoteDeviceId){
+  // Precondition 1 -- a real common ancestor. With an empty base EVERY field reads as
+  // "changed", so both whole totals would be added onto 0 and the character DOUBLES.
+  // IDB loss with localStorage intact (docs/SYNC-MULTI-DEVICE-CASES.md 1.3) and the #5
+  // poisoned-base self-check both produce exactly that. No base -> no reconcile.
+  if(!b || typeof b !== "object" || !Object.keys(b).length) return null;
+  // Precondition 2 -- canonical level form on all three sides (see _charCanonical).
+  if(!_charCanonical(b) || !_charCanonical(l) || !_charCanonical(r)) return null;
+  // Precondition 3 -- two distinct device ids. The absorbed record is keyed by device,
+  // so without both ids a retry cannot tell its own contribution from the peer's.
+  if(localDeviceId == null || remoteDeviceId == null || localDeviceId === remoteDeviceId) return null;
+
+  const bT = _charTotals(b), lT = _charTotals(l), rT = _charTotals(r);
+  // Each side's delta is measured from the newest thing we can prove it started from:
+  // normally the agreed base, but the peer's absorbed record when that is newer.
+  const lBase = _accBaseline(bT, _absEntry(b, localDeviceId),  _absEntry(r, localDeviceId));
+  const rBase = _accBaseline(bT, _absEntry(b, remoteDeviceId), _absEntry(l, remoteDeviceId));
+  const dXp   = (lT.xp - lBase.xp)     + (rT.xp - rBase.xp);
+  const dGold = (lT.gold - lBase.gold) + (rT.gold - rBase.gold);
+  const dMp   = (lT.mp - lBase.mp)     + (rT.mp - rBase.mp);
+  if(dXp === 0 && dGold === 0 && dMp === 0) return null; // no numeric conflict -> leave LWW alone
+  let totXp = Math.max(0, bT.xp + dXp);
+  let gold  = Math.max(0, bT.gold + dGold);
+  let mp    = Math.max(0, bT.mp + dMp);
+  // Safety floor, EARNINGS-ONLY. mp has no consumer anywhere in app.js and xp only
+  // falls on death(), so when NEITHER side lost ground the merged total cannot
+  // legitimately sit below either side -- a floor there means an arithmetic slip in an
+  // exotic 3-device ordering loses nothing. gold is a SPENDABLE balance (rewards,
+  // potions, death's *0.75) and must be free to fall, so it never gets a floor; and a
+  // side that DID lose ground must keep that loss, so the floor is skipped entirely.
+  const lostGround = (lT.xp < lBase.xp) || (rT.xp < rBase.xp) || (lT.mp < lBase.mp) || (rT.mp < rBase.mp);
+  if(!lostGround){ totXp = Math.max(totXp, lT.xp, rT.xp); mp = Math.max(mp, lT.mp, rT.mp); }
+  const relv = _charFromTotalXp(totXp);
+  // Record what this result absorbed. Each participant is authoritative about itself,
+  // so its own snapshot totals are written verbatim; entries for any THIRD device are
+  // carried over by _absBetter so both devices compute an identical map.
+  const abs = {};
+  [b, l, r].forEach(src => {
+    const a = src && src.abs;
+    if(!a || typeof a !== "object") return;
+    Object.keys(a).forEach(k => {
+      const e = _absEntry(src, k);
+      if(e && _absBetter(e, abs[k])) abs[k] = e;
+    });
+  });
+  abs[localDeviceId]  = { ua: _uaRaw(l), xp: lT.xp, gold: lT.gold, mp: lT.mp };
+  abs[remoteDeviceId] = { ua: _uaRaw(r), xp: rT.xp, gold: rT.gold, mp: rT.mp };
+  return { lvl: relv.lvl, xp: relv.xp, gold: +gold.toFixed(2), mp: mp, abs: abs };
+}
+function _charOver(winner, acc){ return acc ? Object.assign({}, winner, acc) : winner; }
+// K3 (2026-09-11) habit period counters (prompt K3b). cUp/cDown live inside the task
+// object and had no special handling, so mergeCollection's whole-object winner
+// discarded one device's taps. They are NOT monotone: runCron zeroes them on the
+// resetFreq boundary (app.js:2243) and deliberately does not bump updatedAt, so a plain
+// base-delta goes NEGATIVE across a reset (base 10, both reset, A taps 6 / B taps 3 ->
+// 10-4-7 = -1). effBase collapses to 0 when BOTH sides sit below base, which is the
+// only shape a reset-on-both-devices can produce.
+function _accumCounter(bv, lv, rv){
+  const b = Math.max(0, _num(bv)), l = Math.max(0, _num(lv)), r = Math.max(0, _num(rv));
+  const eff = (l < b && r < b) ? 0 : b;
+  return Math.max(eff + Math.max(0, l - eff) + Math.max(0, r - eff), l, r);
+}
+function _accumCounters(b, l, r, winner){
+  const has = k => (l && typeof l[k] === "number") || (r && typeof r[k] === "number");
+  const hU = has("cUp"), hD = has("cDown");
+  // Gated on FIELD PRESENCE, not on task `type` -- same precedent as F4's checklist
+  // splice, so dailies/todos/rewards/tags/an.views are untouched.
+  if(!hU && !hD) return winner;
+  const patch = {};
+  if(hU) patch.cUp = _accumCounter(b && b.cUp, l && l.cUp, r && r.cUp);
+  if(hD) patch.cDown = _accumCounter(b && b.cDown, l && l.cDown, r && r.cDown);
+  return Object.assign({}, winner, patch);
+}
+
 // Union-by-day merge for history-style arrays ({date:<ms>, ...numeric fields,
 // ...array fields whose entries have an id}). Used for S.charHistory (and the
 // always-empty top-level S.history, harmlessly).
 function mergeDayArray(localArr, remoteArr){
-  const dayOf = ms => Math.floor((ms || 0) / 86400000);
+  // K3 (2026-09-11): the bucket is the LOCAL day, matching dayStampOf everywhere else
+  // in the app. It used to be Math.floor(ms/86400000) -- a UTC day -- so two devices on
+  // either side of LOCAL midnight folded two distinct days into one bucket and lost
+  // one. dayStampOf(0) is 0, the same key the old expression gave a missing date.
+  const dayOf = ms => dayStampOf(ms || 0);
   const buckets = new Map(); // dayKey -> merged entry
 
   function fold(entry){
@@ -1099,9 +1338,27 @@ function _mergeInner(base, local, remote, remoteSavedAt, localSavedAt, localDevi
   remote = remote || {};
   const baseAn = base.an || {}, localAn = local.an || {}, remoteAn = remote.an || {};
 
+  // K1 (2026-09-11): a plain max here was the single widest data-loss path in the
+  // engine. lastCron feeds normalizeDailyResets, which force-unchecks every daily
+  // whose dayStampOf(doneAt) is BELOW it AND clears that daily's whole checklist.
+  // max() never decreases, so one device with a wrong date (say 2027) pinned the
+  // shared lastCron in the future permanently: from then on EVERY daily and EVERY
+  // subtask tick on EVERY device unchecked itself on EVERY sync round, and the
+  // poisoned value came straight back on the next pull. The same shape, one day
+  // wide instead of years, is the cross-timezone case: a peer that has already
+  // crossed local midnight wiped this device's still-current completion.
+  //
+  // Rule: a remote cron day that lies in THIS device's future carries no authority
+  // over this device's own day boundary. Fall back to the local value; do not clamp
+  // to "today", because that could silently raise a local lastCron that is legitimately
+  // behind and make startDay() skip a real cron run (runCron early-returns on
+  // S.lastCron === today). A device with its own bad clock still poisons only itself,
+  // which is the most any peer can fix from the outside.
   const mergedLastCron = (function(){
     const l = local.lastCron || 0, r = remote.lastCron || 0;
-    return l >= r ? l : r; // dayStamp() is a lexically-sortable integer (YYYYMMDD-ish) -> plain max
+    const today = dayStampOf(Date.now()); // pure read; NOT _hlcNow() -- see _skewDiagNote J1 finding 4
+    const rEff = (r > today) ? l : r;     // implausible/ahead remote day -> no authority
+    return l >= rEff ? l : rEff;          // dayStamp() is a lexically-sortable integer (YYYYMMDD-ish) -> plain max
   })();
 
   // Union all tombstones (base+local+remote), keeping the newest 'at' per id.
@@ -1186,6 +1443,14 @@ function _mergeInner(base, local, remote, remoteSavedAt, localSavedAt, localDevi
         // GUARD (recency): accept remote char only if it is not OLDER than local.
         return ((Number(r.updatedAt)||0) >= (Number(l.updatedAt)||0)) ? r : l;
       }
+      // K3 (2026-09-11) -- P10c / docs row 4.28. The arbitration below is UNCHANGED and
+      // still decides which snapshot CARRIES the non-accumulating fields (name, face,
+      // cls, hp, maxHp, updatedAt); all four of its guards still hold. _charAccumulate
+      // then folds the ACCUMULATING quantities (total xp -> lvl+xp, gold, mp) in on top
+      // of that winner via _charOver, so the loser's earnings are no longer discarded.
+      // It returns null -- i.e. exact pre-K3 behaviour -- whenever its preconditions do
+      // not hold (no base, non-canonical levels, missing device ids, no numeric delta).
+      const _acc = _charAccumulate(b, l, r, localDeviceId, remoteDeviceId);
       // F6 (2026-07-12): both sides are REAL characters edited since base — a
       // genuine conflict. char.updatedAt is reliably stamped per stat change
       // (app.js save() chokepoint via _charSig), so resolve by newest edit:
@@ -1198,7 +1463,13 @@ function _mergeInner(base, local, remote, remoteSavedAt, localSavedAt, localDevi
       // deterministic deviceId tiebreak below. NOTE: the ONE-SIDED branch above
       // (!localChanged && remoteChanged) must stay UNCLAMPED -- there remote holds the
       // only real edit, so clamping it to 0 would discard remote's real XP/gold/level.
-      if(_clampFuture(r.updatedAt) > _clampFuture(l.updatedAt)){
+      // K4 (2026-09-11): clamp each side ONCE and reuse both results. _futureCeil() is
+      // Date.now()-derived, so two separate _clampFuture calls on the same value can
+      // disagree across a millisecond tick; the tiebreak gate below must compare exactly
+      // the same pair this branch compared. No new clamp is introduced -- both operands
+      // were already clamped here (F1, 2026-08-18); see the _uaRaw block comment above.
+      const _lUa = _clampFuture(l.updatedAt), _rUa = _clampFuture(r.updatedAt);
+      if(_rUa > _lUa){
         // T4: throttle conflictResolved to one per (kind, entityId) per round
         const _conflictKey1 = 'char:' + ((l&&l.id)||(r&&r.id));
         if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey1)){
@@ -1210,7 +1481,7 @@ function _mergeInner(base, local, remote, remoteSavedAt, localSavedAt, localDevi
           const _e1Rd = (remoteDeviceId != null) ? remoteDeviceId : null;
           logEvent({kind:'conflictResolved', taskType:'char', winner:'remote', loser:'local', winnerDev:_e1Rd, loserDev:_e1Ld, reason:'updatedAt recency', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
         }
-        return r;
+        return _charOver(r, _acc); // K3: winner carries the scalars, _acc the earnings
       }
       // Deterministic tiebreak: the higher deviceId string wins, on BOTH sides,
       // so merge(b,L,R) and merge(b,R,L) pick the same winner (total order).
@@ -1218,24 +1489,40 @@ function _mergeInner(base, local, remote, remoteSavedAt, localSavedAt, localDevi
       const _rd = (remoteDeviceId != null) ? remoteDeviceId
         : (((remote.devices||[]).map(function(d){return d && d.id;})
              .filter(function(id){return id && id !== _ld;}))[0]) || null;
-      if(_rd != null && _ld !== _rd){
+      // K4 (2026-09-11) -- docs row 4.33. The deviceId tiebreak must fire ONLY on an
+      // EXACT clamped updatedAt tie, which is what the other three tiebreak sites in this
+      // file already do (resolveDailyConflict, mergeCollection's non-daily arm,
+      // mergeDevices). Without the `_lUa === _rUa` gate this site also fired when LOCAL was
+      // strictly newer, so each device adopted the OTHER device's name/face/cls/hp/maxHp/id
+      // and the pair swapped them on every sync round, forever. hp is the non-cosmetic one:
+      // a device that took damage had its HP restored by a peer that did not.
+      // With the gate, local-strictly-newer falls through to the local return below, which
+      // is the correct mirror of the strictly-newer-remote branch above.
+      if(_lUa === _rUa && _rd != null && _ld !== _rd){
         // T4: throttle conflictResolved to one per (kind, entityId) per round
         const _conflictKey2 = 'char:' + ((l&&l.id)||(r&&r.id));
         if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey2)){
           _conflictLogThrottle.add(_conflictKey2);
           logEvent({kind:'conflictResolved', taskType:'char', winner:(_rd>_ld)?'remote':'local', loser:(_rd>_ld)?'local':'remote', winnerDev:(_rd>_ld)?_rd:_ld, loserDev:(_rd>_ld)?_ld:_rd, reason:'deviceId tiebreak', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
         }
-        return (_rd > _ld) ? r : l;
+        return _charOver((_rd > _ld) ? r : l, _acc); // K3: see the note above the F6 block
       }
       // T4: throttle conflictResolved to one per (kind, entityId) per round
       const _conflictKey3 = 'char:' + ((l&&l.id)||(r&&r.id));
       if(typeof logEvent === "function" && !_conflictLogThrottle.has(_conflictKey3)){
         _conflictLogThrottle.add(_conflictKey3);
-        // F5: unresolved-tie fallback -- _rd is null here, which is WHY we fell through.
-        // loserDev is therefore null and the renderer's || chain keeps the legacy wording.
-        logEvent({kind:'conflictResolved', taskType:'char', winner:'local', loser:'remote', winnerDev:_ld, loserDev:_rd, reason:'unresolved tie, local kept', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
+        // F5: loserDev may be null here, and the renderer's || chain keeps the legacy
+        // wording when it is.
+        // K4 (2026-09-11): TWO distinct paths now reach this return, so name the real one.
+        //   a) local is strictly newer  -> local wins on recency, same rule as the remote
+        //      branch above. This is the path the K4 gate newly routes here.
+        //   b) exact clamped tie with no usable remote device id -> the F2 local bias
+        //      (C7's shape). _rd is null on this path only.
+        logEvent({kind:'conflictResolved', taskType:'char', winner:'local', loser:'remote', winnerDev:_ld, loserDev:_rd, reason:(_lUa > _rUa) ? 'updatedAt recency' : 'unresolved tie, local kept', charId:(l&&l.id)||(r&&r.id), charTitle:(l&&l.name)||(r&&r.name), day: mergedLastCron||0});
       }
-      return l; // unresolved tie (no remote device id available) -> local (F2 bias)
+      // K3: _acc is null here whenever the tie is unresolved because remoteDeviceId was
+      // missing (precondition 3), so this stays exactly the pre-K3 F2 bias.
+      return _charOver(l, _acc); // unresolved tie (no remote device id available) -> local (F2 bias)
     })()
   };
   return merged; // the flush is merge()'s finally -- see J1 finding 8 above
@@ -2588,6 +2875,10 @@ if(typeof window !== "undefined"){
     mergeDevices: mergeDevices,
     cleanDevices: cleanDevices,
     mergeDayArray: mergeDayArray,
+    // K3 (2026-09-11): earnings accumulate internals, exposed for unit tests only.
+    // tests/earnings-accumulate.test.js asserts the level curve here matches app.js's.
+    k3Helpers: { charTotalXp: _charTotalXp, charFromTotalXp: _charFromTotalXp, charCanonical: _charCanonical,
+                 charAccumulate: _charAccumulate, accumCounter: _accumCounter, xpNeed: _xpNeed },
     exportBackup: exportSaveDropbox,
     maybeAutoExport: syncMaybeAutoExport,
     eventsPush: syncEventsPush,

@@ -11,6 +11,16 @@ construction. Verified against real exports: tasks/rewards/devices/char have
 Rules (mirror of the app state schema — keep in sync with AGENTS.md):
   tasks/rewards/devices : key=id,      ts=updatedAt  -> newest wins
   char                  : singleton,   ts=updatedAt  -> newest wins
+    char.abs (K3, 2026-09-11): {deviceId: {ua,xp,gold,mp}} -- the per-device
+      "already absorbed" record sync.js writes when it accumulates earnings
+      (sync.js _charAccumulate). It is UNIONED across all inputs by
+      (ua, xp, gold, mp) instead of riding along with the newest char, because
+      dropping a peer's entry would let a later merge count that peer's
+      earnings a second time. LIMITATION: the scalars (lvl/xp/gold/mp) stay
+      whole-object newest-wins here -- a join has no common ancestor, so it
+      cannot reproduce the app's three-way accumulate.
+      NOT tokenized: `abs` must never get an _EXPORT_FIELD_MAP code in app.js
+      (a new-build backup would become unimportable by an older build).
   charHistory           : key=date,    ts=date       -> union, de-dup by date
   deletions (tombstone) : key=id,      ts=at         -> union, newest at wins
   events                : key=id,      ts=ts         -> union by id (disjoint epochs)
@@ -294,6 +304,32 @@ def merge_exports(inputs):
         vals = [int(d.get(k) or 0) for (_, d) in inputs]
         if any(d.get(k) is not None for (_, d) in inputs):
             out[k] = max(vals)
+    # K1 (2026-09-11): mirrors the sync.js mergedLastCron rule. A lastCron that
+    # lies in the FUTURE carries no authority, because normalize_daily_resets
+    # below force-unchecks every daily under it and clears every subtask tick.
+    # One input export written by a device with a wrong date would otherwise
+    # wipe the done state out of the whole recovered join. Inputs at or behind
+    # today keep the plain max, so ordinary archive joins are unaffected.
+    if "lastCron" in out:
+        _today = int(datetime.now().strftime("%Y%m%d"))  # LOCAL day, matching sync.js dayStampOf()
+        _plausible = [v for v in (int(d.get("lastCron") or 0) for (_, d) in inputs) if v <= _today]
+        if out["lastCron"] > _today:
+            out["lastCron"] = max(_plausible) if _plausible else 0
+    # K2 (2026-09-11): __hlcLast is the device hybrid logical clock. It is deliberately
+    # NOT in sync.js syncSubset(), so a poisoned clock never spreads over Dropbox --
+    # but a plain max() HERE transplants it from a poisoned export into a healthy join,
+    # which is the one remaining path by which it does spread. A value beyond
+    # now + the fleet tolerance is honoured by no device at all (app.js
+    # HLC_RATCHET_TOLERANCE_MS, sync.js MAX_FUTURE_SKEW_MS, and app.js now() now resets
+    # through it), so it carries no ordering authority worth joining. Inputs at or
+    # inside the ceiling keep the plain max, so ordinary archive joins are unaffected.
+    # Same shape as the lastCron cap above. See .omo/plans/K2-hlc-future-lock.md.
+    if "__hlcLast" in out:
+        _hlc_tol_ms = 120000  # mirrors app.js HLC_RATCHET_TOLERANCE_MS
+        _hlc_ceil = int(datetime.now().timestamp() * 1000) + _hlc_tol_ms
+        if out["__hlcLast"] > _hlc_ceil:
+            _plausible_hlc = [v for v in (int(d.get("__hlcLast") or 0) for (_, d) in inputs) if v <= _hlc_ceil]
+            out["__hlcLast"] = max(_plausible_hlc) if _plausible_hlc else 0
 
     # ---- char (singleton) --------------------------------------------------
     char_winner = None
@@ -305,7 +341,32 @@ def merge_exports(inputs):
         if char_winner is None or ts > char_winner["ts"]:
             char_winner = {"ts": ts, "file": fn, "value": c}
     if char_winner:
-        out["char"] = char_winner["value"]
+        out["char"] = dict(char_winner["value"])  # copy: char.abs is rewritten below
+        # K3 (2026-09-11): union char.abs across every input, newest-per-device.
+        # Mirrors sync.js _absBetter: strict total order on (ua, xp, gold, mp), so the
+        # join is order-independent the same way the merge is.
+        _abs = {}
+        for (_fn, d) in inputs:
+            c = d.get("char")
+            if not isinstance(c, dict):
+                continue
+            a = c.get("abs")
+            if not isinstance(a, dict):
+                continue
+            for dev, e in a.items():
+                if not isinstance(e, dict):
+                    continue
+                def _n(v):
+                    try:
+                        return float(v or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+                rank = (_n(e.get("ua")), _n(e.get("xp")), _n(e.get("gold")), _n(e.get("mp")))
+                cur = _abs.get(dev)
+                if cur is None or rank > cur[0]:
+                    _abs[dev] = (rank, e)
+        if _abs:
+            out["char"]["abs"] = {dev: e for dev, (_r, e) in _abs.items()}
 
     # ---- row-merged collections (id + updatedAt) ---------------------------
     # Whole-row last-write-wins: the row with the newest `updatedAt` is the

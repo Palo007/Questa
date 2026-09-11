@@ -27,7 +27,7 @@ function assert(desc, cond) {
   else { console.error('[FAIL] ' + desc); failures++; }
 }
 
-const { extractFunction } = require('./_extract');
+const { extractFunction, extractLine } = require('./_extract');
 
 const clampFn = extractFunction(appSrc, /^function clamp\(v,a,b\)\{/, 'clamp');
 const valueDeltaFn = extractFunction(appSrc, /^function valueDelta\(value\)\{/, 'valueDelta');
@@ -36,7 +36,11 @@ const completionRewardFn = extractFunction(appSrc, /^function completionReward\(
 const gainXpFn = extractFunction(appSrc, /^function gainXp\(xp\)\{/, 'gainXp');
 const isDailyDueOnFn = extractFunction(appSrc, /^function isDailyDueOn\(t, dow\)\{/, 'isDailyDueOn');
 const dayStampFn = extractFunction(appSrc, /^function dayStamp\(d\)\{/, 'dayStamp');
+// K2 (2026-09-11): now() heals a future-poisoned HLC before stamping, so the slice
+// needs _hlcHeal and the tolerance constant it reads. Lockstep with app.js (§4).
 const nowFn = extractFunction(appSrc, /^function now\(\)\{/, 'now');
+const hlcTolLine = extractLine(appSrc, /^const HLC_RATCHET_TOLERANCE_MS\s*=/, 'HLC_RATCHET_TOLERANCE_MS');
+const hlcHealFn = extractFunction(appSrc, /^function _hlcHeal\(\)\{/, '_hlcHeal');
 const logEventFn = extractFunction(appSrc, /^function logEvent\(ev\)\{/, 'logEvent');
 const creditYesterdayFn = extractFunction(appSrc, /^function creditYesterday\(t\)\{/, 'creditYesterday');
 const missedYesterdayDailiesFn = extractFunction(appSrc, /^function missedYesterdayDailies\(\)\{/, 'missedYesterdayDailies');
@@ -58,6 +62,8 @@ const code = [
   gainXpFn,
   isDailyDueOnFn,
   dayStampFn,
+  hlcTolLine,
+  hlcHealFn,
   nowFn,
   logEventFn,
   creditYesterdayFn,

@@ -64,7 +64,7 @@ assert('index.html has .pauseBadge CSS',
 // =========================================================================
 // 2. Behavioral: extract key functions and test in VM sandbox
 // =========================================================================
-const { extractFunction, extractBraceBody } = require('./_extract');
+const { extractFunction, extractBraceBody, extractLine } = require('./_extract');
 
 // Extract functions needed for testing
 const escFn = extractFunction(appSrc, /^function esc\(s\)\{/, 'esc');
@@ -86,7 +86,11 @@ const isDailyDueOnFn = extractFunction(appSrc, /^function isDailyDueOn\(t, dow\)
 const completionRewardFn = extractFunction(appSrc, /^function completionReward\(task\)\{/, 'completionReward');
 const gainXpFn = extractFunction(appSrc, /^function gainXp\(xp\)\{/, 'gainXp');
 const deathFn = extractFunction(appSrc, /^function death\(\)\{/, 'death');
+// K2 (2026-09-11): now() heals a future-poisoned HLC before stamping, so the slice
+// needs _hlcHeal and the tolerance constant it reads. Lockstep with app.js (§4).
 const nowFn = extractFunction(appSrc, /^function now\(\)\{/, 'now');
+const hlcTolLine = extractLine(appSrc, /^const HLC_RATCHET_TOLERANCE_MS\s*=/, 'HLC_RATCHET_TOLERANCE_MS');
+const hlcHealFn = extractFunction(appSrc, /^function _hlcHeal\(\)\{/, '_hlcHeal');
 const charSigFn = extractFunction(appSrc, /^function _charSig\(c\)\{/, '_charSig');
 const xpToLevelFn = extractFunction(appSrc, /^function xpToLevel\(lvl\)\{/, 'xpToLevel');
 const isDailyDueTodayFn = extractFunction(appSrc, /^function isDailyDueToday\(t\)\{/, 'isDailyDueToday');
@@ -116,6 +120,8 @@ const code = [
   completionRewardFn,
   gainXpFn,
   deathFn,
+  hlcTolLine,
+  hlcHealFn,
   nowFn,
   charSigFn,
   xpToLevelFn,

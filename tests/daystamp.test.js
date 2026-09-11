@@ -53,6 +53,11 @@ function daily(id, opts){
 
 // =========================================================================
 // M1-M5: mergeDayArray tests
+// K3 (2026-09-11): the day bucket changed from UTC floor(ms/86400000) to the LOCAL
+// dayStampOf. None of the assertions below encoded the UTC bucket -- M3-M6 use one
+// instant per bucket and M4's two instants are 24h apart, so they split in every
+// timezone -- so they are unchanged. The new behaviour (two devices either side of
+// LOCAL midnight keep two buckets) is pinned by tests/earnings-accumulate.test.js K3-J.
 // =========================================================================
 
 // M1: both empty -> empty

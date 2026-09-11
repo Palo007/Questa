@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.08.19-1124";
+const APP_VERSION = "v2026.09.11-1341";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -125,7 +125,36 @@ const HLC_RATCHET_TOLERANCE_MS = 120000; // future-skew tolerance; sync.js MAX_F
 var lastIssued = 0;
 let S = load();
 lastIssued = (S && S.__hlcLast) || 0;
-function now(){ var p=Date.now(); lastIssued=Math.max(p, lastIssued+1); try{ if(S) S.__hlcLast=lastIssued; }catch(e){} return lastIssued; }
+_hlcHeal(); // K2: the poison is restored from S.__hlcLast, so heal it at the source
+// K2 (2026-09-11): now() HEALS a poisoned clock. `lastIssued` used to move only
+// forward, and it is persisted to S.__hlcLast, so ONE forward clock excursion (manual
+// change, bad NTP, dual boot, dead RTC) pinned it in the future FOREVER -- surviving
+// both the clock correction and a reboot. Every stamp this device minted afterwards
+// read as 0 on every peer (sync.js _ua/_ca/_clampFuture zero anything past
+// physical+120s), so the device was silently demoted to read-only in every conflict,
+// with no UI signal, and only "Reset everything" cleared it.
+// Detection is a proof, not a heuristic: above Date.now() + HLC_RATCHET_TOLERANCE_MS
+// NO device in the fleet will honour the value -- ratchetHlc below refuses it, and
+// sync.js's MAX_FUTURE_SKEW_MS derives from this same constant. There is no ordering
+// authority left in it to preserve.
+// The DROP is safe for that same reason, and only because of it: every value it
+// discards reads as 0 everywhere INCLUDING on this device (as of K2 sync.js's
+// _futureCeil is the PHYSICAL clock, not this HLC), so no already-issued stamp can
+// out-compete the new lower one. The two halves must stay together -- see
+// .omo/plans/K2-hlc-future-lock.md.
+// The ratchet band (p < lastIssued <= p + tolerance) is deliberately UNTOUCHED: that
+// is a legitimate peer inside tolerance, and this device must still out-stamp it.
+// Factored out of now() so it has ONE copy and can be unit-tested on its own return
+// value rather than only through a caller (AGENTS.md §4 corollary), and so boot can
+// run it too: the poison arrives from S.__hlcLast, and healing it there means
+// hlcSkewMs() is honest on the very first render instead of staying stale until the
+// user's next edit. Returns true iff it actually healed.
+// Tests: tests/hlc-future-lock.test.js (K2-B, K2-E, K2-F).
+function _hlcHeal(){ var p=Date.now(); if(!(lastIssued > p + HLC_RATCHET_TOLERANCE_MS)) return false; var _was=lastIssued; lastIssued=p; try{ if(S) S.__hlcLast=lastIssued; }catch(e){} try{ logEvent({kind:'hlcReset', was:_was, to:p, driftMs:_was-p}); }catch(e){} return true; }
+// How far this device's clock is AHEAD of wall time, in ms. Above
+// HLC_RATCHET_TOLERANCE_MS no peer honours our stamps; that is what Settings warns on.
+function hlcSkewMs(){ return lastIssued - Date.now(); }
+function now(){ _hlcHeal(); var p=Date.now(); lastIssued=Math.max(p, lastIssued+1); try{ if(S) S.__hlcLast=lastIssued; }catch(e){} return lastIssued; }
 function ratchetHlc(maxRemoteTs){ var p=Date.now(); if(maxRemoteTs > p + HLC_RATCHET_TOLERANCE_MS){ try{ logEvent({kind:'clockSkew', remoteTs:maxRemoteTs, localTs:p}); }catch(e){} return; } lastIssued = Math.max(lastIssued, maxRemoteTs); if(S) S.__hlcLast = lastIssued; }
 function load(){
   try{ const raw = localStorage.getItem(STORE_KEY);
@@ -878,7 +907,7 @@ function logEvent(ev){
 // Async read API: resolve to events in [from,to] (ms, inclusive) optionally
 // filtered by kind and/or taskId. Uses the ts index range so we never load the
 // whole store for a windowed query. Returns [] on any failure (never throws).
-var DIAGNOSTIC_KINDS = ['lifecycle','storagePersist','webLocksUnavailable','clockSkew','multiTabClobberAvoided','quotaError'];
+var DIAGNOSTIC_KINDS = ['lifecycle','storagePersist','webLocksUnavailable','clockSkew','hlcReset','multiTabClobberAvoided','quotaError'];
 function getEvents(opts){
   opts = opts || {};
   const from = (opts.from!=null) ? opts.from : -Infinity;
@@ -5521,6 +5550,14 @@ function openSettings(){
     '<button class="btn ghost" onclick="openRestorePicker()">Restore Snapshot</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json,text/plain,.txt" style="display:none" onchange="importData(event)">';
   h+='<div class="backupMeta small"><span id="lastFullBackupDate"></span><span id="lastExportDate"></span></div>';
+  // K2 (2026-09-11): until now a forward clock excursion demoted this device to
+  // read-only in every sync conflict with NO signal at all -- which is why it went
+  // unnoticed for so long. No "resync clock" button on purpose: now() heals itself in
+  // one call, so a button would have nothing left to do, and the real action lives in
+  // the OS clock settings, not here. Plain language, no HLC jargon.
+  if(typeof hlcSkewMs === "function" && hlcSkewMs() > HLC_RATCHET_TOLERANCE_MS){
+    h+='<div class="small" style="color:#f74e52;margin-top:6px">This device’s clock is ahead of your other devices. Edits made here may lose to them until you correct the clock in your device settings.</div>';
+  }
   h+='<div class="resetRow"><button class="btn resetMini" onclick="resetEverything()">Reset everything</button><div class="appVersion" onclick="tapVersionDebug()">'+APP_VERSION+'</div></div>';
   if(IS_DIRTY){
     _flushPromise = takeSnapshot().then(id => { if(id) IS_DIRTY=false; }).finally(()=>{ _flushPromise=null; });

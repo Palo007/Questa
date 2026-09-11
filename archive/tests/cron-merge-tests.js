@@ -181,7 +181,15 @@ const { mergeCollection, resolveDailyConflict, normalizeDailyResets, merge } = c
   const localHabit = [T('h1', { updatedAt: 1, cUp: 3 }, 'habit')]; // F3: taps no longer force an updatedAt bump upstream, but the object still differs
   const remoteHabit = [T('h1', { updatedAt: 2, cUp: 0 }, 'habit')]; // counter reset side
   const outHabit = mergeCollection(baseHabit, localHabit, remoteHabit);
-  assert('C10b habits: still resolved by updatedAt, not resolveDailyConflict', outHabit[0].cUp === 0 && outHabit[0].updatedAt === 2);
+  // K3 (2026-09-11) LOCKSTEP UPDATE. The subject of this assertion -- "habits go
+  // through the plain updatedAt tiebreak, never resolveDailyConflict" -- is unchanged,
+  // and updatedAt === 2 still pins it: remote won the arbitration.
+  // The `cUp === 0` half encoded the BUG K3 fixes. Local had tapped 3 times (base 0 ->
+  // 3) and remote's cUp never moved, so the whole-object winner silently discarded
+  // three taps. cUp is now accumulated across the winner (sync.js _accumCounters), so
+  // the truthful answer is 3. See tests/earnings-accumulate.test.js K3-E and
+  // .omo/plans/K3-earnings-design.md.
+  assert('C10b habits: still resolved by updatedAt, not resolveDailyConflict', outHabit[0].cUp === 3 && outHabit[0].updatedAt === 2);
 })();
 
 // C11 — purity / idempotence: same inputs -> same output; re-normalizing an

@@ -619,6 +619,31 @@ function normalizeDailyResets(tasks, mergedLastCron){
     return t;
   });
 }
+// K5 (2026-09-11): recognise the CROSS-TZ ECHO of the overlay directly above.
+// normalizeDailyResets builds Object.assign({}, t, {done:false}) -- it KEEPS doneAt and
+// it never bumps updatedAt. A device in a later timezone therefore uploads a record that
+// differs from base by the done flag ALONE, which makes mergeCollection's one-sided
+// branch apply it on a device whose own day has NOT rolled over yet, erasing a
+// completion the user really made today plus every subtask tick with it. K1 fixed the
+// sibling case (a remote lastCron in this device's future) in mergedLastCron; the echo
+// arrives on the record itself and never reaches that rule.
+// A deliberate retraction is a DIFFERENT SHAPE on disk: uncompleteDaily/uncompleteTodo
+// (app.js:1818-1821, 1829-1831) BOTH `delete t.doneAt` AND set `t.updatedAt = now()`,
+// so neither test below holds and a real un-tick still wins. That is the whole
+// discriminator -- do not relax either half.
+// INVERTED POLARITY: returning false KEEPS the remote reset and DESTROYS local data, so
+// every operand reads RAW and the day test is `>=`, not `>`. This is deliberately NOT a
+// clamp site; see the _uaRaw block comment below and D5. `today` is a pure read of the
+// physical clock, exactly as mergedLastCron's own is (see J1 finding 4).
+function _isCronEchoReset(l, r){
+  if(!l || !r) return false;
+  if(l.type !== 'daily' && r.type !== 'daily') return false;
+  if(l.done !== true || r.done !== false) return false;
+  if(_uaRaw(l) !== _uaRaw(r)) return false;        // a real edit always bumps updatedAt
+  const da = Number(r.doneAt) || 0;
+  if(!da) return false;                            // doneAt retracted -> a real un-tick
+  return dayStampOf(da) >= dayStampOf(Date.now()); // completion still current HERE
+}
 
 // ---- F4 (2026-07-11) subtask-granular merge --------------------------------
 // Base-aware three-way per-subtask merge, keyed by stable item id. Called
@@ -918,6 +943,14 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
         // "Site 4 of 4" below; that site was left raw and this one was not. Both
         // operands must stay RAW. Skew protection here needs a different rule.
         _skewDiagNote('skewGuard1', r && r.updatedAt, id);
+        // GUARD 2 (K5, 2026-09-11) -- the cross-TZ daily echo; see _isCronEchoReset.
+        // GUARD 1 below only rescues local when _uaRaw(l) > _uaRaw(r), and the echo
+        // carries the SAME updatedAt on both sides, so it slipped straight through.
+        // Keep `l` WHOLESALE, with no F4 checklist splice: normalizeDailyResets clears
+        // the ENTIRE checklist whenever it resets, so the remote side is all-false by
+        // construction and holds no real subtask edit to preserve. Splicing it in here
+        // would re-clear the very ticks this guard exists to save.
+        if(localHad && _isCronEchoReset(l, r)){ resultMap.set(id, l); return; }
         if(localHad && _uaRaw(l) > _uaRaw(r)){
           let w = l;
           if(Array.isArray(l && l.checklist) || Array.isArray(r && r.checklist)){
@@ -1422,8 +1455,19 @@ function _mergeInner(base, local, remote, remoteSavedAt, localSavedAt, localDevi
       // local and clobbered the synced character back to level 1. (Tasks were
       // unaffected: they union by id via mergeCollection.) An UNTOUCHED default
       // character carries no real progress and must always yield to a real one.
-      // death() keeps gold (>0) and elevated maxHp (>50), so a died character is
-      // NOT "untouched" and still goes through the normal three-way merge below.
+      // K5 (2026-09-11) -- D14. This used to read: "death() keeps gold (>0) and elevated
+      // maxHp (>50), so a died character is NOT 'untouched'." BOTH halves are false at
+      // 2e346ac. maxHp has exactly two write sites, app.js:107 and app.js:1731, and both
+      // write the literal 50 -- nothing raises it, so the maxHp conjunct below can never
+      // be false. death() (app.js:1737-1742) never touches maxHp, and gold*0.75 of 0 is 0.
+      // So a character that dies at lvl <= 2 holding no gold DOES read as untouched(),
+      // and because untouched() is tested BEFORE the three-way merge its death is
+      // discarded and the pre-death snapshot comes back. That is silent wrong behaviour
+      // but NOT data loss -- the outcome restores progress rather than destroying it --
+      // so it is tracked as MINOR, not fixed here. See
+      // .omo/evidence/K5-sync-backlog/cycle-1-findings.md §1 (D14).
+      // The maxHp conjunct is KEPT deliberately: it costs one term and becomes live again
+      // the day maxHp is level-scaled (gainXp already owns the write site).
       const untouched = c => (Number(c.lvl)||0) <= 1 && (Number(c.xp)||0) <= 0
                           && (Number(c.gold)||0) <= 0 && (Number(c.maxHp)||50) <= 50;
       const lU = untouched(l), rU = untouched(r);

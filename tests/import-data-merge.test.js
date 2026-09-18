@@ -37,7 +37,9 @@ const appSrc = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
 // elsewhere in app.js. Do NOT reintroduce hardcoded line-number slicing.
 const importDataFn = extractFunction(appSrc, /^function importData\(ev\)\{/, 'importData');
 const eventMergeSigFn = extractFunction(appSrc, /^function eventMergeSig\(r\)\{/, 'eventMergeSig');
-const eventMergeFilterFn = extractFunction(appSrc, /^function eventMergeFilter\(incoming, existingUidSet, existingSigSet\)\{/, 'eventMergeFilter');
+const eventMergeFilterFn = extractFunction(appSrc, /^function eventMergeFilter\(incoming, existingUids, existingSigSet\)\{/, 'eventMergeFilter');
+// 2026-09-18: eventMergeFilter()'s uid-collision branch calls this.
+const eventUidDisambiguateFn = extractFunction(appSrc, /^function eventUidDisambiguate\(uid, sig\)\{/, 'eventUidDisambiguate');
 const eventUidOfFn = extractFunction(appSrc, /^function eventUidOf\(rec, idx\)\{/, 'eventUidOf');
 const reparentEventsForImportFn = extractFunction(appSrc, /^function reparentEventsForImport\(list\)\{/, 'reparentEventsForImport');
 
@@ -126,7 +128,7 @@ function makeCtx(opts) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
 
-  const src = [eventMergeSigFn, eventMergeFilterFn, eventUidOfFn, reparentEventsForImportFn, importDataFn].join('\n');
+  const src = [eventMergeSigFn, eventUidDisambiguateFn, eventMergeFilterFn, eventUidOfFn, reparentEventsForImportFn, importDataFn].join('\n');
   try { vm.runInContext(src, sandbox); }
   catch (e) { console.error('FAIL: extracted source threw during eval:', e); process.exit(1); }
 

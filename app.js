@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.18-1904";
+const APP_VERSION = "v2026.09.18-1922";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -1151,16 +1151,52 @@ function republishImportedEvents(){
 function eventMergeSig(r){
   return [r.ts, r.kind, r.taskId || '', r.dir || 0, r.reps || 0].join('|');
 }
-function eventMergeFilter(incoming, existingUidSet, existingSigSet){
-  const add = []; let skipped = 0; const seen = new Set();
+// Deterministic tie-breaker for a uid COLLISION -- two logically different
+// events that hashed to the same 'rep-...' uid. Derived from the content
+// signature, so the same colliding record always lands on the same re-minted
+// uid: a second import of the same file dedupes normally instead of piling up
+// a fresh uid per attempt. Kept out of eventUidOf()'s own hash space by the
+// '~' separator, which eventUidOf() never emits.
+function eventUidDisambiguate(uid, sig){
+  let h = 0x811c9dc5;
+  const s = String(sig);
+  for(let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return String(uid) + '~' + (h>>>0).toString(16);
+}
+// `existingUids` may be either a Set of uids (legacy callers, no collision
+// handling) or a Map uid -> eventMergeSig(record). With a Map, a uid that is
+// already known but whose CONTENT SIGNATURE differs is treated as a hash
+// COLLISION, not a duplicate: the record is kept under a re-minted uid rather
+// than dropped. Before 2026-09-18 the uid check ran first and returned
+// immediately, so the content-signature safety net below never saw a colliding
+// record and the event was lost permanently. eventUidOf()'s digest was widened
+// to 64 bits in the same edit, which makes collisions vanishingly unlikely --
+// this branch is the net for the ones that still happen, and for the legacy
+// 32-bit uids already sitting in every existing store.
+function eventMergeFilter(incoming, existingUids, existingSigSet){
+  const add = []; let skipped = 0;
+  const seenUid = new Set(); const seenSig = new Set();
+  const uidSigs = (existingUids && typeof existingUids.get === 'function') ? existingUids : null;
   (Array.isArray(incoming) ? incoming : []).forEach(r=>{
     if(!r || typeof r !== "object" || !r.uid || typeof r.ts !== "number"){ skipped++; return; }
-    if(existingUidSet && existingUidSet.has(r.uid)){ skipped++; return; }
     const sig = eventMergeSig(r);
     if(existingSigSet && existingSigSet.has(sig)){ skipped++; return; }
-    if(seen.has(r.uid) || seen.has(sig)){ skipped++; return; }
-    seen.add(r.uid); seen.add(sig);
-    add.push(r);
+    if(seenSig.has(sig)){ skipped++; return; }
+    let uid = r.uid;
+    if(existingUids && existingUids.has(uid)){
+      // No Map => no signature to compare against => keep the old, lossy
+      // behaviour rather than guess. With a Map, an equal signature is a real
+      // duplicate and an unequal one is a collision.
+      if(!uidSigs || uidSigs.get(uid) === sig){ skipped++; return; }
+      uid = eventUidDisambiguate(uid, sig);
+      if(existingUids.has(uid)){ skipped++; return; }
+    }
+    if(seenUid.has(uid)){
+      uid = eventUidDisambiguate(uid, sig);
+      if(seenUid.has(uid) || (existingUids && existingUids.has(uid))){ skipped++; return; }
+    }
+    seenUid.add(uid); seenSig.add(sig);
+    add.push(uid === r.uid ? r : Object.assign({}, r, { uid: uid }));
   });
   return { add: add, skipped: skipped };
 }
@@ -1171,11 +1207,26 @@ function eventMergeFilter(incoming, existingUidSet, existingSigSet){
 // over the fields that define a unique event; a changed field => new uid.
 function eventUidOf(rec, idx){
   if(!rec || typeof rec!=='object') return '';
-  // Collision-free content hash. The ORIGINAL fields are included so the SAME
-  // record always hashes the same (idempotent re-import), but enough distinct
-  // fields are covered -- including the original record id and stable array
-  // position -- that two logically different events NEVER collide on the same
-  // uid. Collisions would make sync's existingUidSet drop legitimate history.
+  // Content hash, 64 bits. The ORIGINAL fields are included so the SAME record
+  // always hashes the same (idempotent re-import), and enough distinct fields
+  // are covered -- including the original record id and stable array position
+  // -- that two logically different events are very unlikely to share a uid.
+  //
+  // 2026-09-18: this comment used to claim collisions were IMPOSSIBLE and the
+  // digest was 32 bits. Measured on the real generator: 1 collision at 60k
+  // events, 3 at 120k, against a 200k hard cap -- and a collision made
+  // evtIncomingFilter/eventMergeFilter drop the losing event forever. Widened
+  // to 64 bits (expected collisions at 200k: ~1e-9). "Very unlikely" is still
+  // not "impossible", so both dedup filters now compare the content signature
+  // on a uid hit and keep a colliding record under a re-minted uid.
+  //
+  // MIGRATION NOTE. Only re-parented import records carry a 'rep-' uid; real
+  // taps get a random uid from syncEventUid(). Stores written by earlier builds
+  // keep their 32-bit 'rep-xxxxxxxx' uids and are NOT rewritten -- nothing
+  // reads a uid's width. A re-import of the same backup on this build mints a
+  // wider uid for an event already stored under the old one; the content
+  // signature catches that on both the import path (eventMergeFilter) and the
+  // sync ingest path (evtIncomingFilter), so it dedupes instead of doubling.
   const ts = (typeof rec.ts==='number') ? rec.ts : 0;
   const kind = rec.kind || '';
   const taskId = rec.taskId || '';
@@ -1192,12 +1243,30 @@ function eventUidOf(rec, idx){
   const origId = rec.id || '';
   const pos = (typeof idx==='number') ? idx : -1;
   const str = [ts,kind,taskId,taskTitle,dir,dev,uid,value,reps,src,subId,subText,notes,origId,pos].join('\u0001');
-  let h = 0x811c9dc5;
+  // Lane A: plain FNV-1a, forward. Lane B: a different constant set, walked
+  // BACKWARDS with the position mixed in and an avalanche step per character,
+  // so the two lanes do not move together on small input changes. Concatenated
+  // as two fixed-width 8-hex-digit halves -- fixed width matters, otherwise a
+  // short lane A would blur the boundary and cost real bits.
+  let a = 0x811c9dc5;
   for(let i=0;i<str.length;i++){
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
+    a ^= str.charCodeAt(i);
+    a = Math.imul(a, 0x01000193);
   }
-  return 'rep-' + (h>>>0).toString(16);
+  let b = (0x9e3779b9 ^ str.length) >>> 0;
+  for(let i=str.length-1;i>=0;i--){
+    b ^= (str.charCodeAt(i) + (i & 0xff));
+    b = Math.imul(b, 0x85ebca6b);
+    b ^= b >>> 13;
+  }
+  b = Math.imul(b ^ (b >>> 16), 0xc2b2ae35);
+  b ^= b >>> 16;
+  // Padded inline rather than via a helper on purpose: several tests extract
+  // eventUidOf() on its own with tests/_extract.js, and a new free-function
+  // dependency would make every one of them throw ReferenceError.
+  const hexA = ('00000000' + ((a>>>0).toString(16))).slice(-8);
+  const hexB = ('00000000' + ((b>>>0).toString(16))).slice(-8);
+  return 'rep-' + hexA + hexB;
 }
 // Re-parent imported events to THIS device so they pass the normal sync
 // upload/ingest gates (evtUploadable / evtIncomingFilter) and propagate to
@@ -6407,8 +6476,11 @@ function importData(ev){
             // Union-insert only -- clearAllEvents() must NEVER be called on this
             // path; that used to wipe every local event absent from the import.
             const existing = await getEvents({includeDiag:true});
-            const existingUidSet = new Set(); const existingSigSet = new Set();
-            (existing||[]).forEach(r=>{ if(r && r.uid) existingUidSet.add(r.uid); existingSigSet.add(eventMergeSig(r)); });
+            // uid -> content signature, not a bare uid Set: eventMergeFilter()
+            // needs the signature of the record ALREADY holding a uid so it can
+            // tell a real duplicate from a hash collision (see eventUidOf()).
+            const existingUidSet = new Map(); const existingSigSet = new Set();
+            (existing||[]).forEach(r=>{ const s = eventMergeSig(r); if(r && r.uid) existingUidSet.set(r.uid, s); existingSigSet.add(s); });
             const reparented = reparentEventsForImport(embeddedEvents);
             const impSum = eventImportSummary(reparented);
             // The signature key (eventMergeSig; ts/kind/taskId/dir/reps) is
@@ -6597,8 +6669,10 @@ async function confirmRestore(id){
     // only in IndexedDB). This is read first purely so the merge below has the
     // pre-restore baseline; not because migrate() would otherwise empty it.
     const existing = await getEvents({includeDiag:true});
-    const existingUidSet = new Set(); const existingSigSet = new Set();
-    (existing||[]).forEach(r=>{ if(r && r.uid) existingUidSet.add(r.uid); existingSigSet.add(eventMergeSig(r)); });
+    // uid -> content signature (see the twin at importData()): a Map lets
+    // eventMergeFilter() separate a duplicate from a uid collision.
+    const existingUidSet = new Map(); const existingSigSet = new Set();
+    (existing||[]).forEach(r=>{ const s = eventMergeSig(r); if(r && r.uid) existingUidSet.set(r.uid, s); existingSigSet.add(s); });
 
     // Apply state
     S = migrate(stateSnapshot);

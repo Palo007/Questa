@@ -2426,8 +2426,29 @@ function evtOwnMonthRecords(events, myDev){
 // Filter a downloaded file's records down to what should be inserted locally:
 // stamped, not synthetic, not ours, inside the prune window, uid not already
 // present (in IDB — caller passes the set — or earlier in this same batch).
+// LOCKSTEP: this must produce the exact same string as app.js eventMergeSig().
+// It is duplicated rather than called because the test sandbox loads sync.js on
+// its own, with no app.js globals. tests/uid-collision.test.js extracts both and
+// asserts they agree, so drift fails the suite instead of silently splitting the
+// two dedup paths.
+function evtIncomingSig(r){
+  return [r.ts, r.kind, r.taskId || '', r.dir || 0, r.reps || 0].join('|');
+}
+// LOCKSTEP: must match app.js eventUidDisambiguate(). Same reason as above.
+function evtUidDisambiguate(uid, sig){
+  let h = 0x811c9dc5;
+  const s = String(sig);
+  for(let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return String(uid) + '~' + (h>>>0).toString(16);
+}
 function evtIncomingFilter(records, existingUidSet, myDev, nowMs, ageLimitMs){
-  const out = []; const seen = new Set();
+  const out = []; const seen = new Map();
+  // `existingUidSet` is a Set of uids (legacy callers) or a Map uid -> signature.
+  // Only the Map form can tell a duplicate from a uid collision; without it the
+  // old lossy uid-only behaviour is kept rather than guessed at.
+  const uidSigs = (existingUidSet && typeof existingUidSet.get === 'function') ? existingUidSet : null;
+  const existingSigs = uidSigs ? new Set(uidSigs.values()) : null;
+  const seenSigs = new Set();
   (records || []).forEach(r => {
     if(!r || typeof r !== "object") return;
     if(!r.uid || typeof r.ts !== "number") return;
@@ -2435,9 +2456,33 @@ function evtIncomingFilter(records, existingUidSet, myDev, nowMs, ageLimitMs){
     if(r.kind === "lifecycle") return; // defense-in-depth: reject even if an old build uploaded one
     if(r.dev === myDev) return;
     if(nowMs - r.ts > ageLimitMs) return;
-    if(existingUidSet.has(r.uid) || seen.has(r.uid)) return;
-    seen.add(r.uid);
+    // Content-hash uids ('rep-...', minted by app.js eventUidOf() when an import
+    // is re-parented) are the ONLY uids that can change for one logical event:
+    // the digest was widened from 32 to 64 bits on 2026-09-18, and a re-import
+    // on the new build re-mints them. Dedupe those by signature so the same tap
+    // does not land twice under two uid schemes. Real taps carry a random
+    // syncEventUid() and are deliberately left to uid-only dedup -- a signature
+    // net there could drop two genuinely distinct remote taps that happen to
+    // share (ts, kind, taskId, dir, reps).
+    const isRep = String(r.uid).slice(0, 4) === 'rep-';
+    const sig = uidSigs ? evtIncomingSig(r) : null;
+    if(isRep && existingSigs && (existingSigs.has(sig) || seenSigs.has(sig))) return;
+    let uid = r.uid;
+    if(existingUidSet.has(uid) || seen.has(uid)){
+      const knownSig = existingUidSet.has(uid)
+        ? (uidSigs ? uidSigs.get(uid) : null)
+        : seen.get(uid);
+      // Equal signature => genuinely the same event, already stored. Unequal =>
+      // a uid COLLISION: before 2026-09-18 this line dropped the losing event
+      // permanently, with nothing downstream to recover it.
+      if(!uidSigs || knownSig === sig) return;
+      uid = evtUidDisambiguate(uid, sig);
+      if(existingUidSet.has(uid) || seen.has(uid)) return;
+    }
+    seen.set(uid, sig);
+    if(sig !== null) seenSigs.add(sig);
     const rec = Object.assign({}, r); delete rec.id;
+    if(uid !== r.uid) rec.uid = uid;
     out.push(rec);
   });
   return out;
@@ -2763,8 +2808,13 @@ async function syncEventsPull(opts){
       const range = evtMonthRange(parsed.month);
       // diagnostics sync cross-device for remote debugging (see note above);
       // the pre-existing kind:'lifecycle' exclusion in evtIncomingFilter stays.
-      const existing = new Set((await getEvents({ from: range.from, to: range.to, includeDiag: true }))
-        .map(e => e && e.uid).filter(Boolean));
+      // uid -> content signature, not a bare uid Set: evtIncomingFilter() needs
+      // the stored record's signature to separate a real duplicate from a
+      // content-hash uid collision, which used to drop the incoming event for
+      // good. Month-scoped, so the Map stays small.
+      const existing = new Map();
+      (await getEvents({ from: range.from, to: range.to, includeDiag: true }))
+        .forEach(e => { if(e && e.uid) existing.set(e.uid, evtIncomingSig(e)); });
       const _evtRes = await evtInsertNew(evtIncomingFilter(records, existing, myDev, now, ageLimit));
       const _evtInserted = (_evtRes && _evtRes.added) || 0;
       // Successful parse + COMMITTED insert only: record the rev in the normal
@@ -3166,7 +3216,7 @@ if(typeof window !== "undefined"){
     eventsDeleteDevice: syncEventsDeleteDevice,
     eventsSync: syncEventsSync,
     eventsForcePush: syncEventsForcePush, // T1: force-push override for shrink guard
-    evtHelpers: { evtMonthKey, evtMonthRange, evtParseFileName, evtUploadable, evtOwnMonthRecords, evtIncomingFilter, evtMonthOlderThan, uidHash, uidsAreSuperset },
+    evtHelpers: { evtMonthKey, evtMonthRange, evtParseFileName, evtUploadable, evtOwnMonthRecords, evtIncomingFilter, evtIncomingSig, evtUidDisambiguate, evtMonthOlderThan, uidHash, uidsAreSuperset },
     _testOnly: { _conflictLogThrottleReset: function(){ _conflictLogThrottle.clear(); } }
   };
 }

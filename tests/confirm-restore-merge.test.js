@@ -38,8 +38,11 @@ const confirmRestoreFn = extractFunction(appSrc, /^async function confirmRestore
 // declarations in a vm context overwrite same-named globals), defeating the
 // spies and throwing on the missing idbOpen global.
 const eventMergeSigFn = extractFunction(appSrc, /^function eventMergeSig\(r\)\{/, 'eventMergeSig');
-const eventMergeFilterFn = extractFunction(appSrc, /^function eventMergeFilter\(incoming, existingUidSet, existingSigSet\)\{/, 'eventMergeFilter');
-const eventsHelpers = eventMergeSigFn + '\n' + eventMergeFilterFn;
+const eventMergeFilterFn = extractFunction(appSrc, /^function eventMergeFilter\(incoming, existingUids, existingSigSet\)\{/, 'eventMergeFilter');
+// 2026-09-18: eventMergeFilter() gained a uid-collision branch that calls
+// eventUidDisambiguate(); extract it too or the sandbox throws ReferenceError.
+const eventUidDisambiguateFn = extractFunction(appSrc, /^function eventUidDisambiguate\(uid, sig\)\{/, 'eventUidDisambiguate');
+const eventsHelpers = eventMergeSigFn + '\n' + eventUidDisambiguateFn + '\n' + eventMergeFilterFn;
 
 // Sanity: the fix must have actually removed the clearAllEvents() CALL from
 // confirmRestore's own source (a comment explaining why it was removed is

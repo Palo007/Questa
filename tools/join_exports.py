@@ -159,6 +159,15 @@ def _detokenize_export(data):
 ROW_MERGED = [
     ("tasks", "id", "updatedAt"),
     ("rewards", "id", "updatedAt"),
+    # 2026-09-18: tags were missing entirely. They are a first-class synced
+    # collection with exactly the tasks/rewards/devices shape — syncSubset()
+    # whitelists them, syncApply() writes them back, and sync.js merges them with
+    # mergeCollection(base.tags, local.tags, remote.tags, ...) by id + updatedAt.
+    # Without this row the join emitted no "tags" key at all, so migrate() reset it
+    # to [] on import and every tag in every source export was lost, taking each
+    # task's tag references with it. AGENTS.md §6 calls a stale join script a red
+    # deploy gate; this was one.
+    ("tags", "id", "updatedAt"),
     ("devices", "id", "updatedAt"),
     ("char", None, "updatedAt"),          # singleton: pick newest updatedAt
 ]
@@ -191,7 +200,15 @@ def normalize_daily_resets(tasks, merged_last_cron):
         if not isinstance(t, dict) or t.get("type") != "daily" or not t.get("done"):
             out.append(t)
             continue
-        if day_stamp_of(t.get("doneAt") or 0) < merged_last_cron:
+        # 2026-09-18: mirror sync.js doneDayOf(). completeTask/creditYesterday now
+        # freeze the completion day (t.doneDay) in the RECORDING device's timezone,
+        # exactly as runCron freezes t.missedOn. day_stamp_of(doneAt) re-derives it
+        # in whatever timezone this script happens to run in, which is a different
+        # frame from merged_last_cron and silently un-ticked still-current dailies.
+        # Records from older builds carry no doneDay, so fall back to the old
+        # derivation for them. (AGENTS.md §6: schema change, same edit.)
+        _done_day = t.get("doneDay") or day_stamp_of(t.get("doneAt") or 0)
+        if _done_day < merged_last_cron:
             nt = dict(t)
             nt["done"] = False
             if isinstance(t.get("checklist"), list):

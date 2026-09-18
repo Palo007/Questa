@@ -704,7 +704,21 @@
     display: flex;
     align-items: center;
   }
+  /* 2026-09-18: .evOverview used to open here and never close — the whole
+     .evSummary* set below was written inside it and its own declarations sat
+     after them, so the import-summary dialog's styles only matched as
+     ".evOverview .evSummary", which never exists, and #evOverview picked up
+     box styling meant for the summary note. Closed properly now. */
   .evOverview {
+    font-size: 11px;
+    color: var(--muted);
+    background: rgba(0,0,0,0.18);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 6px 10px;
+    margin: 4px 0 10px;
+    line-height: 1.4;
+  }
   .evSummary {
     text-align: left;
     font-size: 12px;
@@ -740,15 +754,6 @@
     font-size: 11px;
     line-height: 1.45;
     color: var(--muted);
-  }
-    font-size: 11px;
-    color: var(--muted);
-    background: rgba(0,0,0,0.18);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 6px 10px;
-    margin: 4px 0 10px;
-    line-height: 1.4;
   }
   .evSearchInput {
     width: 100%;

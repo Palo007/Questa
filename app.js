@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.11-1505";
+const APP_VERSION = "v2026.09.18-1904";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -27,8 +27,11 @@ function confirmDialog(title, text) {
     const yesBtn = document.getElementById('confirmYesBtn');
     const noBtn = document.getElementById('confirmNoBtn');
     if (!overlay || !titleEl || !textEl || !yesBtn || !noBtn) {
-      // Fallback if DOM not ready or elements missing
-      resolve(true);
+      // 2026-09-18: FAIL CLOSED. This gate fronts resetEverything(), confirmRestore(),
+      // doImport() and republishImportedEvents(). Resolving true meant "the user said
+      // yes" whenever the dialog markup was missing — e.g. a new app.js served against
+      // a cached older index.html — so those destructive paths ran with no prompt.
+      resolve(false);
       return;
     }
 
@@ -84,7 +87,11 @@ function alertDialog(title, text, html) {
   });
 }
 function longPressMs(){
-  return 200;
+  // 2026-09-18: actually honour the Settings slider. This returned a hard 200, so
+  // S.prefs.dragDelay was stored, migrated, clamped and synced to other devices
+  // while changing nothing. Clamp matches migrate()'s own 100-300 range.
+  var d = (S && S.prefs && S.prefs.dragDelay != null) ? Number(S.prefs.dragDelay) : NaN;
+  return isFinite(d) ? Math.min(300, Math.max(100, d)) : DRAG_DELAY_DEFAULT;
 }
 let _buzzLastResult = null;
 let _buzzCount = 0;
@@ -268,8 +275,14 @@ function migrate(s){ const f=freshState();
   return out; }
 let IS_DIRTY = false;
 let _flushPromise = null;
-var _prevCharSig = null;
 function _charSig(c){ if(!c) return ""; var o={}; for(var k in c){ if(k!=="updatedAt") o[k]=c[k]; } try{ return JSON.stringify(o); }catch(e){ return ""; } }
+// 2026-09-18: prime from the LOADED state instead of starting at null. save() only
+// stamps char.updatedAt when it already holds a signature, so the FIRST save of every
+// session skipped the stamp. A boot that damages HP (runCron -> takeDamage -> save)
+// therefore persisted the loss under the PREVIOUS session's updatedAt, lost the next
+// both-changed merge arbitration, and the damage was silently undone by the peer.
+// S is declared above this line, so the initializer can read it.
+var _prevCharSig = _charSig(S && S.char);
 /* BEGIN_DURABLE_STATE_HELPERS */
 let _stateWritePromise = null;
 // 2026-07-13 P0-1: save() must be fully SYNCHRONOUS. The previous design
@@ -731,6 +744,21 @@ function _diagStorageEstimate(){
 function questaFullDiagnostic(){
   var ls = {};
   try{ for(var i=0;i<localStorage.length;i++){ var k=localStorage.key(i); ls[k]=localStorage.getItem(k); } }catch(e){ ls={__error:String(e)}; }
+  // 2026-09-18: REDACT the Dropbox credentials. This bundle is what users are asked
+  // to attach to a bug report, and questa.sync.v1 holds a long-lived refreshToken
+  // plus a live accessToken — anyone who received the file could read and write the
+  // user's Dropbox app folder indefinitely. docs/DIAGNOSTIC-FORMAT.md already
+  // specifies "presence only" here, and showSyncDebugOverlay() already obeys that.
+  try{
+    if(ls["questa.sync.v1"]){
+      var _sc = JSON.parse(ls["questa.sync.v1"]);
+      _sc.refreshToken = !!_sc.refreshToken;   // presence only
+      _sc.accessToken  = !!_sc.accessToken;    // presence only
+      delete _sc.accessExpiresAt;
+      ls["questa.sync.v1"] = JSON.stringify(_sc);
+    }
+  }catch(e){ ls["questa.sync.v1"] = "[redacted — unparseable]"; }
+  try{ if(ls["questa.sync.pkce"]) ls["questa.sync.pkce"] = "[redacted]"; }catch(e){}
   var meta = {
     generatedAt: new Date().toISOString(),
     appVersion: (typeof APP_VERSION!=="undefined")?APP_VERSION:"?",
@@ -1554,18 +1582,27 @@ function pruneEvents(db){
     const ageReq = store.index("ts").openCursor(IDBKeyRange.upperBound(cutoff, true));
     ageReq.onsuccess = ()=>{ const c=ageReq.result; if(c){ try{c.delete();}catch(e){} c.continue(); } };
   }catch(e){}
-  // 2) hard-count backstop: if still over cap, drop oldest by ts until under
-  try{
-    const cReq = store.count();
-    cReq.onsuccess = ()=>{
-      const over = (cReq.result||0) - EVENT_HARD_CAP;
-      if(over <= 0) return;
-      let removed=0;
+  // 2) hard-count backstop: if STILL over cap, drop oldest by ts until under.
+  // 2026-09-18: measure AFTER the age pass, not before. store.count() used to be
+  // queued on the same transaction immediately after openCursor(), so it returned
+  // the PRE-prune total — and the backstop then deleted that many MORE records.
+  // With 250k events of which 100k were old, the age pass left 150k (already under
+  // the 200k cap) but `over` was computed as 50k, so 50k in-window events were
+  // destroyed as well. Counting from tx.oncomplete measures the shrunk store.
+  tx.oncomplete = ()=>{
+    try{
       const tx2 = db.transaction(EVENTS_STORE,"readwrite");
-      const cur2 = tx2.objectStore(EVENTS_STORE).index("ts").openCursor();
-      cur2.onsuccess = ()=>{ const c=cur2.result; if(c && removed<over){ try{c.delete();}catch(e){} removed++; c.continue(); } };
-    };
-  }catch(e){}
+      const store2 = tx2.objectStore(EVENTS_STORE);
+      const cReq = store2.count();
+      cReq.onsuccess = ()=>{
+        const over = (cReq.result||0) - EVENT_HARD_CAP;
+        if(over <= 0) return;
+        let removed=0;
+        const cur2 = store2.index("ts").openCursor();
+        cur2.onsuccess = ()=>{ const c=cur2.result; if(c && removed<over){ try{c.delete();}catch(e){} removed++; c.continue(); } };
+      };
+    }catch(e){}
+  };
 }
 // Once-per-day snapshot of the character vitals, for progression charts.
 function logCharSnapshot(){
@@ -1770,13 +1807,27 @@ function completeTask(t, ev){
   const r = completionReward(t);
   const delta = valueDelta(t.value);
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
+  // 2026-09-18: record the REALIZED delta, not the requested one. At the 99 ceiling
+  // (or the -47.27 floor) the clamp grants nothing, but reverseGrant subtracted the
+  // full requested delta — so a complete/un-complete round trip at cap walked the
+  // habit value down ~0.58 per cycle.
+  const _valueBefore = t.value;
   t.value = clamp(t.value + delta, -47.27, 99);
+  const _realizedDelta = t.value - _valueBefore;
   t.done = true;
   t.updatedAt = now();
   t.doneAt = Date.now(); // F3 (2026-07-11): completion-day channel for cron-aware merge; see sync.js resolveDailyConflict/.omo/plans/2026-07-11-cron-merge-recency.md
+  // 2026-09-18: freeze the completion DAY in THIS device's timezone, the same way
+  // runCron freezes t.missedOn. sync.js's resolveDailyConflict compared
+  // dayStampOf(doneAt) — re-derived in the MERGING device's timezone — against
+  // missedOn, a frozen int from the RECORDING device's. Two devices in different
+  // zones therefore read the same pair of records differently and picked opposite
+  // winners, so a completion survived on one device and was replaced by a miss
+  // (streak zeroed, damage charged) on the other, forever ping-ponging.
+  t.doneDay = dayStamp(new Date());
   delete t.missedOn;
   buzz(50);
-  t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };  // remember exactly what was granted
+  t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:_realizedDelta };  // remember exactly what was granted
   if(t.type==='daily'){ if(!S.prefs.paused) t.streak = (t.streak||0) + 1;
     const cl=(t.checklist||[]); const snap = cl.length? {checklist:cl.map(c=>({text:c.text,done:!!c.done}))} : {};
     logHistory(t,Object.assign({value:t.value,completed:true,isDue:true,reward:Object.assign({},t._gr),repeat:(t.repeat||[]).slice()},snap));
@@ -1817,7 +1868,11 @@ function uncompleteDaily(t){
   unlogToday(t);
   t.done = false;
   delete t.doneAt; // F3 (2026-07-11): unchecking retracts the completion-day claim
-  if(t.type==='daily' && t.streak){ t.streak = Math.max(0, t.streak - 1); }
+  delete t.doneDay; // 2026-09-18: retract the frozen day claim with it
+  // 2026-09-18: gate the decrement on paused exactly like completeTask gates the
+  // increment (app.js completeTask / creditYesterday). Without this, ticking and
+  // un-ticking a daily while paused bled one streak day per cycle.
+  if(t.type==='daily' && t.streak && !(S.prefs && S.prefs.paused)){ t.streak = Math.max(0, t.streak - 1); }
   t.updatedAt = now(); // F1 (2026-07-11): unchecking is an edit — without this it loses every both-changed merge tiebreak
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();
@@ -1828,6 +1883,7 @@ function uncompleteTodo(t){
   unlogToday(t);
   t.done = false;
   delete t.doneAt; // F3 (2026-07-11): see uncompleteDaily
+  delete t.doneDay; // 2026-09-18: see uncompleteDaily
   t.updatedAt = now(); // F1 (2026-07-11): see uncompleteDaily
   toast('Reverted');
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
@@ -2008,7 +2064,12 @@ function periodBoundaryCrossed(freq, lastStamp, now){
 // Dailies that were due yesterday and are still unticked. Computed with the
 // same scheduledYesterday test runCron() uses, so the two stay in sync.
 function missedYesterdayDailies(){
-  if(S.lastCron === dayStamp(new Date())) return []; // already crossed today
+  // 2026-09-18: mirror runCron's own two gates exactly, or the modal threatens
+  // miss damage that runCron will never apply. (a) ordering, not equality — see
+  // runCron; (b) the live paused flag, which runCron early-returns on before any
+  // damage, while pausedDays only records days cron has already processed.
+  if(S.prefs && S.prefs.paused) return [];
+  if(dayStamp(new Date()) <= S.lastCron) return []; // already crossed today
   const _yStamp=dayStamp(new Date(Date.now()-86400000)); if((S.prefs.pausedDays||[]).includes(_yStamp)) return [];
   const dow = new Date().getDay();
   return S.tasks.filter(t=>{
@@ -2030,12 +2091,16 @@ function creditYesterday(t){
   const r = completionReward(t);
   const delta = valueDelta(t.value);
   gainXp(r.xp); S.char.gold = +(S.char.gold + r.gold).toFixed(2); S.char.mp += r.mp;
+  // 2026-09-18: realized-delta, same reason as completeTask above.
+  const _valueBefore = t.value;
   t.value = clamp(t.value + delta, -47.27, 99);
+  const _realizedDelta = t.value - _valueBefore;
   t.done = true;
   t.updatedAt = now();
   t.doneAt = Date.now() - 86400000; // F3: backdated to match the history point below (yMs) — this IS yesterday's completion
+  t.doneDay = dayStamp(new Date(Date.now() - 86400000)); // 2026-09-18: frozen local day, see completeTask
   delete t.missedOn;
-  t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:delta };
+  t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:_realizedDelta };
   if(!S.prefs.paused) t.streak = (t.streak||0) + 1;
   const cl=(t.checklist||[]);
   const yMs = Date.now() - 86400000; // backdate the point to yesterday
@@ -2227,10 +2292,25 @@ function _resetDailies(){
 }
 function runCron(){
   const today = dayStamp(new Date());
-  if(S.lastCron === today) return;
+  // 2026-09-18: ORDERING test, not equality. dayStamp ints sort, and a device's
+  // local calendar day can move BACKWARDS (westward travel across a date line, a
+  // user correcting a wrong clock, a pre-NTP boot clock that read ahead). With
+  // `===` that rewind re-ran the whole reset: _resetDailies() cleared today's real
+  // completions and checklist ticks, lastCron was written backwards, and when the
+  // day returned cron ran a second time for it and applied miss damage + zeroed
+  // the streak. sync.js:1374-1390 hardened mergedLastCron against exactly this;
+  // runCron was never hardened. Regression test: tests/cron-day-rewind.test.js.
+  if(today <= S.lastCron) return;
   if(S.prefs.paused){
     S.lastCron = today;
     S.prefs.pausedDays=((S.prefs.pausedDays||[]).concat([today])).filter((v,i,a)=>a.indexOf(v)===i).slice(-7);
+    // 2026-09-18: habit +/- tallies are "this reset period" counters, not streak
+    // state. Pause freezes streaks and miss damage only, so they must still clear
+    // on their own boundary; the old early-return skipped the loop below and let
+    // them accumulate for the whole pause window.
+    S.tasks.forEach(t=>{
+      if(t.type==='habit' && periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; t.cResetOn=today; }
+    });
     _resetDailies();
     save();
     return;
@@ -2240,7 +2320,15 @@ function runCron(){
   const _cov=(S.prefs.pausedDays||[]).includes(yesterdayStamp);
   let totalDmg = 0;
   S.tasks.forEach(t=>{
-    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; } return; } // F3 (2026-07-11): cron no longer bumps updatedAt — see .omo/plans/2026-07-11-cron-merge-recency.md §3.1.4
+    // 2026-09-18: t.cResetOn records WHICH local day cron last zeroed this habit's
+    // tallies. sync.js's _accumCounter used to infer "cron reset it" from
+    // `value < base`, which is both ambiguous (a user decrement looks identical)
+    // and joint (it only fired when BOTH sides were below base). In the ordinary
+    // staggered case — one device has crossed its boundary, the other has not —
+    // the reset side's whole post-reset count was discarded. A frozen day stamp
+    // makes the reset observable per side. Still no updatedAt bump: cron is a
+    // deterministic day-boundary transform, not a user edit.
+    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; t.cResetOn=today; } return; } // F3 (2026-07-11): cron no longer bumps updatedAt — see .omo/plans/2026-07-11-cron-merge-recency.md §3.1.4
     if(t.type!=='daily') return;
     const scheduledYesterday = isDailyDueOn(t, (dow+6)%7);  // intentional YESTERDAY test — do NOT use isDailyDueToday
     if(scheduledYesterday && !t.done && !_cov){
@@ -2423,7 +2511,7 @@ function renderStats(){
 function metaRow(t){
   const tagsHtml = tagChips(t);
   const notesPreview = (t.notes && S.prefs.notesLines>0)
-    ? '<div class="notes" style="-webkit-line-clamp:'+S.prefs.notesLines+';line-clamp:'+S.prefs.notesLines+'">'+esc(t.notes)+'</div>' : '';
+    ? '<div class="notes" style="-webkit-line-clamp:'+(Number(S.prefs.notesLines)||0)+';line-clamp:'+(Number(S.prefs.notesLines)||0)+'">'+esc(t.notes)+'</div>' : '';
   const chk = checklistBlock(t);
   if(!tagsHtml && !notesPreview && !chk) return '';
   const metaHtml = tagsHtml ? '<div class="meta">'+tagsHtml+'</div>' : '';
@@ -2432,7 +2520,7 @@ function metaRow(t){
 // the right-side rail: counter/streak + subtask toggle, pinned to top of card
 function rail(t){
   let items = [];
-  items.push('<span class="railItem diff-'+t.difficulty+'">'+t.difficulty+'</span>');
+  items.push('<span class="railItem diff-'+esc(t.difficulty)+'">'+esc(t.difficulty)+'</span>');
   const hasRem = t.reminders && t.reminders[0] && t.reminders[0].enabled;
   if(hasRem){
     items.push('<span class="railItem bell" title="Reminder set" style="color:var(--accent);border-color:transparent;background:transparent;padding:0 2px;font-size:11px">🔔</span>');
@@ -2483,10 +2571,13 @@ function sortActiveFunc(tab){ return (SORT&&SORT[tab]&&SORT[tab]!=="manual"); }
 function colTitle(title, addType, customTabKey){
   const tabKey = addType==='habit'?'habits':addType==='daily'?'dailies':addType==='todo'?'todos':customTabKey;
   let filterActive = false, sortActive = false;
+  // 2026-09-18: sortActive has no dependency on FILTER, so computing it inside the
+  // FILTER[tabKey] guard left the Rewards column's sort icon permanently un-lit —
+  // FILTER only carries habits/dailies/todos, while Rewards does have a real sort.
+  if(tabKey) sortActive = sortActiveFunc(tabKey);
   if(tabKey && FILTER[tabKey]){
     const defaultVal = tabKey==='todos'?'active':'all';
     filterActive = FILTER[tabKey]!==defaultVal || (S.tags && S.tags.length > 0 && S.prefs.tagFilter && S.prefs.tagFilter[tabKey] && S.prefs.tagFilter[tabKey].length > 0);
-    sortActive = sortActiveFunc(tabKey);
   }
   let h = '<div class="colTitle"><h2>'+title+'</h2>';
   if(tabKey) {
@@ -2530,21 +2621,30 @@ function taskTags(t){ return (t&&Array.isArray(t.tags))?t.tags:[]; }
 function addTag(name){ name=(name||'').trim(); if(!name) return null; ensureTags();
   const ex=S.tags.find(t=>t.name.toLowerCase()===name.toLowerCase()); if(ex) return ex.id;
   const col=TAG_COLORS[S.tags.length%TAG_COLORS.length]; const tg={id:uid(),name:name,color:col,createdAt:Date.now(),updatedAt:now()}; S.tags.push(tg); return tg.id; }
-function renameTag(id,name){ const g=tagById(id); if(g){ g.name=(name||'').trim()||g.name; g.updatedAt=now(); save(); } }
+// 2026-09-18: renameTag() removed. It had no callers anywhere (app.js, sync.js,
+// index.html, tests/) — the tag editor offers add, toggle and delete only — and it
+// would not have refreshed the UI if wired up, since it called save() without
+// render(). Re-add it WITH a render() if a rename control is ever built.
 function deleteTag(id){ ensureTags(); delMark(id); S.tags=S.tags.filter(t=>t.id!==id);
   (S.tasks||[]).forEach(t=>{ if(Array.isArray(t.tags)) t.tags=t.tags.filter(x=>x!==id); });
   Object.keys(TAGFILTER).forEach(k=>{ TAGFILTER[k]=(TAGFILTER[k]||[]).filter(x=>x!==id); });
   save(); }
 function tagChips(t){ const ids=taskTags(t); if(!ids.length) return '';
   return '<span class="tagChips">'+ids.map(id=>{ const g=tagById(id); if(!g) return '';
-    return '<span class="tagChip" style="--tc:'+g.color+'">'+esc(g.name)+'</span>'; }).join('')+'</span>'; }
+    return '<span class="tagChip" style="--tc:'+esc(g.color)+'">'+esc(g.name)+'</span>'; }).join('')+'</span>'; }
 // tag filter (per screen, OR)
 function toggleTagFilter(tab,id){ TAGFILTER[tab]=TAGFILTER[tab]||[]; const i=TAGFILTER[tab].indexOf(id);
   if(i<0) TAGFILTER[tab].push(id); else TAGFILTER[tab].splice(i,1); S.prefs.tagFilter=TAGFILTER; save(); render(); }
 function clearTagFilter(tab){ TAGFILTER[tab]=[]; S.prefs.tagFilter=TAGFILTER; save(); render(); }
 function tagFilterActive(tab){ return ((TAGFILTER[tab]||[]).length>0); }
 function applyTagFilter(list,tab){ const sel=(TAGFILTER[tab]||[]); if(!sel.length) return list;
-  return list.filter(t=>{ const tt=taskTags(t); return sel.some(id=>id==='none'?tt.length===0:tt.indexOf(id)>=0); }); }
+  // 2026-09-18: resolve before counting. "None" means "shows no tag chips", and
+  // tagChips() already drops an id with no matching S.tags entry. Keying on the raw
+  // array length made a task whose only tags are DANGLING ids (device A deletes a
+  // tag while device B edits a task still carrying it — a normal merge outcome)
+  // render with no chips yet be hidden by the None filter too, so it was
+  // unreachable from every filter.
+  return list.filter(t=>{ const tt=taskTags(t).filter(id=>tagById(id)); return sel.some(id=>id==='none'?tt.length===0:tt.indexOf(id)>=0); }); }
 function tagFilterBar(tab){
   if(!FILTEROPEN) return ''; ensureTags(); if(!S.tags.length) return '';
   const sel=(TAGFILTER[tab]||[]);
@@ -2552,7 +2652,7 @@ function tagFilterBar(tab){
   const noneBtn = '<button class="tagBtn' + (noneActive ? ' on' : '') + '" style="--tc:var(--muted)" onclick="toggleTagFilter(\''+tab+'\',\'none\')">None</button>';
   return '<div class="filterBar tagFilterBar"><span class="sortLbl">Tags</span>'+
     noneBtn+
-    S.tags.map(g=>'<button class="tagBtn'+(sel.indexOf(g.id)>=0?' on':'')+'" style="--tc:'+g.color+'" onclick="toggleTagFilter(\''+tab+'\',\''+g.id+'\')">'+esc(g.name)+'</button>').join('')+
+    S.tags.map(g=>'<button class="tagBtn'+(sel.indexOf(g.id)>=0?' on':'')+'" style="--tc:'+esc(g.color)+'" onclick="toggleTagFilter(\''+jsq(tab)+'\',\''+jsq(g.id)+'\')">'+esc(g.name)+'</button>').join('')+
     (sel.length?'<button class="tagClear" onclick="clearTagFilter(\''+tab+'\')">clear</button>':'')+'</div>';
 }
 // tag editing inside the task sheet
@@ -2565,11 +2665,11 @@ function tagEditorBlock(t){
   ensureTags(); const own=taskTags(t);
   let h='<label>Tags</label><div class="tagEdit">';
   h+= own.length? own.map(id=>{ const g=tagById(id); if(!g) return '';
-      return '<span class="tagChip on" style="--tc:'+g.color+'" onclick="toggleEditTag(\''+id+'\')">'+esc(g.name)+' \u00d7</span>'; }).join('')
+      return '<span class="tagChip on" style="--tc:'+esc(g.color)+'" onclick="toggleEditTag(\''+jsq(id)+'\')">'+esc(g.name)+' \u00d7</span>'; }).join('')
     : '<span class="tagNone">No tags yet.</span>';
   h+='</div>';
   const others=S.tags.filter(g=>own.indexOf(g.id)<0);
-  if(others.length){ h+='<div class="tagEdit tagPick">'+others.map(g=>'<span class="tagChip" style="--tc:'+g.color+'" onclick="toggleEditTag(\''+g.id+'\')">+ '+esc(g.name)+'</span>').join('')+'</div>'; }
+  if(others.length){ h+='<div class="tagEdit tagPick">'+others.map(g=>'<span class="tagChip" style="--tc:'+esc(g.color)+'" onclick="toggleEditTag(\''+jsq(g.id)+'\')">+ '+esc(g.name)+'</span>').join('')+'</div>'; }
   h+='<div class="tagAddRow"><input type="text" id="eTagInput" placeholder="New tag\u2026" autocomplete="off" onkeydown="if(event.key===\'Enter\'){event.preventDefault();addTagToEdit();}"><button type="button" class="btn ghost" onclick="addTagToEdit()">+ Add</button></div>';
   return h;
 }
@@ -2674,7 +2774,7 @@ function viewRewards(){
   h+= searchRw.length ? searchRw.map(r=>'<div class="task" draggable="'+(dragOK('reward')?'true':'false')+'" data-id="'+r.id+'" data-list="rewards"><div class="valdot" style="background:var(--gold)"></div>'+
     '<div class="check coin" onclick="buyReward(\''+r.id+'\')" title="Buy">'+COIN_SVG+'</div>'+
     '<div class="body" onclick="openReward(\''+r.id+'\')"><div class="ttl">'+esc(r.title)+'</div>'+
-    '<div class="meta"><span class="pill">'+r.cost+' gold</span>'+(r.notes?'<span>📝</span>':'')+'</div></div></div>').join('')
+    '<div class="meta"><span class="pill">'+esc(String(r.cost))+' gold</span>'+(r.notes?'<span>📝</span>':'')+'</div></div></div>').join('')
     : '<div class="empty">No rewards yet. Create one to spend your gold on.</div>';
   return h;
 }
@@ -2727,6 +2827,14 @@ function anActiveMetric(){
 // Normalize a metric argument: callers may pass a keyword string (legacy) or a
 // metric object {name,keyword,exact,habits:[{id,reps}]}. Returns a matcher.
 function anMatcher(arg){
+  // 2026-09-18: no metric configured means MATCH NOTHING. A null/undefined arg used
+  // to fall through to the default branch with kw='', and `title.includes('')` is
+  // true for every string — so after the user deleted their last metric the
+  // dashboard section titled "(no metric)" silently totalled the reps of every habit
+  // in the app and listed them all under "Matched habits".
+  if(arg==null){
+    return { match: () => false, reps: () => 0, keyword: '' };
+  }
   // string -> keyword matcher with title-number reps
   if(typeof arg==='string'){
     const kw=arg.trim().toLowerCase();
@@ -3414,8 +3522,14 @@ function anSnapshotHistoryBucket(v, from, to){
   if (group === 'tag' || group === 'type') {
     return {kind: 'cat', rows: anSnapshotRows(v)};
   }
-  const midnightFrom = Math.floor(from / DAY) * DAY;
-  const midnightTo = Math.floor(to / DAY) * DAY;
+  // 2026-09-18: LOCAL midnight, matching localDayKey() — which is what the walk
+  // below and compMap already use. Math.floor(ms/DAY)*DAY is UTC midnight, so in
+  // any non-UTC timezone the pre-seeded keys and the written keys never matched:
+  // every write landed on an uninitialised key (undefined + n = NaN) while the
+  // seeded keys stayed 0. Result: a flat all-zero series for every day/week/month
+  // Incomplete/Streaks/Tag-count view, and a NaN max that broke heatmap colours.
+  const midnightFrom = localDayKey(from);
+  const midnightTo = localDayKey(to);
   const dayMap = {};
   const series = [];
   for (let d = midnightFrom; d <= midnightTo; d += DAY) dayMap[d] = 0;
@@ -3654,10 +3768,13 @@ function importViews(ev){
   const rd=new FileReader();
   rd.onload=()=>{ try{ const d=JSON.parse(rd.result); const arr=Array.isArray(d)?d:(d.views||[]);
       if(!Array.isArray(arr)||!arr.length) throw 0;
-      const a=anPrefs(); a.views=a.views||[]; let n=0;
-      arr.forEach(v=>{ if(!v||!v.source) return; a.views.push({id:uid(), name:v.name||'Imported view', source:v.source, group:v.group||'day', chart:v.chart||'line', tags:Array.isArray(v.tags)?v.tags:[], types:Array.isArray(v.types)?v.types:[], metricId:v.metricId||null, createdAt:Date.now(), updatedAt:now()}); n++; });
+      const a=anPrefs(); a.views=a.views||[]; let n=0, capped=0;
+      // 2026-09-18: honour the same 20-view cap cloneView/newView/saveView enforce.
+      // Import was the one path with no check, so a file with 50 views produced a
+      // "Custom views (50/20)" header and silently broke the invariant.
+      arr.forEach(v=>{ if(!v||!v.source) return; if(a.views.length>=20){ capped++; return; } a.views.push({id:uid(), name:v.name||'Imported view', source:v.source, group:v.group||'day', chart:v.chart||'line', tags:Array.isArray(v.tags)?v.tags:[], types:Array.isArray(v.types)?v.types:[], metricId:v.metricId||null, createdAt:Date.now(), updatedAt:now()}); n++; });
       if(n){ a.activeView=a.views[a.views.length-1].id; }
-      save(); refreshAnalytics(); toast('Imported '+n+' view'+(n===1?'':'s'));
+      save(); refreshAnalytics(); toast('Imported '+n+' view'+(n===1?'':'s')+(capped?(' · '+capped+' skipped (max 20)'):''));
     } catch(e){ alertDialog('Error', 'That file does not look like Questa views.'); } };
   rd.readAsText(f);
 }
@@ -3999,7 +4116,7 @@ function renderEventDetail(from,to){
       let rightSide = '';
 
       const cat = getEventCategory(e);
-      const titleHtml = e.taskTitle ? '<strong class="evTaskClick" onclick="evSetSearch(\'' + esc(e.taskTitle).replace(/'/g, "\\'") + '\')">' + esc(e.taskTitle) + '</strong>' : '';
+      const titleHtml = e.taskTitle ? '<strong class="evTaskClick" onclick="evSetSearch(\'' + jsq(e.taskTitle) + '\')">' + esc(e.taskTitle) + '</strong>' : '';
 
       const _NEWK={create:1,edit:1,delete:1,uncomplete:1,rewardCreate:1,rewardEdit:1,rewardDelete:1,purchase:1,restore:1};
       if (e.kind === 'subtask') {
@@ -4222,9 +4339,14 @@ function renderEventDetail(from,to){
   });
 }
 function anHeatmapHTML(from,to,inten,maxI){
-  const start=new Date(Math.floor(from/DAY)*DAY); start.setHours(0,0,0,0);
+  // 2026-09-18: derive the grid bounds from LOCAL midnight directly. The old
+  // two-step (floor to UTC midnight, THEN setHours(0,0,0,0)) landed on the previous
+  // local day whenever the window edge's local time-of-day fell in the early-morning
+  // band that maps to the prior UTC day — shifting the whole heatmap by one column
+  // for every timezone ahead of UTC. The cell lookup below already uses localDayKey.
+  const start=new Date(localDayKey(from));
   start.setDate(start.getDate()-((start.getDay()+6)%7)); // week starts Monday: top cell = Mon, bottom = Sun
-  const end=new Date(Math.floor(to/DAY)*DAY); end.setHours(0,0,0,0);
+  const end=new Date(localDayKey(to));
   let cols='', col='', dow=0;
   for(let t=start.getTime(); t<=end.getTime(); t+=DAY){
     const v=inten[localDayKey(t)]||0;
@@ -4801,14 +4923,22 @@ function commitOrder(){
   if(list==='rewards'){
     S.rewards.sort((a,b)=>order.indexOf(a.id)-order.indexOf(b.id));
   } else {
-    // reorder only the tasks of the current tab's type; keep other types' relative order
+    // Reorder ONLY the same-type tasks that are actually on screen, in place.
+    // 2026-09-18: the old rebuild was `S.tasks = others.concat(sameType)`, where
+    // sameType came solely from the rendered cards. Every same-type task hidden
+    // by the active filter/search/tag filter was in neither list and was DELETED
+    // — reachable on defaults (the To-Dos tab hides completed items, so one drag
+    // erased them all). Now hidden tasks keep their slots and only the visible
+    // slots are permuted. Regression test: tests/commit-order-hidden.test.js.
     const typeOfTab = TAB==='habits'?'habit':TAB==='dailies'?'daily':'todo';
-    const moved=order.map(id=>S.tasks.find(t=>t.id===id)).filter(Boolean);
-    const others=S.tasks.filter(t=>t.type!==typeOfTab);
-    // rebuild: place reordered same-type tasks where they were, others appended in original order
-    const sameType=[];
-    moved.forEach(t=>{ if(t.type===typeOfTab) sameType.push(t); });
-    S.tasks = others.concat(sameType);
+    const orderSet = new Set(order);
+    const moved = order.map(id=>S.tasks.find(t=>t.id===id))
+                       .filter(t=>t && t.type===typeOfTab);
+    let _mi = 0;
+    S.tasks = S.tasks.map(t=>{
+      if(t.type!==typeOfTab || !orderSet.has(t.id)) return t; // hidden or other type — untouched
+      return moved[_mi++] || t;
+    });
   }
   save();
 }
@@ -4955,6 +5085,11 @@ function openEdit(id,type){
   const t = id? S.tasks.find(x=>x.id===id)
     : {id:null,type:type||'todo',title:'',notes:'',difficulty:'easy',value:0,done:false,
        checklist:[],repeat:[true,true,true,true,true,true,true],up:true,down:true,resetFreq:'daily',tags:[]};
+  // 2026-09-18: a card can be tapped after a background sync merge tombstoned its
+  // task but before the next render(). find() then returns undefined and
+  // JSON.parse(JSON.stringify(undefined)) throws a SyntaxError, so the sheet never
+  // opens and nothing tells the user why. Fail visibly instead.
+  if(id && !t){ toast('That task no longer exists'); render(); return; }
   EDIT = JSON.parse(JSON.stringify(t));
   const hasRem = EDIT.reminders && EDIT.reminders[0] && EDIT.reminders[0].enabled;
   EDIT._reminderEnabled = hasRem;
@@ -5104,6 +5239,11 @@ function saveTask(){
   delete EDIT._tempReminderDays;
   if(EDIT.id){
     const idx=S.tasks.findIndex(x=>x.id===EDIT.id);
+    // 2026-09-18: bail before touching `orig`. When a concurrent sync merge tombstoned
+    // this task while its sheet was open, idx was -1 and the next line's
+    // `(orig.checklist||[])` threw a TypeError — aborting saveTask() before anything
+    // was persisted or the sheet closed, so the whole edit was lost silently.
+    if(idx<0){ toast('That task no longer exists'); closeSheet(); render(); return; }
     const orig = S.tasks[idx];
     // F4 (2026-07-11): id-based touchedAt stamping for mergeChecklist (sync.js).
     // Independent of the index-based diff further below (that one only feeds
@@ -5231,6 +5371,12 @@ function copyEditTask(){
   }
   copyToClipboard(text);
 }
+// 2026-09-18: a dead legacyPaste() used to sit between this function and
+// applyPaste(). It had no callers anywhere in the repo, pasteEditTask carries its
+// own inline textarea-prompt fallback, and document.execCommand('paste') is not
+// permitted from script in any current browser. Removed. Note that
+// tests/paste-edit-task.test.js matches these two functions as ONE adjacent span,
+// so nothing may be inserted between them.
 async function pasteEditTask(){
   if (!navigator.clipboard || !navigator.clipboard.readText) {
     toast('Clipboard paste is blocked or unsupported in this browser');
@@ -5290,24 +5436,6 @@ async function pasteEditTask(){
   };
   ta.addEventListener('paste', onPaste);
   ta.addEventListener('keydown', onKey);
-}
-function legacyPaste(){
-  const ta = document.createElement('textarea');
-  ta.style.position = 'fixed';
-  ta.style.opacity = '0';
-  ta.style.left = '-9999px';
-  document.body.appendChild(ta);
-  ta.focus();
-  ta.select();
-  try {
-    const ok = document.execCommand('paste');
-    if (!ok) return null;
-    return ta.value;
-  } catch (e) {
-    return null;
-  } finally {
-    document.body.removeChild(ta);
-  }
 }
 function applyPaste(text){
   const lines = text.split(/\r?\n/);
@@ -5392,7 +5520,11 @@ function deleteTask(){
 function closeSheet(){ document.getElementById('scrim').classList.remove('show'); EDIT=null; if(VDRAFT){ VDRAFT=null; MEDIT=null; MBUILD=false; if(TAB==='analytics') refreshAnalytics(); } }
 let REDIT=null;
 function openReward(id){
-  REDIT = id? JSON.parse(JSON.stringify(S.rewards.find(r=>r.id===id))) : {id:null,title:'',cost:10,notes:''};
+  // 2026-09-18: same stale-id guard as openEdit — a concurrently deleted reward made
+  // JSON.parse(JSON.stringify(undefined)) throw before the sheet could open.
+  const _r = id ? S.rewards.find(r=>r.id===id) : null;
+  if(id && !_r){ toast('That reward no longer exists'); render(); return; }
+  REDIT = id? JSON.parse(JSON.stringify(_r)) : {id:null,title:'',cost:10,notes:''};
   const sheet=document.getElementById('sheet');
   let h='';
   if(S.prefs.saveBtnTop){
@@ -5403,7 +5535,7 @@ function openReward(id){
     h+='<h3>'+(REDIT.id?'Edit':'New')+' Reward</h3>';
   }
   h+='<label>Reward</label><input type="text" id="rTitle" value="'+esc(REDIT.title)+'" placeholder="e.g. 30 min of gaming">'+
-    '<label>Cost (gold)</label><input type="text" id="rCost" value="'+REDIT.cost+'">'+
+    '<label>Cost (gold)</label><input type="text" id="rCost" value="'+esc(String(REDIT.cost))+'">'+
     '<label>Notes</label><textarea id="rNotes">'+esc(REDIT.notes)+'</textarea>'+
     '<div class="rowBtns">'+(REDIT.id?'<button class="btn danger" onclick="delReward()">Delete</button>':'')+
     '<button class="btn ghost" onclick="closeSheet()">Cancel</button>'+
@@ -5417,7 +5549,14 @@ function saveReward(){
   REDIT.notes=document.getElementById('rNotes').value;
   REDIT.updatedAt=now();
   const _rwNew=!REDIT.id;
-  if(REDIT.id){ const i=S.rewards.findIndex(r=>r.id===REDIT.id); S.rewards[i]=REDIT; }
+  // 2026-09-18: guard the -1. S.rewards[-1]=REDIT does NOT insert into an array, so a
+  // reward deleted by a concurrent sync while its sheet was open swallowed the edit
+  // with a success-looking close+save+render and no message at all.
+  if(REDIT.id){
+    const i=S.rewards.findIndex(r=>r.id===REDIT.id);
+    if(i<0){ toast('That reward no longer exists'); closeSheet(); render(); return; }
+    S.rewards[i]=REDIT;
+  }
   else { REDIT.id=uid(); REDIT.createdAt=Date.now(); S.rewards.push(REDIT); }
   try{ logEvent({kind:_rwNew?'rewardCreate':'rewardEdit', rewardId:REDIT.id, taskTitle:REDIT.title, cost:REDIT.cost}); }catch(e){}
   closeSheet(); save(); render();
@@ -5974,6 +6113,11 @@ function _tokenizeEvents(eventsArr){
   const events = eventsArr||[];
   const kindArr=[], srcArr=[], tidArr=[], titleArr=[];
   const kindIdx={}, srcIdx={}, tidIdx={}, titleIdx={};
+  // 2026-09-18: -1 means "this field was null". _detokenizeEvents restores it AS
+  // null instead of indexing past the end of the dictionary. Previously K[-1] was
+  // undefined, JSON.stringify dropped the key entirely, and because the integrity
+  // hash is computed on the DETOKENIZED object the backup then failed its own hash
+  // gate and was refused with "corrupted or tampered with".
   function idx(arr,map,v){ if(v==null) return -1; if(!(v in map)){ map[v]=arr.length; arr.push(v); } return map[v]; }
   const out = events.map(function(e){
     const o={};
@@ -6004,10 +6148,14 @@ function _detokenizeEvents(env){
       const v=o[sk];
       if(sk==='uid'||sk==='dev'||sk==='id'){ e[sk]=v; continue; }
       const f = RM[sk] || sk;
-      if(sk==='k') e.kind = K[v];
-      else if(sk==='o') e.source = SRC[v];
-      else if(sk==='ti') e.taskId = TID[v];
-      else if(sk==='n') e.taskTitle = TT[v];
+      // 2026-09-18: `v === -1` is the tokenizer's encoding of null (see idx() in
+      // _tokenizeEvents). Restore null rather than reading past the dictionary,
+      // which yielded undefined and silently dropped the key — breaking the
+      // round-trip the hash gate depends on.
+      if(sk==='k') e.kind = (v===-1) ? null : K[v];
+      else if(sk==='o') e.source = (v===-1) ? null : SRC[v];
+      else if(sk==='ti') e.taskId = (v===-1) ? null : TID[v];
+      else if(sk==='n') e.taskTitle = (v===-1) ? null : TT[v];
       else if(sk==='sy'||sk==='rc'||sk==='in'||sk==='do') e[f] = !!v;
       else e[f]=v;
     }
@@ -6180,10 +6328,47 @@ function exportSaveDevice(blob, filename, eventCount) {
 function exportData(){
   // backups are for debugging: user-facing export downloads must include
   // diagnostic-kind events, not just the Activity-Feed-visible subset.
-  getEvents({includeDiag:true})
-    .then(buildBackupFile)
-    .then(({blob, filename, eventCount}) => showExportChooser(blob, filename, eventCount))
-    .catch(() => buildBackupFile([]).then(({blob, filename, eventCount}) => showExportChooser(blob, filename, eventCount)));
+  //
+  // 2026-09-18: two ways this used to hand the user a backup that was quietly
+  // incomplete, and no later check could ever detect it.
+  //
+  //  (a) getEvents() is documented to return [] on any failure and never throw.
+  //      It also resolves a PARTIAL array when the IDB cursor errors mid-scan.
+  //      buildBackupFile then stamps _backup.eventCount from whatever it got, so
+  //      the file is internally self-consistent: 300 of 7,250 events, labelled
+  //      "300 events", verifying fine on import. Now cross-checked against
+  //      countEvents(), which counts the store directly, and the user is asked
+  //      before a short export is written.
+  //
+  //  (b) the .catch was chained AFTER showExportChooser, so a throw inside the
+  //      chooser (missing DOM node, navigator.canShare throwing) discarded the
+  //      real backup and re-opened the chooser with a 0-event one. The recovery
+  //      path now wraps only the build, never the chooser.
+  Promise.all([ getEvents({includeDiag:true}), countEvents().catch(()=>null) ])
+    .then(([events, stored]) => {
+      const got = (events||[]).length;
+      if(stored != null && got < stored){
+        const missing = stored - got;
+        return confirmDialog('Incomplete backup',
+          'Only ' + got + ' of ' + stored + ' events could be read from this device (' +
+          missing + ' missing). The backup file would be incomplete.\n\n' +
+          'Write it anyway?').then(ok => {
+            if(!ok){ toast('Export cancelled'); return null; }
+            return events;
+          });
+      }
+      return events;
+    })
+    .then(events => {
+      if(events === null) return null;             // user declined a short export
+      return buildBackupFile(events)
+        .catch(() => buildBackupFile([]));          // build failed -> empty shell, still labelled
+    })
+    .then(res => { if(res) showExportChooser(res.blob, res.filename, res.eventCount); })
+    .catch(e => {
+      try{ if(typeof _qDiagPush === "function") _qDiagPush('exportFailed', { error: (e && e.message) || String(e) }); }catch(_){}
+      alertDialog('Export Error', 'Could not create the backup file: ' + ((e && e.message) || String(e)));
+    });
 }
 function importData(ev){
   const f=ev.target.files[0]; if(!f)return;
@@ -6207,7 +6392,13 @@ function importData(ev){
         const embeddedEvents = Array.isArray(data.events) ? data.events : null;
         confirmDialog('Import Progress', 'Replace current progress with the imported file?').then(async ok => {
           if(!ok) return;
-          S=migrate(data); save(); applyWidth(); applyCardThick(); closeSheet(); render();
+          // 2026-09-18: same clobber-guard reset as confirmRestore() — an imported
+          // backup legitimately carries a lower (or absent) __seq, which save()
+          // would otherwise read as "a newer writer exists" and discard the import.
+          S=migrate(data);
+          delete S.__seq;
+          try{ localStorage.removeItem(STORE_KEY + ".seq"); }catch(e){}
+          save(); applyWidth(); applyCardThick(); closeSheet(); render();
           if(embeddedEvents && typeof indexedDB!=="undefined"){
             // Read the existing local event store BEFORE reparenting, same house
             // pattern as confirmRestore() (~5626): getEvents() reads IndexedDB
@@ -6234,13 +6425,26 @@ function importData(ev){
             // real user behaviour.
             const merge = eventMergeFilter(reparented, existingUidSet, existingSigSet);
             const add = merge.add, skipped = merge.skipped;
-            await bulkAddEvents(add);
-            const note = 'Restored ' + add.length + ' events (' + eventImportSummaryText(impSum) + '; ' + skipped + ' already present, skipped)';
+            // 2026-09-18: report what bulkAddEvents ACTUALLY wrote. It returns
+            // {added, failed, aborted} on every path including its four failure
+            // paths; using add.length instead told a user whose IndexedDB quota was
+            // exhausted that 4000 events were restored when zero were, so they
+            // deleted the backup file. confirmRestore() already reads the result.
+            const bulkRes = await bulkAddEvents(add);
+            const added = (bulkRes && typeof bulkRes.added === 'number') ? bulkRes.added : add.length;
+            const note = 'Restored ' + added + ' events (' + eventImportSummaryText(impSum) + '; ' + skipped + ' already present, skipped)';
             logEvent({kind: 'import', taskTitle: 'Import Data', notes: note});
-            toast('Imported \u00b7 ' + add.length + ' events restored');
-            alertDialog('Import complete',
-              add.length + ' events restored to this device.',
-              eventImportSummaryHTML(impSum));
+            toast('Imported \u00b7 ' + added + ' events restored');
+            if(bulkRes && (bulkRes.aborted || bulkRes.failed)){
+              alertDialog('Import incomplete',
+                'Your tasks and character were restored, but only ' + added + ' of ' + add.length +
+                ' events could be written to this device. Keep your backup file and free up storage, then import again.',
+                eventImportSummaryHTML(impSum));
+            } else {
+              alertDialog('Import complete',
+                added + ' events restored to this device.',
+                eventImportSummaryHTML(impSum));
+            }
             if(TAB==='analytics') render();
             // F-import: run the same startup day-rollover the app runs on
             // normal load (app.js startDay) so imported dailies get reset /
@@ -6255,6 +6459,18 @@ function importData(ev){
             if(TAB==='analytics') render();
             startDay();
           }
+        }).catch(e => {
+          // 2026-09-18: the outer try/catch around importData only covers the
+          // SYNCHRONOUS parse + hash gate. Everything above runs in an async
+          // callback whose promise was discarded, so a throw after `S=migrate(data)`
+          // left the live state already replaced and persisted, the event store
+          // untouched, the sheet closed and startDay() never run — with no dialog,
+          // no toast and nothing in the log. confirmRestore already wraps the same
+          // work; this brings importData in line.
+          try{ if(typeof _qDiagPush === "function") _qDiagPush('importFailed', { error: (e && e.message) || String(e) }); }catch(_){}
+          alertDialog('Import Error',
+            'The import did not finish: ' + ((e && e.message) || String(e)) +
+            '\n\nYour tasks and character may already have been replaced. Keep your backup file and try importing it again.');
         });
       };
       // Hash check: re-stringify the DETOKENIZED legacy-shaped object. For
@@ -6386,6 +6602,14 @@ async function confirmRestore(id){
 
     // Apply state
     S = migrate(stateSnapshot);
+    // 2026-09-18: a restore deliberately installs an OLDER __seq (snapshots carry
+    // the whole state, __seq included). save()'s multi-tab clobber guard reads a
+    // lower __seq as "another tab wrote something newer", re-adopts the pre-restore
+    // localStorage blob and returns WITHOUT writing — silently undoing the restore
+    // with only a filtered-out diagnostic event to show for it. resetEverything()
+    // already clears the companion key for exactly this reason; do the same here.
+    delete S.__seq;
+    try{ localStorage.removeItem(STORE_KEY + ".seq"); }catch(e){}
     save();
     applyWidth();
     applyCardThick();
@@ -6424,6 +6648,17 @@ function uploadFace(ev){
 }
 function removeFace(){ delete S.char.faceImg; save(); renderStats(); openSettings(); toast('Image removed'); }
 function esc(s){ return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+// Escape a value that lands inside a SINGLE-quoted JS string literal within a
+// double-quoted inline handler, e.g. onclick="f('<here>')". esc() is not enough:
+// the HTML parser decodes entities BEFORE the JS is compiled, so &#39; becomes a
+// live quote again. Escape for JS first (backslash, then quote), then for HTML.
+// Order matters — the backslash pass must run before the quote pass.
+function jsq(s){
+  return String(s==null?'':s)
+    .replace(/\\/g,'\\\\')
+    .replace(/'/g,"\\'")
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 // Ordered list of screens; used by both the nav bar and swipe navigation.
 const TABS=['habits','dailies','todos','analytics','rewards'];
 // Switch to a tab by name. dir (-1 left / +1 right) drives an optional slide anim.
@@ -6570,10 +6805,14 @@ document.addEventListener('visibilitychange', () => {
 // learned to filter them out. Gated the same way as sync.js's
 // questa.baseReset.v1 one-time purge -- runs at most once per device.
 try{
+  // 2026-09-18: set the "done" flag only on SUCCESS. The .catch(()=>{}) used to sit
+  // BEFORE the .then(), converting a rejection into a fulfilment, so a boot where
+  // IndexedDB was briefly unavailable marked the purge done and the stale lifecycle
+  // spam it exists to remove stayed on that device forever.
   if(localStorage.getItem("questa.lifecycleCleanup.v1") !== "done"){
-    clearLifecycleEvents().catch(()=>{}).then(()=>{
+    clearLifecycleEvents().then(()=>{
       try{ localStorage.setItem("questa.lifecycleCleanup.v1", "done"); }catch(e){}
-    });
+    }).catch(()=>{});
   }
 }catch(e){ /* best-effort */ }
 checkExportStaleness();

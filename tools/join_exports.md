@@ -12,6 +12,7 @@ deterministic — no guessing required:
 | Collection | Merge key | Timestamp | Rule |
 |---|---|---|---|
 | `tasks` | `id` | `updatedAt` | newest `updatedAt` wins (whole row) |
+| `tags` | `id` | `updatedAt` | newest wins |
 | `rewards` | `id` | `updatedAt` | newest wins |
 | `devices` | `id` | `updatedAt` | newest wins |
 | `char` | (singleton) | `updatedAt` | newest wins |
@@ -25,6 +26,26 @@ deterministic — no guessing required:
 | `habiticaHistory` | — | — | kept if present in any input |
 | `monthlyBackups` | — | — | union of strings |
 | `__seq` / `__savedAt` / `__hlcLast` / `version` | — | — | max |
+
+### Task fields this script reads directly (2026-09-18)
+
+Most task fields ride along inside the winning row and need no rule of their own.
+Two are read by name and must stay in step with `app.js`:
+
+- **`doneDay`** — the local day stamp frozen by `completeTask`/`creditYesterday`,
+  the completion-side twin of `missedOn`. `normalize_daily_resets` prefers it over
+  `day_stamp_of(doneAt)`, because re-deriving the day from `doneAt` computes it in
+  whatever timezone this script happens to run in, which is a different frame from
+  `lastCron`. Rows from older builds carry no `doneDay` and fall back.
+- **`cResetOn`** — the local day stamp `runCron` writes when it zeroes a habit's
+  `cUp`/`cDown`. This script has no counter-accumulation rule (it picks a whole
+  winning row), so there is nothing to compute here — but the field must survive
+  the join untouched, or `sync.js`'s `_accumCounters` loses its anchor on the next
+  device sync and silently falls back to the old below-base heuristic.
+- **`cAbs`** — `{deviceId: {ua, cUp, cDown}}`, the per-device absorbed watermark
+  that stops a conflict retry re-adding a peer's taps. The counter twin of
+  `char.abs`. Same deal as `cResetOn`: nothing to compute, but it must ride along
+  intact. A row that loses its `cAbs` reverts to double-counting on the next 409.
 
 ## Usage
 

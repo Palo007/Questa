@@ -1,7 +1,13 @@
 // upload-409.test.js -- #4 Upload-409 body inspection + retry-exhaustion backoff.
 // Tests:
 //   U1: 409 with non-rev body (e.g. restricted_content) → HttpError, no retry burn
-//   U2: 409 with rev body (update/conflict) → ConflictError → re-download + re-merge (existing behavior)
+//   U2: 409 with rev body (path/conflict/file/) → ConflictError → re-download + re-merge
+//       2026-09-18: these fixtures used to say 'path/update/conflict', a tag the
+//       Dropbox API never emits. sync.js matched that literal, so every REAL
+//       conflict fell through to HttpError and nothing retried, while this suite
+//       stayed green. Fixtures now carry the string Dropbox actually returns.
+//   U6: the old 'path/update/conflict' spelling is still accepted (legacy compat)
+//   U7: other WriteError tags never become a ConflictError
 //   U3: Rev-conflict retry exhaustion → lastError set + setTimeout scheduled
 //   U4: Empty/unreadable body → treated as ConflictError (legacy compat)
 //   U5: Near-limit attempt → only 1 upload before exhaustion
@@ -110,7 +116,7 @@ function mockFetch409RevConflict(){
   return async function(url){
     if(url && url.indexOf('/files/upload') !== -1){
       return { status: 409, ok: false,
-        json: async function(){ return { error_summary: 'path/update/conflict' }; },
+        json: async function(){ return { error_summary: 'path/conflict/file/' }; },
         text: async function(){ return 'conflict'; } };
     }
     if(url && url.indexOf('/files/download') !== -1){
@@ -163,7 +169,7 @@ function nextTests(){
     if(url && url.indexOf('/files/download') !== -1){ downloadCalls++; }
     if(url && url.indexOf('/files/upload') !== -1){
       return { status: 409, ok: false,
-        json: async function(){ return { error_summary: 'path/update/conflict' }; },
+        json: async function(){ return { error_summary: 'path/conflict/file/' }; },
         text: async function(){ return 'conflict'; } };
     }
     if(url && url.indexOf('/files/download') !== -1){
@@ -251,7 +257,7 @@ function nextTests4(){
     if(url && url.indexOf('/files/upload') !== -1){
       uploadCount++;
       return { status: 409, ok: false,
-        json: async function(){ return { error_summary: 'path/update/conflict' }; },
+        json: async function(){ return { error_summary: 'path/conflict/file/' }; },
         text: async function(){ return 'conflict'; } };
     }
     if(url && url.indexOf('/files/download') !== -1){
@@ -273,6 +279,77 @@ function nextTests4(){
     assert('U5b: lastError set', cfg.lastError && cfg.lastError.indexOf('conflict') !== -1);
   }).catch(function(err){
     assert('U5: near-limit should not throw', false);
+  }).then(nextTests5).catch(function(e){ console.error('Unhandled:', e); process.exit(1); });
+}
+
+// =====================================================================
+// U6 / U7 (2026-09-18): pin the exact error_summary classification.
+//
+// The bug this covers: sync.js tested for the literal "update/conflict", which
+// is not a member of Dropbox's WriteError union. A real stale-rev upload returns
+// "path/conflict/file/...", so every genuine conflict was classified as a plain
+// HttpError, `e instanceof ConflictError` was false, nothing retried, and the
+// device sat with the merge applied locally but never uploaded — a stale base
+// plus an advanced local. The suite stayed green only because every fixture fed
+// the fabricated string.
+//
+// U6 walks the real WriteError tags that must NOT be treated as rev conflicts.
+// U7 keeps the legacy spelling working, so an older/proxied error string cannot
+// silently regress into the no-retry path.
+// =====================================================================
+function nextTests5(){
+  var NON_CONFLICT = ['path/restricted_content', 'path/insufficient_space',
+                      'path/disallowed_name', 'path/no_write_permission',
+                      'path/team_folder', 'path/too_many_write_operations',
+                      'path/malformed_path/...', 'path/operation_suppressed'];
+  var i = 0;
+  function step(){
+    if(i >= NON_CONFLICT.length) return nextTests6();
+    var tag = NON_CONFLICT[i++];
+    var calls = 0;
+    sandbox.fetch = async function(url){
+      calls++;
+      if(url && url.indexOf('/files/upload') !== -1){
+        return { status: 409, ok: false,
+          json: async function(){ return { error_summary: tag }; },
+          text: async function(){ return tag; } };
+      }
+      return { status: 400, ok: false, text: async function(){ return 'unexpected'; } };
+    };
+    resetConfig();
+    return sandbox._pushWithConflictRetry(freshMergedJson(), 'r1', 0).then(function(){
+      assert('U6 ' + tag + ': should have thrown HttpError', false);
+    }).catch(function(err){
+      assert('U6 ' + tag + ' -> HttpError, not ConflictError',
+        err && err.name === 'HttpError' && err.status === 409);
+      assert('U6 ' + tag + ' -> no retry burn (one fetch)', calls === 1);
+    }).then(step);
+  }
+  return step();
+}
+
+function nextTests6(){
+  // The pre-2026-09-18 spelling must still be accepted.
+  var uploads = 0;
+  sandbox.fetch = async function(url){
+    if(url && url.indexOf('/files/upload') !== -1){
+      uploads++;
+      return { status: 409, ok: false,
+        json: async function(){ return { error_summary: 'path/update/conflict' }; },
+        text: async function(){ return 'conflict'; } };
+    }
+    if(url && url.indexOf('/files/download') !== -1){
+      return { status: 200, ok: true,
+        headers: { get: function(){ return JSON.stringify({ rev: 'r2' }); } },
+        text: async function(){ return remoteDownloadBody(); } };
+    }
+    return { status: 400, ok: false, text: async function(){ return 'unexpected'; } };
+  };
+  resetConfig();
+  return sandbox._pushWithConflictRetry(freshMergedJson(), 'r1', 0).then(function(){
+    assert('U7: the legacy "path/update/conflict" spelling still retries', uploads === 4);
+  }).catch(function(){
+    assert('U7: legacy spelling should not throw at exhaustion', false);
   }).then(function(){
     if(failures){ console.error(failures + ' upload-409 assertion(s) FAILED'); process.exit(1); }
     console.log('upload-409.test.js: all assertions passed');

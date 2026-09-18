@@ -22,6 +22,11 @@ function extract(re, label) {
 const escSrc     = extract(/function esc\([\s\S]*?\r?\n\}/, 'esc');
 const taskTagsSrc= extract(/function taskTags\(t\)\{[\s\S]*?\r?\n\}/, 'taskTags');
 const ensureSrc  = extract(/function ensureTags\(\)\{[\s\S]*?\r?\n\}/, 'ensureTags');
+// 2026-09-18: applyTagFilter now resolves each id through tagById before counting,
+// so a DANGLING tag id (left behind when one device deletes a tag while another
+// edits a task still carrying it) counts as untagged in the None filter, exactly as
+// tagChips already treats it. The helper has to come along into the sandbox.
+const tagByIdSrc = extract(/function tagById\(id\)\{[\s\S]*?\r?\n?\}/, 'tagById');
 const applySrc   = extract(/function applyTagFilter\(list,tab\)\{[\s\S]*?\r?\n\}/, 'applyTagFilter');
 const barSrc     = extract(/function tagFilterBar\(tab\)\{[\s\S]*?\n\}/, 'tagFilterBar');
 
@@ -33,15 +38,20 @@ function assert(desc, cond) {
 
 // Build a context exposing only what the extracted functions touch.
 const factory = new Function(
-  'escSrc', 'taskTagsSrc', 'ensureSrc', 'applySrc', 'barSrc',
-  escSrc + '\n' + taskTagsSrc + '\n' + ensureSrc + '\n' + applySrc + '\n' + barSrc + `
-  return { esc, taskTags, ensureTags, applyTagFilter, tagFilterBar };
+  'escSrc', 'taskTagsSrc', 'ensureSrc', 'tagByIdSrc', 'applySrc', 'barSrc',
+  escSrc + '\n' + taskTagsSrc + '\n' + ensureSrc + '\n' + tagByIdSrc + '\n' + applySrc + '\n' + barSrc + `
+  return { esc, taskTags, ensureTags, tagById, applyTagFilter, tagFilterBar };
 `
 );
-const { taskTags, applyTagFilter, tagFilterBar } = factory(escSrc, taskTagsSrc, ensureSrc, applySrc, barSrc);
+const { taskTags, applyTagFilter, tagFilterBar } = factory(escSrc, taskTagsSrc, ensureSrc, tagByIdSrc, applySrc, barSrc);
 
 // Minimal global stubs the functions read (define before invoking).
-global.S = { tags: [] };
+// 2026-09-18: S.tags now has to hold the tag the fixture references. applyTagFilter
+// resolves each id through tagById() before counting, so with an empty registry
+// 't1' would be a DANGLING id and `tagged` would correctly count as untagged. The
+// old fixture left S.tags empty and only happened to pass because the filter looked
+// at the raw array length. The dangling case is asserted explicitly in N6 below.
+global.S = { tags: [{ id: 't1', name: 'Work', color: '#fff' }] };
 global.TAGFILTER = { todos: [] };
 global.FILTEROPEN = true;
 
@@ -64,6 +74,22 @@ assert('N2: none + real tag keeps BOTH untagged and tagged', r2.length === 2);
 global.TAGFILTER = { todos: ['t1'] };
 let r3 = applyTagFilter(bothList, 'todos');
 assert('N3: real tag keeps tagged, excludes untagged', r3.length === 1 && r3[0].id === 'b');
+
+// N6 (2026-09-18): a task whose only tags are DANGLING ids renders no tag chips,
+// so the None filter must keep it. Reachable by an ordinary merge: device A deletes
+// tag 't1' while device B edits a task still carrying it, and the task survives with
+// a reference to a tag that no longer exists. Before the fix that task was hidden by
+// the None filter AND by every real tag button, i.e. unreachable from any filter.
+const dangling = { id: 'c', tags: ['GONE'] };
+global.TAGFILTER = { todos: ['none'] };
+const rDang = applyTagFilter([untagged, tagged, dangling], 'todos');
+assert('N6: none filter keeps a task whose only tags are dangling ids',
+  rDang.some(t => t.id === 'c'));
+assert('N6: ...and still keeps the genuinely untagged task', rDang.some(t => t.id === 'a'));
+assert('N6: ...and still drops the really-tagged task', !rDang.some(t => t.id === 'b'));
+global.TAGFILTER = { todos: ['t1'] };
+assert('N6: a real tag filter does not match a dangling id',
+  !applyTagFilter([dangling], 'todos').length);
 
 // N4: tags exist -> None button rendered and marked active when selected
 global.S.tags = [{ id: 't1', name: 'Work', color: '#fff' }];

@@ -37,6 +37,10 @@ const renderBlock = extractSpan(
   'feed render helper block (_evWin..renderEventDetail end)'
 );
 const escFn = extractFunction(appSrc, /^function esc\(s\)\{/, 'esc');
+// 2026-09-18: renderEventDetail now escapes the task title for the single-quoted
+// JS string inside its onclick with jsq(), not a local .replace(). Extract it the
+// same way esc() is extracted so the sandbox keeps mirroring live app.js.
+const jsqFn = extractFunction(appSrc, /^function jsq\(s\)\{/, 'jsq');
 
 const evStubs = 'var _evFilterType="all", _evPage=0, _evSearchQuery="";\n';
 const code =
@@ -44,6 +48,7 @@ const code =
   evStubs +
   renderBlock + '\n' +
   escFn + '\n' +
+  jsqFn + '\n' +
   'return { renderEventDetail, isFeedNoise, getEventCategory, DIAGNOSTIC_KINDS };';
 
 // Stub S with controllable prefs.

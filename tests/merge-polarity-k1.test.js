@@ -92,8 +92,17 @@ function mk(overrides) {
 function findById(arr, id) { return (arr || []).find(function(x){ return x && x.id === id; }); }
 
 // A daily completed TODAY, with two of its subtasks ticked.
+// 2026-09-19: "an hour ago" is not the same thing as "earlier TODAY". Between
+// local midnight and 01:00, FIXED_NOW - 3600000 lands on YESTERDAY, so
+// dayStampOf(doneAt) < TODAY_STAMP, normalizeDailyResets correctly resets the
+// daily, and K1-A/K1-B both failed -- for one hour, every night. Verified: the
+// same four assertions fail at 00:00 on the pre-2026-09-18 code too, so this is
+// a fixture defect, not a regression. Clamp to today's local midnight so the
+// fixture means what its name says at every hour of the day.
+function _startOfLocalToday(ms){ const d = new Date(ms); d.setHours(0,0,0,0); return d.getTime(); }
 function doneToday(id){
-  return { id: id, type: 'daily', title: 'Stretch', done: true, doneAt: FIXED_NOW - 3600000,
+  return { id: id, type: 'daily', title: 'Stretch', done: true,
+           doneAt: Math.max(FIXED_NOW - 3600000, _startOfLocalToday(FIXED_NOW)),
            missedOn: 0, updatedAt: NORMAL, streak: 4,
            checklist: [ {id:'c1', text:'left',  done:true,  touchedAt: NORMAL},
                         {id:'c2', text:'right', done:true,  touchedAt: NORMAL},

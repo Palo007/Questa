@@ -340,8 +340,18 @@ function boot(opts) {
     (bare.match(/^startDay\(\);/gm) || []).length === 0);
   // The two import-flow call sites sit at 12 spaces of indentation inside the
   // import callbacks. They must stay byte-identical -- only the boot call changed.
+  // 2026-09-18 (granular import): this used to pin the two import-flow sites by
+  // their INDENTATION (`^ {12}startDay\(\);`). The granular export/import work
+  // lifted that code out of the nested confirmDialog closure inside importData()
+  // and into a top-level `applyImportSections()`, so both sites are now at 4
+  // spaces. The indentation was always a proxy for "these two calls still exist
+  // on the import path"; assert that directly instead, which is what S1c is
+  // actually protecting and what survives the next refactor too.
   assert('S1c the two import-flow startDay() call sites survive untouched',
-    (bare.match(/^ {12}startDay\(\);/gm) || []).length === 2);
+    (bare.match(/^\s+startDay\(\);\s*$/gm) || []).length === 2);
+  assert('S1c-i both live inside applyImportSections()',
+    (stripComments(extractFunction(appSrc, /^async function applyImportSections\(data, keys, mode\)\{/, 'applyImportSections'))
+      .match(/(?<![A-Za-z_$])startDay\(\)/g) || []).length === 2);
   // Total startDay() call sites: 2 imports + exactly 1 from the runner.
   // Excludes the `function startDay(){` declaration itself.
   assert('S1d exactly three startDay() call sites in total (2 import + 1 runner)',
@@ -349,8 +359,25 @@ function boot(opts) {
   assert('S1e bootStartDay() never calls startDay() directly -- only via the runner',
     !/(?<![A-Za-z_$])startDay\(\)/.test(stripComments(P.bootStartDay)));
   assert('S1f the runner calls startDay()', /(?<![A-Za-z_$])startDay\(\)/.test(stripComments(P.runner)));
-  assert('S1g bootStartDay() reaches the runner on BOTH branches',
-    (stripComments(P.bootStartDay).match(/_runDayRollover/g) || []).length === 2);
+  // 2026-09-18 (round 2): this used to pin the literal count at 2 (defer-branch
+  // timer + synchronous fallback). bootStartDay now has a THIRD path: when sync is
+  // not configured it still waits for reconcileDurableState() before rolling over,
+  // because _runDayRollover -> startDay -> runCron ends in save(), and a save() that
+  // lands before reconcile rewrites the IDB mirror and destroys the newer copy the
+  // mirror exists to rescue. A raw count was always a proxy; what matters is that
+  // every exit path goes through the runner and none calls startDay() directly
+  // (S1e/S1f), so assert the floor and check each path explicitly.
+  {
+    const bs = stripComments(P.bootStartDay);
+    assert('S1g bootStartDay() reaches the runner on every branch',
+      (bs.match(/_runDayRollover/g) || []).length >= 3);
+    assert('S1g-i the deferred branch still schedules the guaranteed timer',
+      /setTimeout\(_runDayRollover,\s*BOOT_ROLLOVER_TIMEOUT_MS\)/.test(bs));
+    assert('S1g-ii the not-configured branch waits for reconcileDurableState',
+      /reconcileDurableState\(\)\.then\(_runDayRollover,\s*_runDayRollover\)/.test(bs));
+    assert('S1g-iii a final unconditional fallback still exists',
+      /\n\s*_runDayRollover\(\);\s*\n\}/.test(P.bootStartDay));
+  }
   assert('S1h BOOT_ROLLOVER_TIMEOUT_MS is a named constant, not a bare literal',
     /^var BOOT_ROLLOVER_TIMEOUT_MS\s*=\s*8000\s*;/.test(stripComments(P.timeoutConst).trim()));
 }

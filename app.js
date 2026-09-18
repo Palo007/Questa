@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.18-1922";
+const APP_VERSION = "v2026.09.18-2318";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -163,9 +163,26 @@ function _hlcHeal(){ var p=Date.now(); if(!(lastIssued > p + HLC_RATCHET_TOLERAN
 function hlcSkewMs(){ return lastIssued - Date.now(); }
 function now(){ _hlcHeal(); var p=Date.now(); lastIssued=Math.max(p, lastIssued+1); try{ if(S) S.__hlcLast=lastIssued; }catch(e){} return lastIssued; }
 function ratchetHlc(maxRemoteTs){ var p=Date.now(); if(maxRemoteTs > p + HLC_RATCHET_TOLERANCE_MS){ try{ logEvent({kind:'clockSkew', remoteTs:maxRemoteTs, localTs:p}); }catch(e){} return; } lastIssued = Math.max(lastIssued, maxRemoteTs); if(S) S.__hlcLast = lastIssued; }
+// 2026-09-18 (round 2): a read failure used to be indistinguishable from a first
+// run. The catch was empty — no toast, no logEvent, no _qDiagPush, and the raw
+// string was not kept anywhere — so a truncated questa.save.v1 (or a migrate()
+// throw on a malformed task) silently produced a level-1 character with no tasks,
+// and the very next save() wrote that empty state over the recoverable bytes.
+// Keep the original blob under a recovery key and make the failure visible.
+let LOAD_FAILED = null;   // {key, error} when the stored state could not be read
 function load(){
-  try{ const raw = localStorage.getItem(STORE_KEY);
-    if(raw){ return migrate(JSON.parse(raw)); } }catch(e){}
+  let raw = null;
+  try{ raw = localStorage.getItem(STORE_KEY); }catch(e){ raw = null; }
+  if(raw){
+    try{ return migrate(JSON.parse(raw)); }
+    catch(e){
+      const key = STORE_KEY + ".corrupt." + Date.now();
+      try{ localStorage.setItem(key, raw); }catch(_){ /* nothing else we can do */ }
+      LOAD_FAILED = { key: key, error: String((e && e.message) || e) };
+      try{ if(typeof _qDiagPush === "function") _qDiagPush('loadFailed', LOAD_FAILED); }catch(_){}
+      try{ if(typeof console !== "undefined") console.error("load() failed; stored state kept at " + key, e); }catch(_){}
+    }
+  }
   return freshState();
 }
 // Tombstone recorder (2026-07-12): deletion is a first-class, syncable fact.
@@ -283,6 +300,19 @@ function _charSig(c){ if(!c) return ""; var o={}; for(var k in c){ if(k!=="updat
 // both-changed merge arbitration, and the damage was silently undone by the peer.
 // S is declared above this line, so the initializer can read it.
 var _prevCharSig = _charSig(S && S.char);
+// 2026-09-18 (round 2): call this after EVERY wholesale `S = ...` replacement (the
+// multi-tab clobber path, the storage-event listener, reconcileDurableState). Those
+// three sites swapped S without re-priming the two module-level values that track
+// it, so the next save() compared the ADOPTED char against the DISCARDED state's
+// signature, found a difference, and stamped char.updatedAt = now() for an edit the
+// user never made. sync.js resolves char by newest edit ("char.updatedAt is reliably
+// stamped per stat change, app.js save() chokepoint via _charSig"), so that phantom
+// stamp beat a peer's real gold spend and silently reverted it. The HLC needs the
+// same treatment: the adopted state may carry a higher __hlcLast than this tab has.
+function _adoptStateStamps(){
+  try{ _prevCharSig = _charSig(S && S.char); }catch(e){}
+  try{ if(S && S.__hlcLast) lastIssued = Math.max(lastIssued, S.__hlcLast); }catch(e){}
+}
 /* BEGIN_DURABLE_STATE_HELPERS */
 let _stateWritePromise = null;
 // 2026-07-13 P0-1: save() must be fully SYNCHRONOUS. The previous design
@@ -318,6 +348,7 @@ function save(){
   // stale local. syncSubset() builds its own whitelisted-field object and
   // never copies these two keys, so they never leak into base/remote/Dropbox.
   function _saveCommit(){
+    var _quotaHit = false;   // set by the localStorage catch; read by the mirror handlers
     S.__seq = preBumpSeq + 1;
     S.__savedAt = now();
     var _json = JSON.stringify(S);
@@ -331,14 +362,27 @@ function save(){
       // #11a: QuotaExceededError aborts setItem but __seq already bumped.
       // IDB has its own larger quota; write the mirror so reconcileDurableState
       // (which prefers higher __seq) recovers the state on next boot.
-      try{ if(typeof toast==="function") toast("Storage quota exceeded \u2014 data saved to backup"); }catch(_){}
+      // 2026-09-18 (round 2): do NOT promise the backup before it exists. The toast
+      // used to fire here, before _idbWriteState was even called, so when both
+      // stores failed the user was told the opposite of the truth. The mirror's
+      // outcome now drives the message (see the .then/.catch below).
+      _quotaHit = true;
       try{ if(typeof logEvent==="function") logEvent({kind:"quotaError", message:String(quotaErr&&quotaErr.message||quotaErr)}); }catch(_){}
     }
     // Fire-and-forget durable mirror. IDB commits (oncomplete) far more
     // reliably than localStorage's batched flush; this is the actual fix, not
     // a backup of one. Exposed as _stateWritePromise so lifecycle handlers can
     // best-effort wait on it.
-    _stateWritePromise = _idbWriteState(_json).catch(function(){ /* best-effort mirror */ });
+    // 2026-09-18 (round 2): the mirror's failure used to be a bare swallow — no
+    // _qDiagPush, no logEvent, no toast — even though every other IndexedDB failure
+    // path in this file records itself. So a device where BOTH stores were failing
+    // produced a diagnostic bundle with no evidence at all.
+    _stateWritePromise = _idbWriteState(_json).then(function(){
+      if(_quotaHit){ try{ if(typeof toast==="function") toast("Storage quota exceeded — saved to the backup store instead"); }catch(_){} }
+    }, function(mirrorErr){
+      try{ if(typeof _qDiagPush==="function") _qDiagPush('stateMirrorFailed', {error:String((mirrorErr&&mirrorErr.message)||mirrorErr), quota:!!_quotaHit}); }catch(_){}
+      if(_quotaHit){ try{ if(typeof toast==="function") toast("Storage full — THIS CHANGE WAS NOT SAVED. Free up space or export a backup."); }catch(_){} }
+    });
     if(typeof scheduleSync==="function" && !applying) scheduleSync();
   }
   // Fast synchronous check against the companion seq key (no full-state
@@ -358,7 +402,20 @@ function save(){
         var storedObj = JSON.parse(stored);
         var storedSeq = Number(storedObj.__seq) || 0;
         S = migrate(storedObj);
+        // 2026-09-18 (round 2): re-prime the char signature and the HLC from the
+        // state we just ADOPTED. _prevCharSig was set a few lines above to the
+        // signature of the char that is being thrown away, so the very next save()
+        // compared the adopted char against a foreign signature, found a
+        // difference, and stamped char.updatedAt = now() for a change the user
+        // never made -- which then beat a peer's real char edit in the
+        // both-changed merge and silently reverted it.
+        if(typeof _adoptStateStamps==='function') _adoptStateStamps();
         if(typeof logEvent==='function') logEvent({kind:'multiTabClobberAvoided', preBumpSeq:preBumpSeq, storedSeq:storedSeq});
+        // ...and say so. This path DISCARDS the caller's in-memory edit wholesale
+        // (completeTask's XP/gold, a habit tap, a subtask toggle) and returns as if
+        // save() had persisted it. multiTabClobberAvoided is in DIAGNOSTIC_KINDS, so
+        // it is filtered out of the Activity Feed too -- the loss was invisible.
+        try{ if(typeof toast==='function') toast('Another tab saved first — your last change here was not kept'); }catch(_){}
         if(typeof render==='function') render();
         return;
       }
@@ -379,6 +436,7 @@ if(typeof window!=='undefined'){
         var liveSeq = Number(S.__seq) || 0;
         if(incomingSeq > liveSeq){
           S = migrate(incoming);
+          if(typeof _adoptStateStamps==='function') _adoptStateStamps();   // 2026-09-18 round 2 — see _adoptStateStamps
           if(typeof render==='function') render();
         }
       }catch(ex){}
@@ -430,6 +488,7 @@ function reconcileDurableState(){
     if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'reconcile:compare', idbSeq:idbSeq, liveSeq:liveSeq});
     if(idbSeq > liveSeq){
       S = idbS;
+      if(typeof _adoptStateStamps==='function') _adoptStateStamps();   // 2026-09-18 round 2 — see _adoptStateStamps
       if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'reconcile:idb-won', idbSeq:idbSeq, liveSeq:liveSeq});
       if(typeof render==="function") render();
     }
@@ -881,8 +940,22 @@ function idbOpen(){
         db.createObjectStore("state");
       }
     };
-    req.onsuccess = ()=>{ const db=req.result; resolve(db); schedulePrune(db); };
-    req.onerror = ()=>reject(req.error || new Error("IndexedDB open failed"));
+    // 2026-09-18 (round 2): an open BLOCKED by an older connection fires neither
+    // onsuccess nor onerror, and _idbPromise is memoized — so the promise never
+    // settled and every later caller reused the same dead promise for the whole
+    // session. Consequences were all silent: the durable state mirror was never
+    // written again, logEvent appended nothing, and sync.js's
+    // `reconcileDurableState().then(syncInit).catch(syncInit)` never ran EITHER arm
+    // (.catch does not fire on a pending promise), so Dropbox sync was simply dead.
+    // Reject instead, and clear the cache so a later call can retry.
+    req.onblocked = ()=>{ _idbPromise = null; reject(new Error("IndexedDB blocked by another tab — close other Questa tabs and reload")); };
+    req.onsuccess = ()=>{
+      const db=req.result;
+      // Let a NEWER version in another tab upgrade instead of blocking it forever.
+      try{ db.onversionchange = ()=>{ try{ db.close(); }catch(e){} _idbPromise = null; }; }catch(e){}
+      resolve(db); schedulePrune(db);
+    };
+    req.onerror = ()=>{ _idbPromise = null; reject(req.error || new Error("IndexedDB open failed")); };
   });
   return _idbPromise;
 }
@@ -1507,7 +1580,17 @@ async function writeSnapshot(type, tier){
       req.onsuccess = ()=>resolve(req.result);
       req.onerror = ()=>reject(req.error);
     });
-    await new Promise(r=>{ tx.oncomplete=r; tx.onerror=r; tx.onabort=r; });
+    // 2026-09-18 (round 2): distinguish COMMIT from abort. This used to resolve the
+    // same way on oncomplete, onerror and onabort, so an add that succeeded at
+    // request level but failed at commit (quota) still reached `return id` below.
+    // takeSnapshot's guard -- "advance markers ONLY if the write actually succeeded
+    // (writeSnapshot returns the new id, or null on failure)... a transient IDB
+    // error must NOT permanently skip a tier" -- was therefore defeated: the tier
+    // marker advanced with no baseline written, that GFS slot was consumed until
+    // the next boundary, and rotateSnapshots then pruned older baselines against a
+    // keep-set assuming the new one existed.
+    const _committed = await new Promise(r=>{ tx.oncomplete=()=>r(true); tx.onerror=()=>r(false); tx.onabort=()=>r(false); });
+    if(!_committed){ console.error("writeSnapshot: transaction did not commit", id); return null; }
     // Write-then-verify: read back, recompute hash, mark verified or delete
     try{
       const tx2 = db.transaction("backups","readonly");
@@ -1528,9 +1611,13 @@ async function writeSnapshot(type, tier){
           const store3 = tx3.objectStore("backups");
           store3.delete(id);
           console.error("Snapshot verification failed - hash mismatch, deleted record", id);
+          return null;   // 2026-09-18 round 2: the record is gone, so this is a failure
         }
+      } else {
+        console.error("Snapshot verification failed - record not found after commit", id);
+        return null;     // 2026-09-18 round 2
       }
-    }catch(e){ console.error("Snapshot verification error:",e); }
+    }catch(e){ console.error("Snapshot verification error:",e); return null; /* 2026-09-18 round 2 */ }
     return id;
   }catch(e){ console.error("writeSnapshot failed:",e); return null; }
 }
@@ -1583,7 +1670,15 @@ async function rotateSnapshots(){
     // Son window floor = oldest retained DAILY full (keeps deltas within ~7 days)
     let oldestDailyFullTs = Infinity;
     for(const s of dailyKeptFulls){ oldestDailyFullTs = Math.min(oldestDailyFullTs, s.ts); }
-    for(const s of deltas){ if(s.ts >= oldestDailyFullTs) keep.add(s.id); }
+    // 2026-09-18 (round 2): with no fulls at all, dailyKeptFulls is empty, the floor
+    // stays Infinity and `s.ts >= Infinity` matches NOTHING -- so every delta except
+    // the single newest (kept by the snaps[0] seed above) was deleted on every
+    // rotation. That state is reachable: restore a backup onto a device whose
+    // backups store is empty and S.prefs.gfs already marks today/this week/this
+    // month as done, so takeSnapshot picks tier=null and writes only deltas until
+    // the next month boundary. There is no "no fulls -> keep everything" guard.
+    if(!dailyKeptFulls.length){ for(const s of deltas) keep.add(s.id); }
+    else for(const s of deltas){ if(s.ts >= oldestDailyFullTs) keep.add(s.id); }
     // Chain integrity: a kept delta must keep its baseline full (ts <= delta.ts)
     for(const s of deltas){ if(keep.has(s.id)){
       const base = fulls.find(f => f.ts <= s.ts); if(base) keep.add(base.id); } }
@@ -2338,6 +2433,26 @@ function bootStartDay(){
   }
   // Not configured (or already past the timeout): roll over synchronously, exactly as
   // before -- but THROUGH THE RUNNER, never by calling startDay() directly.
+  // 2026-09-18 (round 2): even with sync NOT configured, the rollover must wait for
+  // reconcileDurableState(). _runDayRollover -> startDay -> runCron ends in save(),
+  // and save() rewrites the IndexedDB mirror with __seq = preBumpSeq + 1. Since
+  // app.js runs to completion before sync.js reaches
+  // `reconcileDurableState().then(syncInit)`, that write's transaction is created
+  // FIRST, so reconcile then reads back the value save() just wrote: idbSeq equals
+  // liveSeq, `idbSeq > liveSeq` is false, and the newer copy the mirror existed to
+  // rescue -- every save the OS killed before flushing localStorage -- is gone, with
+  // a reconcile:compare log entry reporting agreement. The gate's own comment says
+  // reconcile "MUST resolve before syncInit()'s first sync round"; the real
+  // precondition is before ANY save(). _runDayRollover is idempotent
+  // (_dayRolloverDone), so the timer and the promise can both fire.
+  if(typeof reconcileDurableState === "function"){
+    _bootRolloverPending = true;
+    render();                                       // first paint stays synchronous
+    setTimeout(_runDayRollover, BOOT_ROLLOVER_TIMEOUT_MS);   // guaranteed trigger
+    try{ reconcileDurableState().then(_runDayRollover, _runDayRollover); }
+    catch(e){ _runDayRollover(); }
+    return;
+  }
   _runDayRollover();
 }
 // Startup gate: prompt if anything was missed yesterday, else run cron directly.
@@ -2371,6 +2486,14 @@ function runCron(){
   // runCron was never hardened. Regression test: tests/cron-day-rewind.test.js.
   if(today <= S.lastCron) return;
   if(S.prefs.paused){
+    // 2026-09-18 (round 2): capture the PREVIOUS stamp before overwriting it. The
+    // loop below used to read S.lastCron after this line had already set it to
+    // today, so periodBoundaryCrossed was always called as (freq, today, today):
+    // false for 'weekly' and 'monthly', true only via the 'daily' fall-through.
+    // A weekly or monthly habit therefore never cleared its +/- tallies for the
+    // whole pause window, and cResetOn was never stamped, so sync.js's
+    // _accumCounter had no reset marker for those periods either.
+    const _prevCron = S.lastCron;
     S.lastCron = today;
     S.prefs.pausedDays=((S.prefs.pausedDays||[]).concat([today])).filter((v,i,a)=>a.indexOf(v)===i).slice(-7);
     // 2026-09-18: habit +/- tallies are "this reset period" counters, not streak
@@ -2378,7 +2501,7 @@ function runCron(){
     // on their own boundary; the old early-return skipped the loop below and let
     // them accumulate for the whole pause window.
     S.tasks.forEach(t=>{
-      if(t.type==='habit' && periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; t.cResetOn=today; }
+      if(t.type==='habit' && periodBoundaryCrossed(t.resetFreq||'daily', _prevCron, new Date())){ t.cUp=0; t.cDown=0; t.cResetOn=today; }
     });
     _resetDailies();
     save();
@@ -2458,6 +2581,10 @@ function toast(msg){
   setTimeout(()=>e.remove(),2400);
 }
 let TAB=(S.prefs && S.prefs.lastTab) || 'habits', EDIT=null;
+// Pristine copy of the task as it was when the edit sheet opened, so saveTask()
+// can tell "the user changed this field" from "this field is just old"
+// (2026-09-18 round 2 — see openEdit / saveTask).
+let EDIT_BASE=null;
 // FILTER, FILTEROPEN, and per-tab scroll positions persist in S.prefs
 function ensureUiPrefs(){
   S.prefs = S.prefs || {};
@@ -2861,6 +2988,15 @@ const DAY = 86400000;
 // use device-local days (see dayStamp/runCron), so day buckets MUST key on
 // LOCAL midnight, not UTC midnight, or events shift by the tz offset.
 function localDayKey(ms){ const d=new Date(ms); d.setHours(0,0,0,0); return d.getTime(); }
+// 2026-09-18 (round 2): step to the NEXT local midnight. Walking a day grid with
+// `d += 86400000` from a local midnight is only correct in a zone with no DST: a
+// 23-hour or 25-hour day leaves the cursor an hour off, and from then on the keys
+// are no longer local midnights at all. Everything that looks them up (compMap,
+// the pre-seeded dayMap, the heatmap cells) keys on localDayKey, so the walk
+// silently stopped matching — NaN totals from `undefined + n`, a flat all-zero
+// series, a duplicated or missing heatmap cell, and every weekday row shifted by
+// one from that column on.
+function nextLocalDay(ms){ const d=new Date(ms); d.setHours(0,0,0,0); d.setDate(d.getDate()+1); return d.getTime(); }
 function anPrefs(){
   S.prefs = S.prefs || {};
   if(!S.prefs.an) S.prefs.an = { fromOff:90, toOff:0, snap:'90d', metricKw:'klik' };
@@ -2919,7 +3055,13 @@ function anMatcher(arg){
     const map={}; m.habits.forEach(h=>{ map[h.id]= (h.reps==null||h.reps==='')? null : Number(h.reps); });
     return {
       match: e => e.type==='habit' && (e.taskId in map),
-      reps:  e => { const ov=map[e.taskId]; return ov==null ? e.reps : ov*(e.scoredUp||0); },
+      // 2026-09-18 (round 2): the override is a reps-per-TAP multiplier, so it only
+      // applies where there are taps. scoredUp is written by exactly one path
+      // (scoreHabit's scored dir>0 branch); bulk reps from the rep sheet (addReps)
+      // and Log habits record `reps` with NO scoredUp, so `ov*(e.scoredUp||0)` was
+      // `ov*0` — every precisely logged rep read as 0, and the dashboard total for
+      // that habit dropped to zero the moment an override was set.
+      reps:  e => { const ov=map[e.taskId]; return (ov==null || !e.scoredUp) ? e.reps : ov*e.scoredUp; },
       keyword: (m.keyword||'').toLowerCase()
     };
   }
@@ -3288,8 +3430,13 @@ function initAnalytics(){
       const PAD=12; const fr=clamp((clientX-r.left-PAD)/Math.max(1,r.width-2*PAD),0,1);
       let off=fracToOff(fr);
       // constrain handles so they never cross
-      if(which===0) p.fromOff=Math.min(Math.max(off, p.toOff||0), totalDays);
-      else p.toOff=Math.max(Math.min(off, p.fromOff||totalDays), 0);
+      // 2026-09-18 (round 2): null-aware, not `||`. A legitimate fromOff of 0 (window
+      // start = today) is falsy, so `p.fromOff||totalDays` replaced it with totalDays
+      // and the "never cross" clamp became a no-op: normRange then SWAPPED the
+      // handles and a one-day nudge of the right handle silently committed a
+      // full-history window, persisted for the next visit.
+      if(which===0) p.fromOff=Math.min(Math.max(off, (p.toOff==null?0:p.toOff)), totalDays);
+      else p.toOff=Math.max(Math.min(off, (p.fromOff==null?totalDays:p.fromOff)), 0);
       p.snap=null;
       document.querySelectorAll('#anSnapChips .anChip').forEach(c=>c.classList.remove('on'));
       layout();   // cheap: reposition handles + live date label only
@@ -3331,6 +3478,14 @@ function bindMetricChips(){
     c.onclick=()=>{ p.activeMetric=c.dataset.mid;
       document.querySelectorAll('#anMetricChips .anChip').forEach(x=>x.classList.toggle('on',x===c));
       document.getElementById('anMetricEdit').innerHTML='';
+      // 2026-09-18 (round 2): clearing the markup alone was a guard that did not
+      // guard. MEDIT stayed populated with the OLD metric's _mid, and the
+      // refreshAnalytics() on the next line rebuilds #anBody and then runs
+      // `if(MEDIT && !MBUILD) drawMetricEditor()` — re-rendering the previous
+      // metric's editor underneath the newly selected chip. The user edits what
+      // looks like the new metric and Save resolves _mid to the old one, destroying
+      // its keyword / habit list with no undo. mCancel already nulls MEDIT here.
+      MEDIT=null;
       refreshAnalytics(); save();
     };
     // long-press / double-click to edit
@@ -3532,11 +3687,17 @@ function anSourceEvents(v){
   }
   else if(src==='reps'){
     const idset={}; items.forEach(t=>idset[t.id]=t);
-    anAllEvents().forEach(e=>{ const it=idset[e.taskId]; if(!it) return; const r=('reps'in e)?(e.reps||0):0; const val=r||e.scoredUp||0; if(val>0) out.push({ts:e.date,v:val,item:it,title:e.title}); });
+    // 2026-09-18 (round 2): keep SIGNED values. addReps is documented as "n is
+    // signed: positive adds, negative removes" and anCumulativeReps honours that
+    // with `total += r`. `if(val>0)` discarded the correcting event entirely, so a
+    // +50 followed by a -50 read as 50 in every custom reps view while the
+    // dashboard card correctly read 0.
+    anAllEvents().forEach(e=>{ const it=idset[e.taskId]; if(!it) return; const r=('reps'in e)?(e.reps||0):0; const val=r||e.scoredUp||0; if(val) out.push({ts:e.date,v:val,item:it,title:e.title}); });
   }
   else if(src==='metric'){
     const m=anViewMetric(v); if(m){ const M=anMatcher(m);
-      anAllEvents().forEach(e=>{ if(!M.match(e)) return; const r=M.reps?M.reps(e):0; const val=(r||0)||e.scoredUp||0; if(val>0) out.push({ts:e.date,v:val,item:null,title:e.title}); }); }
+      // signed, same reason as the 'reps' branch above (2026-09-18 round 2)
+      anAllEvents().forEach(e=>{ if(!M.match(e)) return; const r=M.reps?M.reps(e):0; const val=(r||0)||e.scoredUp||0; if(val) out.push({ts:e.date,v:val,item:null,title:e.title}); }); }
   }
   return out;
 }
@@ -3601,7 +3762,7 @@ function anSnapshotHistoryBucket(v, from, to){
   const midnightTo = localDayKey(to);
   const dayMap = {};
   const series = [];
-  for (let d = midnightFrom; d <= midnightTo; d += DAY) dayMap[d] = 0;
+  for (let d = midnightFrom; d <= midnightTo; d = nextLocalDay(d)) dayMap[d] = 0;
   items.forEach(t => {
     if (src === 'streaks' && t.type !== 'daily') return;
     const cMs = createdMs(t) || 0;
@@ -3617,7 +3778,7 @@ function anSnapshotHistoryBucket(v, from, to){
     }
     let curStreak = 0;
     let walkD = localDayKey(cMs);
-    for (let d = walkD; d <= midnightTo; d += DAY) {
+    for (let d = walkD; d <= midnightTo; d = nextLocalDay(d)) {
        if (t.type === 'daily') {
           const due = !t.repeat || t.repeat[new Date(d).getDay()];
           if (due) {
@@ -3641,7 +3802,7 @@ function anSnapshotHistoryBucket(v, from, to){
        }
     }
   });
-  for (let d = midnightFrom; d <= midnightTo; d += DAY) {
+  for (let d = midnightFrom; d <= midnightTo; d = nextLocalDay(d)) {
     series.push({d: d, v: dayMap[d]});
   }
   if (group === 'day') {
@@ -4417,7 +4578,7 @@ function anHeatmapHTML(from,to,inten,maxI){
   start.setDate(start.getDate()-((start.getDay()+6)%7)); // week starts Monday: top cell = Mon, bottom = Sun
   const end=new Date(localDayKey(to));
   let cols='', col='', dow=0;
-  for(let t=start.getTime(); t<=end.getTime(); t+=DAY){
+  for(let t=start.getTime(); t<=end.getTime(); t=nextLocalDay(t)){
     const v=inten[localDayKey(t)]||0;
     const title='📅 '+fmtDate(t)+'\n'+(v? '🔥 '+v+' activity':'💤 no activity');
     col+='<div class="anHeatCell" style="background:'+heatColor(v,maxI)+'" data-tip="'+esc(title)+'"></div>';
@@ -4990,7 +5151,16 @@ function commitOrder(){
   const list=cards[0].dataset.list;
   const order=cards.map(c=>c.dataset.id);
   if(list==='rewards'){
-    S.rewards.sort((a,b)=>order.indexOf(a.id)-order.indexOf(b.id));
+    // 2026-09-18 (round 2): in-place permutation of the VISIBLE rows only, the same
+    // shape the task branch below was given. `sort((a,b)=>order.indexOf(a.id)-...)`
+    // gives every reward missing from `order` an index of -1, which sorts it ahead
+    // of everything on screen — so dragging one reward while the Rewards search box
+    // was active silently hoisted every hidden reward to the top and persisted it.
+    // dragOK('reward') only disables dragging for an active SORT, not for a search.
+    const orderSet = new Set(order);
+    const moved = order.map(id => S.rewards.find(r => r && r.id === id)).filter(Boolean);
+    let mi = 0;
+    S.rewards = S.rewards.map(r => (r && orderSet.has(r.id)) ? (moved[mi++] || r) : r);
   } else {
     // Reorder ONLY the same-type tasks that are actually on screen, in place.
     // 2026-09-18: the old rebuild was `S.tasks = others.concat(sameType)`, where
@@ -5160,6 +5330,15 @@ function openEdit(id,type){
   // opens and nothing tells the user why. Fail visibly instead.
   if(id && !t){ toast('That task no longer exists'); render(); return; }
   EDIT = JSON.parse(JSON.stringify(t));
+  // 2026-09-18 (round 2): keep a pristine copy of what the record looked like when
+  // the sheet opened. saveTask() used to do `S.tasks[idx]=EDIT`, writing this whole
+  // stale clone back over the live record and stamping it updatedAt=now(), so
+  // anything a background sync merged into the task while the sheet was open --
+  // a peer's new subtask, a streak, a completion -- was erased AND won every
+  // downstream merge. Worse, a subtask present in base and remote but now missing
+  // locally reads to mergeChecklist as a local deletion, so it is deleted fleet-wide.
+  // With this baseline, saveTask writes back only the fields the sheet changed.
+  EDIT_BASE = JSON.parse(JSON.stringify(t));
   const hasRem = EDIT.reminders && EDIT.reminders[0] && EDIT.reminders[0].enabled;
   EDIT._reminderEnabled = hasRem;
   if (hasRem) {
@@ -5209,7 +5388,8 @@ function drawReminderEditor(t) {
       h += '</div>';
     } else if (t.type === 'daily') {
       // Display info for dailies
-      const activeDays = t.repeat.map((r, i) => r ? dayLabels[i] : '').filter(Boolean).join(', ');
+      // (t.repeat||[]) — same missing-array case as the Repeat-on grid below
+      const activeDays = (t.repeat||[]).map((r, i) => r ? dayLabels[i] : '').filter(Boolean).join(', ');
       h += '<div class="small" style="margin-top:6px;color:var(--muted)">Reminder repeats on daily\'s repeat schedule: <b>' + (activeDays || 'Never') + '</b></div>';
     }
     
@@ -5251,6 +5431,13 @@ function drawSheet(){
       '<div class="small" style="margin-top:6px">Adjusting the + count also adds/removes its XP &amp; gold.</div>';
   }
   if(t.type==='daily'){
+    // 2026-09-18 (round 2): `t.repeat[i]` threw on a daily with no repeat array, and
+    // openEdit calls drawSheet() BEFORE it shows the scrim -- so the sheet never
+    // opened, no error, nothing happened at all. Because Delete lives inside the
+    // sheet, such a task could no longer be edited OR deleted from the UI. migrate()
+    // normalises reminders, checklist ids and updatedAt but never repeat, and every
+    // other reader in this file already defends it with `(t.repeat||[])`.
+    if(!Array.isArray(t.repeat)) t.repeat = [true,true,true,true,true,true,true];
     h+='<label>Repeat on</label><div class="days" id="eDays">'+
       dayLabels.map((d,i)=>'<button style="border:1px solid var(--line);border-radius:8px;background:'+(t.repeat[i]?'var(--panel2)':'var(--panel)')+';color:var(--ink);cursor:pointer" onclick="EDIT.repeat['+i+']=!EDIT.repeat['+i+'];drawSheet()">'+d+'</button>').join('')+'</div>';
     h+='<label>Adjust streak</label><div class="adjRow">'+
@@ -5281,7 +5468,12 @@ function saveTask(){
   EDIT.title=document.getElementById('eTitle').value.trim()||'Untitled';
   EDIT.notes=document.getElementById('eNotes').value;
   document.querySelectorAll('#eCheck .ci input[type=text]').forEach((inp,i)=>{ if(EDIT.checklist[i]) EDIT.checklist[i].text=inp.value; });
-  EDIT.checklist=(EDIT.checklist||[]).filter(c=>c.text.trim());
+  // 2026-09-18 (round 2): guard the item and its text, matching copyEditTask's
+  // `c && (c.text||'').trim()`. mergeChecklist only filters on `x && x.id != null`,
+  // so a peer or an imported backup can land a text-less subtask in S.tasks; the
+  // bare `c.text.trim()` then threw a TypeError out of saveTask BEFORE anything was
+  // written, so Save did nothing at all and the whole edit was lost with no message.
+  EDIT.checklist=(EDIT.checklist||[]).filter(c=>c && (c.text||'').trim());
   if (EDIT._reminderEnabled) {
     const kind = EDIT.type === 'todo' ? 'once' : (EDIT.type === 'daily' ? 'daily' : 'weekly');
     const r = {
@@ -5317,18 +5509,51 @@ function saveTask(){
     // F4 (2026-07-11): id-based touchedAt stamping for mergeChecklist (sync.js).
     // Independent of the index-based diff further below (that one only feeds
     // the display-only edit-history event and stays untouched).
+    // 2026-09-18 (round 2): the sheet's OPEN-TIME baseline. Every "did the user
+    // change this?" test below measures against it, never against the live record —
+    // a background sync merge may have moved the live record since the sheet opened.
+    const _base = EDIT_BASE || orig;
     (function(){
-      const _origById = new Map((orig.checklist||[]).filter(c=>c&&c.id!=null).map(c=>[c.id,c]));
+      const _baseById = new Map((_base.checklist||[]).filter(c=>c&&c.id!=null).map(c=>[c.id,c]));
       (EDIT.checklist||[]).forEach(c=>{
         if(!c) return;
         if(!c.id) c.id = uid(); // defensive backfill (F4 2026-07-11) — mirrors toggleSub, see .omo/plans/2026-07-11-subtask-granular-merge.md §3
-        const o = _origById.get(c.id);
+        const o = _baseById.get(c.id);
         if(!o || (o.text||'')!==(c.text||'') || !!o.done!==!!c.done) c.touchedAt = now();
       });
     })();
-    const upDelta = (EDIT.cUp||0) - (orig.cUp||0);
-    const downDelta = (EDIT.cDown||0) - (orig.cDown||0);
-    S.tasks[idx]=EDIT;
+    // Counter deltas are the user's own +/- on the sheet. Against the live record a
+    // peer's taps merged in mid-edit would be rewarded (or charged) as if the user
+    // had made them.
+    const upDelta = (EDIT.cUp||0) - (_base.cUp||0);
+    const downDelta = (EDIT.cDown||0) - (_base.cDown||0);
+    // Write back ONLY what the sheet changed. `S.tasks[idx]=EDIT` replaced the live
+    // record with the open-time clone, silently discarding everything a concurrent
+    // sync merge had written into it (see openEdit's EDIT_BASE comment).
+    (function(){
+      const _eq = (a,b) => JSON.stringify(a===undefined?null:a) === JSON.stringify(b===undefined?null:b);
+      const _liveChecklist = Array.isArray(orig.checklist) ? orig.checklist.slice() : null;
+      Object.keys(EDIT).forEach(k=>{
+        if(k==='id') return;
+        if(!_eq(EDIT[k], _base[k])) orig[k] = EDIT[k];     // the user touched this field
+      });
+      Object.keys(_base).forEach(k=>{
+        if(k==='id') return;
+        if(!(k in EDIT) && (k in orig)) delete orig[k];    // the sheet removed it
+      });
+      // A subtask that is in the LIVE record but was never in the baseline arrived
+      // from a sync while the sheet was open. The user cannot have meant to delete
+      // something they never saw, and dropping it here would make mergeChecklist read
+      // "in base and remote, gone locally" as a deletion and remove it fleet-wide.
+      if(_liveChecklist && Array.isArray(orig.checklist) && orig.checklist !== _liveChecklist){
+        const seen = new Set(orig.checklist.filter(c=>c&&c.id!=null).map(c=>c.id));
+        const known = new Set((_base.checklist||[]).filter(c=>c&&c.id!=null).map(c=>c.id));
+        _liveChecklist.forEach(c=>{
+          if(c && c.id!=null && !seen.has(c.id) && !known.has(c.id)) orig.checklist.push(c);
+        });
+      }
+    })();
+    EDIT = orig;                      // the rest of saveTask() keeps operating on EDIT
     EDIT.updatedAt=now();
     const t = S.tasks[idx];
     let gainParts=null, loseParts=null, doBump=false;
@@ -5633,8 +5858,18 @@ function saveReward(){
 function delReward(){ try{ logEvent({kind:'rewardDelete', rewardId:REDIT.id, taskTitle:REDIT.title, cost:REDIT.cost}); }catch(e){} delMark(REDIT.id); S.rewards=S.rewards.filter(r=>r.id!==REDIT.id); closeSheet(); save(); render(); }
 function buyReward(id){
   const r=S.rewards.find(x=>x.id===id); if(!r)return;
-  if(S.char.gold < r.cost){ toast('Not enough gold'); return; }
-  S.char.gold=+(S.char.gold-r.cost).toFixed(2);
+  // 2026-09-18 (round 2): validate the cost. A relational comparison with NaN is
+  // always false, so `S.char.gold < r.cost` let a non-numeric cost through the
+  // affordability guard and the subtraction turned S.char.gold into NaN --
+  // permanently, since every later reward, purchase and death penalty is another
+  // arithmetic op on NaN, it is saved, and it syncs to every device. migrate()
+  // does not validate reward cost, so an imported backup or a synced peer can
+  // deliver one. There is no UI to reset gold.
+  const cost = Number(r.cost);
+  if(!Number.isFinite(cost) || cost < 0){ toast('That reward has an invalid cost'); return; }
+  if(!Number.isFinite(Number(S.char.gold))){ toast('Gold is corrupted — restore a backup'); return; }
+  if(S.char.gold < cost){ toast('Not enough gold'); return; }
+  S.char.gold=+(S.char.gold-cost).toFixed(2);
   try{ logEvent({kind:'purchase', taskTitle:r.title, cost:r.cost}); }catch(e){}
   toast('Bought: '+r.title); save(); render();
 }
@@ -5716,7 +5951,11 @@ function openSettings(){
       h+='<div class="devNameWrap">'+
            '<div class="devNameHeader">'+
               '<div class="devSyncStatus">Last sync: '+esc(rel)+
-               (scfg.lastError?(' &middot; <span style="color:#f74e52">'+esc(scfg.lastError)+'</span>'):'')+'</div>'+
+               (scfg.lastError?(' &middot; <span style="color:#f74e52">'+esc(scfg.lastError)+'</span>'):'')+
+               // 2026-09-18 (round 2): auto-backup failures have their own key now, so
+               // a failed backup no longer reports itself as a sync error. Show it as
+               // its own line rather than hiding it.
+               (scfg.lastBackupError?('<br><span style="color:#f7a24e">'+esc(scfg.lastBackupError)+'</span>'):'')+'</div>'+
              '<label class="devNameLbl">Device name</label>'+
              '<div></div>'+
            '</div>'+
@@ -6181,13 +6420,27 @@ const _EXPORT_FIELD_MAP = {
 function _tokenizeEvents(eventsArr){
   const events = eventsArr||[];
   const kindArr=[], srcArr=[], tidArr=[], titleArr=[];
-  const kindIdx={}, srcIdx={}, tidIdx={}, titleIdx={};
+  // Object.create(null): no inherited keys, so a task titled "constructor" or
+  // "__proto__" behaves like any other string. See idx() below (2026-09-18 round 2).
+  const kindIdx=Object.create(null), srcIdx=Object.create(null), tidIdx=Object.create(null), titleIdx=Object.create(null);
   // 2026-09-18: -1 means "this field was null". _detokenizeEvents restores it AS
   // null instead of indexing past the end of the dictionary. Previously K[-1] was
   // undefined, JSON.stringify dropped the key entirely, and because the integrity
   // hash is computed on the DETOKENIZED object the backup then failed its own hash
   // gate and was refused with "corrupted or tampered with".
-  function idx(arr,map,v){ if(v==null) return -1; if(!(v in map)){ map[v]=arr.length; arr.push(v); } return map[v]; }
+  // 2026-09-18 (round 2): OWN-property lookup, not `v in map`. `in` walks the
+  // prototype chain, so a taskTitle of "constructor", "toString", "valueOf",
+  // "hasOwnProperty", "isPrototypeOf", "toLocaleString" or "propertyIsEnumerable"
+  // was already "in" a plain {} — never added to the dictionary — and map[v]
+  // returned the inherited FUNCTION, which JSON.stringify drops. "__proto__" was
+  // worse: map[v]=n is a silent prototype write and map[v] reads back
+  // Object.prototype. Task titles are free user text, so this is user-reachable,
+  // and because the integrity hash is computed on the DETOKENIZED object the
+  // result is that EVERY backup that user ever writes is refused on import as
+  // "corrupted or tampered with" — the restore path is gone entirely.
+  // The maps below are Object.create(null); the emitted token dictionary is
+  // unchanged, so older builds still read these files.
+  function idx(arr,map,v){ if(v==null) return -1; if(!Object.prototype.hasOwnProperty.call(map,v)){ map[v]=arr.length; arr.push(v); } return map[v]; }
   const out = events.map(function(e){
     const o={};
     for(const f in e){
@@ -6240,7 +6493,10 @@ function _detokenizeEvents(env){
 // Tokenized form is export-only; live S / IndexedDB keep full field names, and
 // importData detokenizes fully before migrate() consumes the object.
 function _buildFieldMap(snap){
-  const freq={};
+  // Object.create(null) for the same reason as _tokenizeEvents' dictionaries
+  // (2026-09-18 round 2): a snapshot key named __proto__ or constructor otherwise
+  // never becomes an own property, so it silently drops out of the field map.
+  const freq=Object.create(null);
   (function walk(o){
     if(Array.isArray(o)){ for(let i=0;i<o.length;i++) walk(o[i]); }
     else if(o && typeof o==='object'){ for(const k in o){ freq[k]=(freq[k]||0)+1; walk(o[k]); } }
@@ -6275,15 +6531,268 @@ function _detokenizeSnapshot(tok){
   return _detDeep(s, rmap);
 }
 
-async function buildBackupFile(eventsArr){
-  const backup=Object.assign({}, S, {events: eventsArr||[]});
+/* BEGIN_GRANULAR_IO_HELPERS */
+// --- Granular export / import sections ---------------------------------------
+// ONE registry drives both directions: the export picker, the import picker, the
+// counts shown in each, slicing a snapshot down to the ticked boxes, and applying
+// a file's section back onto live state. A new section means ONE new entry here.
+//
+// Load-bearing design notes:
+//  * pick(src) returns ONLY the top-level keys its section owns, and returns an
+//    EMPTY object when it owns nothing in that state. A partial export therefore
+//    OMITS an unselected key entirely instead of writing an empty array --
+//    absence is exactly how detectExportSections() decides "that box is not in
+//    this file". Writing `tasks: []` would read back as "import zero tasks",
+//    which on Replace means "delete them all".
+//  * has(data) must succeed on a legacy schema-1 file that carries no
+//    _backup.sections manifest, so the three task sections key off the presence
+//    of the `tasks` ARRAY, not off a non-zero count. A full backup holding zero
+//    habits still offers the Habits box, so Replace can legitimately empty it.
+//  * merge never treats a missing timestamp as a losing value. Unknown resolves
+//    to "keep the local record", never to "drop it" -- the same polarity rule the
+//    sync.js merge sites live under, where clamping to 0 destroys data rather
+//    than losing a tiebreak.
+function _tasksOfType(list, ty){
+  return (list||[]).filter(function(t){ return t && t.type===ty; });
+}
+// Recency score for one record. Absent stamps score 0, and 0 can only ever LOSE
+// a comparison below (strictly-greater), never win one -- so an unstamped
+// incoming record can never evict a local one.
+function _ioRecTs(r){
+  if(!r) return 0;
+  const u = (typeof r.updatedAt==='number') ? r.updatedAt : 0;
+  const c = (typeof r.createdAt==='number') ? r.createdAt : 0;
+  return u>c ? u : c;
+}
+// Union two id-keyed lists. Incoming replaces local ONLY when strictly newer; a
+// tie -- including the 0/0 "neither side is stamped" case -- keeps local. Records
+// present only locally are always kept, so this can never shrink a list. That is
+// the whole point of Merge mode.
+function _ioMergeById(local, incoming){
+  const out = (local||[]).slice();
+  const at = {};
+  out.forEach(function(r,i){ if(r && r.id!=null) at[String(r.id)]=i; });
+  (incoming||[]).forEach(function(r){
+    if(!r) return;
+    if(r.id==null){ out.push(r); return; }
+    const k = String(r.id);
+    const i = at[k];
+    if(i===undefined){ at[k]=out.length; out.push(r); return; }
+    if(_ioRecTs(r) > _ioRecTs(out[i])) out[i] = r;
+  });
+  return out;
+}
+// Object sections under Merge: LOCAL wins field by field, incoming only fills
+// keys the local object does not already have. Nothing the user can see on this
+// device changes value; the file can only add what is missing.
+function _ioMergeObj(local, incoming){
+  const out = Object.assign({}, incoming||{});
+  const l = local||{};
+  for(const k in l) out[k] = l[k];
+  return out;
+}
+// Replace/merge one task TYPE without disturbing the other two. The new block is
+// dropped in at the position the first task of that type occupied, so manual
+// ordering of the surrounding types survives an import of just one type.
+function _ioApplyTaskType(tgt, data, ty, mode){
+  const inc = _tasksOfType(data.tasks, ty);
+  const cur = tgt.tasks || [];
+  const next = (mode==='merge') ? _ioMergeById(_tasksOfType(cur, ty), inc) : inc;
+  const out = []; let placed = false;
+  cur.forEach(function(t){
+    if(t && t.type===ty){
+      if(!placed){ placed = true; next.forEach(function(x){ out.push(x); }); }
+      return;
+    }
+    out.push(t);
+  });
+  if(!placed) next.forEach(function(x){ out.push(x); });
+  tgt.tasks = out;
+}
+// Concat + de-duplicate a plain log array by JSON identity. Used for the history
+// group, whose records carry no stable id.
+function _ioMergeLog(local, incoming){
+  const out = (local||[]).slice();
+  const seen = {};
+  out.forEach(function(r){ try{ seen[JSON.stringify(r)]=1; }catch(e){} });
+  (incoming||[]).forEach(function(r){
+    let k; try{ k = JSON.stringify(r); }catch(e){ k = null; }
+    if(k!==null && seen[k]) return;
+    if(k!==null) seen[k]=1;
+    out.push(r);
+  });
+  return out;
+}
+const IO_SECTIONS = [
+  { key:'char', label:'Character', hint:'Level, XP, gold, HP and class.',
+    count:function(s){ return (s && s.char) ? 1 : 0; },
+    has:function(d){ return !!(d && d.char && typeof d.char==='object'); },
+    pick:function(s){ return (s && s.char) ? {char:s.char} : {}; },
+    apply:function(tgt, d, mode){ tgt.char = (mode==='merge') ? _ioMergeObj(tgt.char, d.char) : d.char; } },
+
+  { key:'habits', label:'Habits', hint:'Repeatable good/bad habit buttons.',
+    count:function(s){ return _tasksOfType(s && s.tasks, 'habit').length; },
+    has:function(d){ return !!(d && Array.isArray(d.tasks)); },
+    pick:function(s){ const a=_tasksOfType(s && s.tasks,'habit'); return a.length?{tasks:a}:{tasks:[]}; },
+    apply:function(tgt, d, mode){ _ioApplyTaskType(tgt, d, 'habit', mode); } },
+
+  { key:'dailies', label:'Dailies', hint:'Tasks that repeat on a schedule, with streaks.',
+    count:function(s){ return _tasksOfType(s && s.tasks, 'daily').length; },
+    has:function(d){ return !!(d && Array.isArray(d.tasks)); },
+    pick:function(s){ const a=_tasksOfType(s && s.tasks,'daily'); return a.length?{tasks:a}:{tasks:[]}; },
+    apply:function(tgt, d, mode){ _ioApplyTaskType(tgt, d, 'daily', mode); } },
+
+  { key:'todos', label:'To-dos', hint:'One-off tasks and their checklists.',
+    count:function(s){ return _tasksOfType(s && s.tasks, 'todo').length; },
+    has:function(d){ return !!(d && Array.isArray(d.tasks)); },
+    pick:function(s){ const a=_tasksOfType(s && s.tasks,'todo'); return a.length?{tasks:a}:{tasks:[]}; },
+    apply:function(tgt, d, mode){ _ioApplyTaskType(tgt, d, 'todo', mode); } },
+
+  { key:'rewards', label:'Rewards', hint:'Things you spend gold on.',
+    count:function(s){ return ((s && s.rewards)||[]).length; },
+    has:function(d){ return !!(d && Array.isArray(d.rewards)); },
+    pick:function(s){ return {rewards:((s && s.rewards)||[])}; },
+    apply:function(tgt, d, mode){ tgt.rewards = (mode==='merge') ? _ioMergeById(tgt.rewards, d.rewards) : (d.rewards||[]); } },
+
+  { key:'tags', label:'Tags', hint:'Labels you sort tasks by.',
+    count:function(s){ return ((s && s.tags)||[]).length; },
+    has:function(d){ return !!(d && Array.isArray(d.tags)); },
+    pick:function(s){ return {tags:((s && s.tags)||[])}; },
+    apply:function(tgt, d, mode){ tgt.tags = (mode==='merge') ? _ioMergeById(tgt.tags, d.tags) : (d.tags||[]); } },
+
+  { key:'prefs', label:'Settings', hint:'Layout, sync options and app preferences.',
+    count:function(s){ return (s && s.prefs) ? Object.keys(s.prefs).length : 0; },
+    has:function(d){ return !!(d && d.prefs && typeof d.prefs==='object'); },
+    pick:function(s){ const o={}; if(s && s.prefs) o.prefs=s.prefs; if(s && s.lastCron!=null) o.lastCron=s.lastCron; return o; },
+    apply:function(tgt, d, mode){
+      tgt.prefs = (mode==='merge') ? _ioMergeObj(tgt.prefs, d.prefs) : (d.prefs||{});
+      if(mode!=='merge' && d.lastCron!=null) tgt.lastCron = d.lastCron;
+    } },
+
+  { key:'history', label:'History', hint:'Daily/character history and monthly backup records.',
+    count:function(s){ return (((s&&s.history)||[]).length) + (((s&&s.charHistory)||[]).length) + (((s&&s.monthlyBackups)||[]).length); },
+    has:function(d){ return !!(d && (Array.isArray(d.history) || Array.isArray(d.charHistory) || Array.isArray(d.monthlyBackups))); },
+    pick:function(s){ const o={};
+      if(s && Array.isArray(s.history)) o.history=s.history;
+      if(s && Array.isArray(s.charHistory)) o.charHistory=s.charHistory;
+      if(s && Array.isArray(s.monthlyBackups)) o.monthlyBackups=s.monthlyBackups;
+      return o; },
+    apply:function(tgt, d, mode){
+      if(Array.isArray(d.history)) tgt.history = (mode==='merge') ? _ioMergeLog(tgt.history, d.history) : d.history;
+      if(Array.isArray(d.charHistory)) tgt.charHistory = (mode==='merge') ? _ioMergeLog(tgt.charHistory, d.charHistory) : d.charHistory;
+      if(Array.isArray(d.monthlyBackups)) tgt.monthlyBackups = (mode==='merge') ? _ioMergeLog(tgt.monthlyBackups, d.monthlyBackups) : d.monthlyBackups;
+    } },
+
+  { key:'devices', label:'Devices', hint:'Known devices and deletion tombstones.',
+    count:function(s){ return (((s&&s.devices)||[]).length) + (((s&&s.deletions)||[]).length); },
+    has:function(d){ return !!(d && (Array.isArray(d.devices) || Array.isArray(d.deletions))); },
+    pick:function(s){ const o={};
+      if(s && Array.isArray(s.devices)) o.devices=s.devices;
+      if(s && Array.isArray(s.deletions)) o.deletions=s.deletions;
+      return o; },
+    apply:function(tgt, d, mode){
+      if(Array.isArray(d.devices)) tgt.devices = (mode==='merge') ? _ioMergeById(tgt.devices, d.devices) : d.devices;
+      // Tombstones are never merged away: dropping a deletion record resurrects a
+      // task the user deleted, so even Replace keeps the union of both sides.
+      if(Array.isArray(d.deletions)) tgt.deletions = _ioMergeLog(tgt.deletions, d.deletions);
+    } },
+
+  { key:'events', label:'Event log', hint:'Every tap, completion and subtask change.',
+    count:function(s){ return ((s && s.events)||[]).length; },
+    has:function(d){ return !!(d && Array.isArray(d.events)); },
+    pick:function(){ return {}; },  // events ride in their own envelope slot, not the snapshot
+    // Events are written to IndexedDB by the async union-add path in
+    // applyImportSections(), never from here. Both modes append; neither removes.
+    apply:function(){} }
+];
+function ioSectionByKey(k){
+  for(let i=0;i<IO_SECTIONS.length;i++){ if(IO_SECTIONS[i].key===k) return IO_SECTIONS[i]; }
+  return null;
+}
+function ioAllSectionKeys(){ return IO_SECTIONS.map(function(s){ return s.key; }); }
+function ioIsFullSelection(keys){
+  const sel={}; (keys||[]).forEach(function(k){ sel[k]=true; });
+  return IO_SECTIONS.every(function(s){ return !!sel[s.key]; });
+}
+// Build the export snapshot from only the ticked sections. Arrays contributed by
+// more than one section under the same key (the three task types all write
+// `tasks`) are concatenated, not overwritten.
+function sliceStateForExport(s, keys){
+  const sel={}; (keys||[]).forEach(function(k){ sel[k]=true; });
+  const out={};
+  if(s && s.version!=null) out.version = s.version;   // schema marker; join_exports.py reads it
+  IO_SECTIONS.forEach(function(sec){
+    if(!sel[sec.key]) return;
+    const part = sec.pick(s) || {};
+    for(const k in part){
+      const v = part[k];
+      if(Array.isArray(v) && Array.isArray(out[k])) out[k] = out[k].concat(v);
+      else out[k] = v;
+    }
+  });
+  return out;
+}
+// Which boxes does this FILE contain? A manifest (_backup.sections, written by
+// this build) is authoritative. Without one -- every legacy schema-1 and schema-2
+// full backup -- fall back to inspecting the payload, which is why has() keys off
+// container presence rather than item counts.
+function detectExportSections(data){
+  const out=[];
+  if(!data || typeof data!=='object') return out;
+  const man = (data._backup && Array.isArray(data._backup.sections)) ? data._backup.sections : null;
+  IO_SECTIONS.forEach(function(sec){
+    if(man){ if(man.indexOf(sec.key)!==-1) out.push(sec.key); return; }
+    if(sec.has(data)) out.push(sec.key);
+  });
+  return out;
+}
+// Item count for one section AS IT SITS IN A FILE. Same shape as count(), which
+// reads live state -- the file is just another state-shaped object.
+function countExportSection(key, data){
+  const sec = ioSectionByKey(key);
+  if(!sec || !data) return 0;
+  try{ return sec.count(data)||0; }catch(e){ return 0; }
+}
+// Apply the ticked sections of `data` onto `tgt` (live state) in the given mode.
+// Returns the same object. Sections NOT ticked are never read and never written,
+// which is the guarantee the import dialog makes to the user.
+function applySectionsToState(tgt, data, keys, mode){
+  const sel={}; (keys||[]).forEach(function(k){ sel[k]=true; });
+  IO_SECTIONS.forEach(function(sec){
+    if(!sel[sec.key]) return;
+    if(!sec.has(data)) return;
+    sec.apply(tgt, data, (mode==='merge') ? 'merge' : 'replace');
+  });
+  return tgt;
+}
+/* END_GRANULAR_IO_HELPERS */
+
+// `sectionKeys` omitted (or listing every section) reproduces the historic full
+// backup byte-for-byte: same filename prefix, same envelope, no partial flag, so
+// nothing downstream that already reads these files has to change.
+async function buildBackupFile(eventsArr, sectionKeys){
+  const keys = (Array.isArray(sectionKeys) && sectionKeys.length) ? sectionKeys.slice() : ioAllSectionKeys();
+  const isFull = ioIsFullSelection(keys);
+  const wantEvents = keys.indexOf('events') !== -1;
+  const evts = wantEvents ? (eventsArr||[]) : [];
+  const src = isFull ? S : sliceStateForExport(S, keys);
+  const backup=Object.assign({}, src, {events: evts});
   const _lastMs=function(arr){let mx=0;(arr||[]).forEach(x=>{const c=(x.createdAt||0),u=(x.updatedAt||0);if(c>mx)mx=c;if(u>mx)mx=u;});return mx;};
+  // Counts describe what is IN THE FILE, not what is on the device. On a partial
+  // export `src` is the slice, so a file holding only To-dos reports only those.
   backup._backup={ schema:2, exportedAt:new Date().toISOString(), appVersion:APP_VERSION,
-                   eventCount:(eventsArr||[]).length,
-                   items:{ tasks:(S.tasks||[]).length, rewards:(S.rewards||[]).length,
-                           tags:(S.tags||[]).length,
-                           views:((S.prefs&&S.prefs.an&&S.prefs.an.views)||[]).length,
-                           lastActivityAt:new Date(Math.max(_lastMs(S.tasks),_lastMs(S.rewards))||Date.now()).toISOString() } };
+                   eventCount:evts.length,
+                   items:{ tasks:(src.tasks||[]).length, rewards:(src.rewards||[]).length,
+                           tags:(src.tags||[]).length,
+                           views:((src.prefs&&src.prefs.an&&src.prefs.an.views)||[]).length,
+                           lastActivityAt:new Date(Math.max(_lastMs(src.tasks),_lastMs(src.rewards))||Date.now()).toISOString() } };
+  // The manifest is what makes a partial file self-describing: detectExportSections()
+  // trusts it over payload inspection, so a section the user ticked but that happened
+  // to be empty is still offered on import (and can therefore be Replaced with empty).
+  if(!isFull){
+    backup._backup.partial = true;
+    backup._backup.sections = keys;
+  }
   // Compute hash over the DETOKENIZED (legacy-shaped) backup string (without hash
   // field), then inject it. Hashing the detokenized form keeps the hash stable
   // across re-exports regardless of dictionary ordering, and keeps old schema-1
@@ -6295,8 +6804,10 @@ async function buildBackupFile(eventsArr){
     backup._backup.hash = hash;
   }catch(e){ /* hash optional; export proceeds without it */ }
   // Build the schema-2 tokenized envelope (tokenized form is export-only).
-  const tok = _tokenizeEvents(eventsArr||[]);
-  const snapTok = _tokenizeSnapshot(S);
+  // Tokenize the SLICE, not S: the envelope must carry exactly what the hash was
+  // computed over, or a partial export fails its own integrity gate on import.
+  const tok = _tokenizeEvents(evts);
+  const snapTok = _tokenizeSnapshot(src);
   const env = {
     _backup: backup._backup,
     K: tok.K, SRC: tok.SRC, TID: tok.TID, TT: tok.TT, FM: snapTok.FM,
@@ -6307,8 +6818,10 @@ async function buildBackupFile(eventsArr){
   const blob = new Blob([finalJson], {type:'application/json'});
   const d=new Date(); const p=(n)=>String(n).padStart(2,'0');
   const stamp=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
-  const filename = 'questa-backup-'+stamp+'.json';
-  return {blob, filename, eventCount: (eventsArr||[]).length};
+  // A partial file is named differently on purpose: it is NOT a backup, and the
+  // filename is the only thing the user sees in their downloads folder a year later.
+  const filename = (isFull ? 'questa-backup-' : 'questa-partial-')+stamp+'.json';
+  return {blob, filename, eventCount: evts.length, partial: !isFull, sections: keys};
 }
 
 function showExportChooser(blob, filename, eventCount) {
@@ -6394,7 +6907,117 @@ function exportSaveDevice(blob, filename, eventCount) {
   logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file via Download'});
 }
 
-function exportData(){
+// --- Section picker dialogs (export + import) --------------------------------
+// Both pickers render from IO_SECTIONS, so a new section appears in both dialogs
+// with no dialog code change. Checkbox state is held in a plain object and mutated
+// in place by the change handler rather than by repainting, so ticking a box never
+// steals focus or scrolls the list back to the top on a long list.
+function _ioRowsHTML(keys, counts, sel){
+  let h='<div class="ioPick">';
+  keys.forEach(function(k){
+    const sec = ioSectionByKey(k); if(!sec) return;
+    const n = counts[k];
+    h+='<label class="ioPickRow">'+
+       '<input type="checkbox" class="ioPickBox" data-iokey="'+esc(k)+'"'+(sel[k]?' checked':'')+'>'+
+       '<span class="ioPickMain"><strong>'+esc(sec.label)+'</strong>'+
+       '<span class="small">'+esc(sec.hint)+'</span></span>'+
+       '<span class="ioPickCount small">'+(n==null?'…':n)+'</span>'+
+       '</label>';
+  });
+  h+='</div>';
+  return h;
+}
+function _ioBindRows(sel, onChange){
+  const boxes = document.querySelectorAll('.ioPickBox');
+  for(let i=0;i<boxes.length;i++){
+    boxes[i].onchange = function(){
+      sel[this.getAttribute('data-iokey')] = this.checked;
+      if(onChange) onChange();
+    };
+  }
+}
+function _ioSetAll(sel, keys, val, onChange){
+  keys.forEach(function(k){ sel[k]=val; });
+  const boxes = document.querySelectorAll('.ioPickBox');
+  for(let i=0;i<boxes.length;i++) boxes[i].checked = val;
+  if(onChange) onChange();
+}
+function _ioSelected(sel, keys){ return keys.filter(function(k){ return !!sel[k]; }); }
+
+function showExportSectionPicker(){
+  const sheet = document.getElementById('sheet');
+  const keys = ioAllSectionKeys();
+  const sel = {}; keys.forEach(function(k){ sel[k]=true; });
+  const counts = {};
+  keys.forEach(function(k){
+    if(k==='events'){ counts[k]=null; return; }   // filled in async below
+    const sec = ioSectionByKey(k);
+    try{ counts[k] = sec.count(S)||0; }catch(e){ counts[k] = 0; }
+  });
+
+  let h = '<h3>What do you want to back up?</h3>';
+  h += '<div class="small" style="margin-bottom:10px">Everything is ticked, which writes a normal full backup. Untick a box to leave it out.</div>';
+  h += _ioRowsHTML(keys, counts, sel);
+  h += '<div class="settingsRow" style="margin-top:10px">'+
+       '<button class="btn ghost" id="ioExpAll">All</button>'+
+       '<button class="btn ghost" id="ioExpNone">None</button>'+
+       '<button class="btn ghost" id="ioExpGo">Continue</button>'+
+       '<button class="btn ghost" id="ioExpCancel">Cancel</button>'+
+       '</div>';
+  h += '<div class="small" id="ioExpNote" style="margin-top:8px"></div>';
+  sheet.innerHTML = h;
+
+  function refresh(){
+    const picked = _ioSelected(sel, keys);
+    const note = document.getElementById('ioExpNote');
+    const go = document.getElementById('ioExpGo');
+    if(go) go.disabled = (picked.length===0);
+    if(!note) return;
+    if(picked.length===0){
+      note.textContent = 'Tick at least one box.';
+    } else if(ioIsFullSelection(picked)){
+      note.textContent = 'Full backup · questa-backup-….json';
+    } else {
+      note.textContent = 'Partial export · questa-partial-….json · restores only the ticked boxes.';
+    }
+  }
+  _ioBindRows(sel, refresh);
+  document.getElementById('ioExpAll').onclick = function(){ _ioSetAll(sel, keys, true, refresh); };
+  document.getElementById('ioExpNone').onclick = function(){ _ioSetAll(sel, keys, false, refresh); };
+  document.getElementById('ioExpCancel').onclick = function(){ closeSheet(); };
+  document.getElementById('ioExpGo').onclick = function(){
+    const picked = _ioSelected(sel, keys);
+    if(!picked.length) return;
+    runExport(picked);
+  };
+  refresh();
+  // Event count needs IndexedDB, so the row shows an ellipsis until it lands. A
+  // failure leaves the ellipsis rather than a wrong "0" the user would read as
+  // "my history is gone".
+  if(typeof countEvents === 'function'){
+    countEvents().then(function(n){
+      counts.events = n;
+      const rows = document.querySelectorAll('.ioPickRow');
+      for(let i=0;i<rows.length;i++){
+        const box = rows[i].querySelector('.ioPickBox');
+        if(box && box.getAttribute('data-iokey')==='events'){
+          const c = rows[i].querySelector('.ioPickCount');
+          if(c) c.textContent = String(n);
+        }
+      }
+    }).catch(function(){});
+  }
+  document.getElementById('scrim').classList.add('show');
+}
+
+// Public entry point kept under its historic name: the Settings button, and
+// anything else already wired to it, now opens the picker instead of exporting
+// straight away.
+function exportData(){ showExportSectionPicker(); }
+
+function runExport(sectionKeys){
+  const keys = (Array.isArray(sectionKeys) && sectionKeys.length) ? sectionKeys : ioAllSectionKeys();
+  const wantEvents = keys.indexOf('events') !== -1;
   // backups are for debugging: user-facing export downloads must include
   // diagnostic-kind events, not just the Activity-Feed-visible subset.
   //
@@ -6413,10 +7036,15 @@ function exportData(){
   //      chooser (missing DOM node, navigator.canShare throwing) discarded the
   //      real backup and re-opened the chooser with a 0-event one. The recovery
   //      path now wraps only the build, never the chooser.
-  Promise.all([ getEvents({includeDiag:true}), countEvents().catch(()=>null) ])
+  //
+  // 2026-09-18 (granular): when the Event log box is UNTICKED the store is never
+  // read, so the short-read guard below has nothing to guard and must not fire —
+  // otherwise leaving events out would always prompt "0 of 7,250 events missing".
+  Promise.all([ wantEvents ? getEvents({includeDiag:true}) : Promise.resolve([]),
+                wantEvents ? countEvents().catch(()=>null) : Promise.resolve(null) ])
     .then(([events, stored]) => {
       const got = (events||[]).length;
-      if(stored != null && got < stored){
+      if(wantEvents && stored != null && got < stored){
         const missing = stored - got;
         return confirmDialog('Incomplete backup',
           'Only ' + got + ' of ' + stored + ' events could be read from this device (' +
@@ -6430,8 +7058,17 @@ function exportData(){
     })
     .then(events => {
       if(events === null) return null;             // user declined a short export
-      return buildBackupFile(events)
-        .catch(() => buildBackupFile([]));          // build failed -> empty shell, still labelled
+      // 2026-09-18 (round 2): NO empty-shell fallback. This used to be
+      // `.catch(() => buildBackupFile([]))`, which turned any build failure — a
+      // RangeError from JSON.stringify on a huge store, an OOM in new Blob() on a
+      // low-memory phone — into a backup containing ZERO events, stamped
+      // `_backup.eventCount: 0`, handed to the chooser as a normal success. It
+      // passed its own hash gate, exportSaveDevice toasted a plain "Exported"
+      // because 0 is falsy, lastExportTs was stamped and the staleness nag cleared.
+      // That is precisely the undetectable-truncation failure the guard above asks
+      // the user about, taken to 100% loss. Let it reach the outer .catch, which
+      // already shows an Export Error dialog and pushes a diagnostic.
+      return buildBackupFile(events, keys);
     })
     .then(res => { if(res) showExportChooser(res.blob, res.filename, res.eventCount); })
     .catch(e => {
@@ -6439,6 +7076,189 @@ function exportData(){
       alertDialog('Export Error', 'Could not create the backup file: ' + ((e && e.message) || String(e)));
     });
 }
+// --- Granular import ---------------------------------------------------------
+// Applies ONLY the ticked sections of `data`, in the chosen mode. A section the
+// user left unticked is never read and never written -- that is the promise the
+// import dialog makes, and it is the whole reason offering a partial restore is
+// safe. Async so the caller can report a failure exactly once, in one place.
+async function applyImportSections(data, keys, mode){
+  const sel = {}; (keys||[]).forEach(function(k){ sel[k]=true; });
+  const full = ioIsFullSelection(keys||[]);
+  const replacing = (mode !== 'merge');
+  const embeddedEvents = (sel.events && Array.isArray(data.events)) ? data.events : null;
+
+  if(full && replacing){
+    // Every box ticked + Replace is the historic whole-file import, kept verbatim
+    // including the clobber-guard reset: an imported backup legitimately carries a
+    // lower (or absent) __seq, which save() would otherwise read as "a newer writer
+    // exists" and discard the import.
+    S = migrate(data);
+    delete S.__seq;
+    try{ localStorage.removeItem(STORE_KEY + ".seq"); }catch(e){}
+  } else {
+    // Anything narrower keeps the LIVE object as the base, so __seq, the HLC and
+    // every unticked key survive by construction, and there is no clobber to guard
+    // against -- on this path the local writer really is the newest one.
+    applySectionsToState(S, data, keys, replacing ? 'replace' : 'merge');
+    S = migrate(S);
+  }
+  save(); applyWidth(); applyCardThick(); closeSheet(); render();
+
+  if(embeddedEvents && typeof indexedDB!=="undefined"){
+    // Read the existing local event store BEFORE reparenting, same house
+    // pattern as confirmRestore(): getEvents() reads IndexedDB directly and is
+    // unaffected by the S/migrate() reassignment above, so this is read first
+    // purely to capture the pre-import baseline.
+    // Union-insert only -- clearAllEvents() must NEVER be called on this path;
+    // that used to wipe every local event absent from the import. Neither Replace
+    // nor Merge removes an event: the Event log box means "add these", never
+    // "make my log look like this file".
+    const existing = await getEvents({includeDiag:true});
+    // uid -> content signature, not a bare uid Set: eventMergeFilter() needs the
+    // signature of the record ALREADY holding a uid so it can tell a real
+    // duplicate from a hash collision (see eventUidOf()).
+    const existingUidSet = new Map(); const existingSigSet = new Set();
+    (existing||[]).forEach(r=>{ const s = eventMergeSig(r); if(r && r.uid) existingUidSet.set(r.uid, s); existingSigSet.add(s); });
+    const reparented = reparentEventsForImport(embeddedEvents);
+    const impSum = eventImportSummary(reparented);
+    // The signature key (eventMergeSig; ts/kind/taskId/dir/reps) is MANDATORY
+    // here, not optional: reparentEventsForImport() above overwrites e.dev to
+    // THIS device and rehashes e.uid via eventUidOf(), which hashes dev as one
+    // of its input fields. A foreign event that already arrived locally via sync
+    // carries its ORIGINATING device's uid, while the SAME logical event coming
+    // in via THIS import path gets a fresh 'rep-...' uid -- the two never
+    // uid-match, so uid-only dedup would let the duplicate through.
+    // Residual, accepted risk: the signature (ts,kind,taskId,dir,reps) could in
+    // principle collide for two genuinely distinct taps on the same
+    // task/direction/rep-count within the same millisecond -- not real user
+    // behaviour.
+    const merge = eventMergeFilter(reparented, existingUidSet, existingSigSet);
+    const add = merge.add, skipped = merge.skipped;
+    // Report what bulkAddEvents ACTUALLY wrote. It returns {added, failed,
+    // aborted} on every path including its four failure paths; using add.length
+    // instead told a user whose IndexedDB quota was exhausted that 4000 events
+    // were restored when zero were, so they deleted the backup file.
+    const bulkRes = await bulkAddEvents(add);
+    const added = (bulkRes && typeof bulkRes.added === 'number') ? bulkRes.added : add.length;
+    const note = 'Restored ' + added + ' events (' + eventImportSummaryText(impSum) + '; ' + skipped + ' already present, skipped) [' +
+                 (full ? 'all sections' : keys.join('+')) + '; ' + (replacing ? 'replace' : 'merge') + ']';
+    logEvent({kind: 'import', taskTitle: 'Import Data', notes: note});
+    toast('Imported \u00b7 ' + added + ' events restored');
+    if(bulkRes && (bulkRes.aborted || bulkRes.failed)){
+      alertDialog('Import incomplete',
+        'The sections you picked were restored, but only ' + added + ' of ' + add.length +
+        ' events could be written to this device. Keep your backup file and free up storage, then import again.',
+        eventImportSummaryHTML(impSum));
+    } else {
+      alertDialog('Import complete',
+        added + ' events restored to this device.',
+        eventImportSummaryHTML(impSum));
+    }
+    if(TAB==='analytics') render();
+    // F-import: run the same startup day-rollover the app runs on normal load
+    // (app.js startDay) so imported dailies get reset / the missed-yesterday
+    // prompt fires if the device calendar has advanced. Without this, importing
+    // a state that still carried done:true dailies from a prior day showed stale
+    // "yesterday" completion with no start-of-day correction.
+    startDay();
+  } else {
+    const what = full ? 'Imported from backup'
+                      : ('Imported sections: ' + keys.join('+') + ' (' + (replacing ? 'replace' : 'merge') + ')');
+    logEvent({kind: 'import', taskTitle: 'Import Data', notes: what});
+    toast('Imported');
+    if(TAB==='analytics') render();
+    if(!full){
+      alertDialog('Import complete',
+        'Restored: ' + keys.map(function(k){ const s=ioSectionByKey(k); return s?s.label:k; }).join(', ') +
+        '.\n\nEverything else on this device was left as it was.');
+    }
+    startDay();
+  }
+}
+
+// The import counterpart of showExportSectionPicker(). Offers only the sections
+// the FILE actually contains, names the ones it does not, and makes the user pick
+// Replace or Merge before anything is touched.
+function showImportSectionPicker(data, detected){
+  const sheet = document.getElementById('sheet');
+  const keys = (detected||[]).slice();
+  const sel = {}; keys.forEach(function(k){ sel[k]=true; });
+  const counts = {}; keys.forEach(function(k){ counts[k] = countExportSection(k, data); });
+  const missing = ioAllSectionKeys().filter(function(k){ return keys.indexOf(k)===-1; });
+  const isPartialFile = !!(data._backup && data._backup.partial);
+  const MODE = {v:'replace'};
+
+  let h = '<h3>What do you want to restore?</h3>';
+  h += '<div class="small" style="margin-bottom:10px">'+
+       (isPartialFile ? 'This is a partial export. ' : 'This is a full backup. ')+
+       'Only the parts found in the file are listed. Everything is ticked; untick anything you want to keep as it is now.</div>';
+  h += _ioRowsHTML(keys, counts, sel);
+  if(missing.length){
+    h += '<div class="small" style="margin-top:8px">Not in this file, so it will not be touched: '+
+         esc(missing.map(function(k){ const s=ioSectionByKey(k); return s?s.label:k; }).join(', '))+'.</div>';
+  }
+  h += '<div class="colTitle" style="margin-top:12px"><h2 style="font-size:13px;flex:none">How should it be applied?</h2></div>';
+  h += '<div class="ioPick">'+
+       '<label class="ioPickRow"><input type="radio" class="ioModeRadio" name="ioImpMode" value="replace" checked>'+
+       '<span class="ioPickMain"><strong>Replace</strong><span class="small">Each ticked part is swapped for the copy in the file. Unticked parts stay exactly as they are now.</span></span></label>'+
+       '<label class="ioPickRow"><input type="radio" class="ioModeRadio" name="ioImpMode" value="merge">'+
+       '<span class="ioPickMain"><strong>Merge</strong><span class="small">Nothing is removed. Items are matched by id and the newer one wins; anything that exists only on this device is kept.</span></span></label>'+
+       '</div>';
+  h += '<div class="settingsRow" style="margin-top:10px">'+
+       '<button class="btn ghost" id="ioImpAll">All</button>'+
+       '<button class="btn ghost" id="ioImpNone">None</button>'+
+       '<button class="btn ghost" id="ioImpGo">Import</button>'+
+       '<button class="btn ghost" id="ioImpCancel">Cancel</button>'+
+       '</div>';
+  h += '<div class="small" id="ioImpNote" style="margin-top:8px"></div>';
+  sheet.innerHTML = h;
+
+  function refresh(){
+    const picked = _ioSelected(sel, keys);
+    const note = document.getElementById('ioImpNote');
+    const go = document.getElementById('ioImpGo');
+    if(go) go.disabled = (picked.length===0);
+    if(!note) return;
+    if(picked.length===0){ note.textContent = 'Tick at least one part.'; return; }
+    let t = picked.length + (picked.length===1 ? ' part' : ' parts') + ' \u00b7 ' + (MODE.v==='merge' ? 'Merge' : 'Replace') + '.';
+    if(sel.events) t += ' Your event log is only added to, never cleared.';
+    note.textContent = t;
+  }
+  _ioBindRows(sel, refresh);
+  const radios = document.querySelectorAll('.ioModeRadio');
+  for(let i=0;i<radios.length;i++){
+    radios[i].onchange = function(){ if(this.checked) MODE.v = this.value; refresh(); };
+  }
+  document.getElementById('ioImpAll').onclick = function(){ _ioSetAll(sel, keys, true, refresh); };
+  document.getElementById('ioImpNone').onclick = function(){ _ioSetAll(sel, keys, false, refresh); };
+  document.getElementById('ioImpCancel').onclick = function(){ closeSheet(); };
+  document.getElementById('ioImpGo').onclick = function(){
+    const picked = _ioSelected(sel, keys);
+    if(!picked.length) return;
+    const label = picked.length + (picked.length===1 ? ' part' : ' parts');
+    confirmDialog('Import',
+      (MODE.v==='merge'
+        ? 'Merge ' + label + ' from this file into your current data? Nothing will be removed.'
+        : 'Replace ' + label + ' with the copy in this file? Anything you did not tick stays as it is.')
+    ).then(function(ok){
+      if(!ok) return;
+      return applyImportSections(data, picked, MODE.v);
+    }).catch(function(e){
+      // The outer try/catch around importData only covers the SYNCHRONOUS parse +
+      // hash gate. Everything below runs in an async callback whose promise would
+      // otherwise be discarded, so a throw after the state was already replaced
+      // left the live state persisted, the event store untouched, the sheet closed
+      // and startDay() never run -- with no dialog, no toast and nothing in the log.
+      try{ if(typeof _qDiagPush === "function") _qDiagPush('importFailed', { error: (e && e.message) || String(e) }); }catch(_){}
+      alertDialog('Import Error',
+        'The import did not finish: ' + ((e && e.message) || String(e)) +
+        '\n\nSome of your data may already have been replaced. Keep your backup file and try importing it again.');
+    });
+  };
+  refresh();
+  document.getElementById('scrim').classList.add('show');
+}
+
 function importData(ev){
   const f=ev.target.files[0]; if(!f)return;
   const rd=new FileReader();
@@ -6456,95 +7276,16 @@ function importData(ev){
       } else {
         data = parsed;
       }
-      if(!data.char||!Array.isArray(data.tasks)) throw 0;
-      const doImport = () => {
-        const embeddedEvents = Array.isArray(data.events) ? data.events : null;
-        confirmDialog('Import Progress', 'Replace current progress with the imported file?').then(async ok => {
-          if(!ok) return;
-          // 2026-09-18: same clobber-guard reset as confirmRestore() — an imported
-          // backup legitimately carries a lower (or absent) __seq, which save()
-          // would otherwise read as "a newer writer exists" and discard the import.
-          S=migrate(data);
-          delete S.__seq;
-          try{ localStorage.removeItem(STORE_KEY + ".seq"); }catch(e){}
-          save(); applyWidth(); applyCardThick(); closeSheet(); render();
-          if(embeddedEvents && typeof indexedDB!=="undefined"){
-            // Read the existing local event store BEFORE reparenting, same house
-            // pattern as confirmRestore() (~5626): getEvents() reads IndexedDB
-            // directly and is unaffected by the S/migrate() reassignment above,
-            // so this is read first purely to capture the pre-import baseline.
-            // Union-insert only -- clearAllEvents() must NEVER be called on this
-            // path; that used to wipe every local event absent from the import.
-            const existing = await getEvents({includeDiag:true});
-            // uid -> content signature, not a bare uid Set: eventMergeFilter()
-            // needs the signature of the record ALREADY holding a uid so it can
-            // tell a real duplicate from a hash collision (see eventUidOf()).
-            const existingUidSet = new Map(); const existingSigSet = new Set();
-            (existing||[]).forEach(r=>{ const s = eventMergeSig(r); if(r && r.uid) existingUidSet.set(r.uid, s); existingSigSet.add(s); });
-            const reparented = reparentEventsForImport(embeddedEvents);
-            const impSum = eventImportSummary(reparented);
-            // The signature key (eventMergeSig; ts/kind/taskId/dir/reps) is
-            // MANDATORY here, not optional: reparentEventsForImport() above
-            // overwrites e.dev to THIS device and rehashes e.uid via
-            // eventUidOf(), which hashes dev as one of its input fields. A
-            // foreign event that already arrived locally via sync carries its
-            // ORIGINATING device's uid, while the SAME logical event coming in
-            // via THIS import path gets a fresh 'rep-...' uid -- the two never
-            // uid-match, so uid-only dedup would let the duplicate through.
-            // Residual, accepted risk: the signature (ts,kind,taskId,dir,reps)
-            // could in principle collide for two genuinely distinct taps on the
-            // same task/direction/rep-count within the same millisecond -- not
-            // real user behaviour.
-            const merge = eventMergeFilter(reparented, existingUidSet, existingSigSet);
-            const add = merge.add, skipped = merge.skipped;
-            // 2026-09-18: report what bulkAddEvents ACTUALLY wrote. It returns
-            // {added, failed, aborted} on every path including its four failure
-            // paths; using add.length instead told a user whose IndexedDB quota was
-            // exhausted that 4000 events were restored when zero were, so they
-            // deleted the backup file. confirmRestore() already reads the result.
-            const bulkRes = await bulkAddEvents(add);
-            const added = (bulkRes && typeof bulkRes.added === 'number') ? bulkRes.added : add.length;
-            const note = 'Restored ' + added + ' events (' + eventImportSummaryText(impSum) + '; ' + skipped + ' already present, skipped)';
-            logEvent({kind: 'import', taskTitle: 'Import Data', notes: note});
-            toast('Imported \u00b7 ' + added + ' events restored');
-            if(bulkRes && (bulkRes.aborted || bulkRes.failed)){
-              alertDialog('Import incomplete',
-                'Your tasks and character were restored, but only ' + added + ' of ' + add.length +
-                ' events could be written to this device. Keep your backup file and free up storage, then import again.',
-                eventImportSummaryHTML(impSum));
-            } else {
-              alertDialog('Import complete',
-                added + ' events restored to this device.',
-                eventImportSummaryHTML(impSum));
-            }
-            if(TAB==='analytics') render();
-            // F-import: run the same startup day-rollover the app runs on
-            // normal load (app.js startDay) so imported dailies get reset /
-            // the missed-yesterday prompt fires if the device calendar has
-            // advanced. Without this, importing a state that still carried
-            // done:true dailies from a prior day showed stale "yesterday"
-            // completion with no start-of-day correction.
-            startDay();
-          } else {
-            logEvent({kind: 'import', taskTitle: 'Import Data', notes: 'Imported from backup'});
-            toast('Imported');
-            if(TAB==='analytics') render();
-            startDay();
-          }
-        }).catch(e => {
-          // 2026-09-18: the outer try/catch around importData only covers the
-          // SYNCHRONOUS parse + hash gate. Everything above runs in an async
-          // callback whose promise was discarded, so a throw after `S=migrate(data)`
-          // left the live state already replaced and persisted, the event store
-          // untouched, the sheet closed and startDay() never run — with no dialog,
-          // no toast and nothing in the log. confirmRestore already wraps the same
-          // work; this brings importData in line.
-          try{ if(typeof _qDiagPush === "function") _qDiagPush('importFailed', { error: (e && e.message) || String(e) }); }catch(_){}
-          alertDialog('Import Error',
-            'The import did not finish: ' + ((e && e.message) || String(e)) +
-            '\n\nYour tasks and character may already have been replaced. Keep your backup file and try importing it again.');
-        });
-      };
+      const detected = detectExportSections(data);
+      // Was `if(!data.char||!Array.isArray(data.tasks)) throw 0;`. That gate refused
+      // every legitimate partial export -- a file holding only To-dos has no `char`
+      // and carries no `tasks` array at all. A file is valid when it carries AT LEAST
+      // ONE recognised section. detectExportSections() trusts the _backup.sections
+      // manifest when one is present and otherwise infers the sections from the
+      // payload, so legacy schema-1 files and schema-2 full backups pass exactly as
+      // they did before, and both are now granularly importable.
+      if(!detected.length) throw 0;
+      const doImport = () => { showImportSectionPicker(data, detected); };
       // Hash check: re-stringify the DETOKENIZED legacy-shaped object. For
       // schema-2 this is the same canonical form that buildBackupFile hashed
       // (it hashes the legacy-shaped backup, not the tokenized envelope).
@@ -6676,6 +7417,7 @@ async function confirmRestore(id){
 
     // Apply state
     S = migrate(stateSnapshot);
+    if(typeof _adoptStateStamps==='function') _adoptStateStamps();   // 2026-09-18 round 2 — see _adoptStateStamps
     // 2026-09-18: a restore deliberately installs an OLDER __seq (snapshots carry
     // the whole state, __seq included). save()'s multi-tab clobber guard reads a
     // lower __seq as "another tab wrote something newer", re-adopts the pre-restore
@@ -6859,6 +7601,14 @@ window.addEventListener('touchend', () => { if (typeof _tActive !== 'undefined' 
 window.addEventListener('touchcancel', () => { if (typeof _tActive !== 'undefined' && _tActive) endTouchDrag(); }, { passive: true });
 applyWidth();
 applyCardThick();
+// 2026-09-18 (round 2): if load() could not read the stored state, say so. The
+// original bytes are kept under LOAD_FAILED.key so they can still be recovered by
+// hand; without this the user just saw a brand-new empty character.
+if(LOAD_FAILED){
+  setTimeout(function(){
+    try{ toast('Saved data could not be read. The original is kept in this browser as "' + LOAD_FAILED.key + '". Restore a backup before adding anything.'); }catch(e){}
+  }, 600);
+}
 bootStartDay(); // D3 todo 13: gates only the day-rollover decision, never the paint
 updateHeaderHeightVar();
 if('serviceWorker' in navigator){

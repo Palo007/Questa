@@ -58,6 +58,7 @@ function syncCfgDefaults(){
     lastRev: null,
     lastSyncAt: null,
     lastError: null,
+    lastBackupError: null,   // auto-backup failures only; never clobbers lastError (2026-09-18 round 2)
     deviceId: null,
     evtLastUploadTs: 0,   // watermark: max ts of own events already uploaded
     evtFileRevs: {},      // filename -> Dropbox rev of last successfully PARSED+INSERTED pull
@@ -175,9 +176,26 @@ async function syncHandleRedirect(){
     // consent screen (?error=access_denied). The verifier used to survive here
     // forever, and the ?error= querystring stayed in the address bar across reloads
     // because the cleanup below only ran on success. Clear both.
-    try{ localStorage.removeItem(PKCE_KEY); }catch(e){}
+    // 2026-09-18 (round 2): this branch is also taken on EVERY ordinary boot, because
+    // syncInit() calls syncHandleRedirect() unconditionally and a normal load has no
+    // ?code=. Clearing the verifier there destroyed an in-flight connect started in
+    // another tab: tab A navigates to the consent screen, tab B reloads (refresh, SW
+    // update, tab restore), tab B wipes PKCE_KEY, and tab A returns with a code it
+    // can no longer exchange -- silently, since this path writes no lastError. Only
+    // clear when this load really is an OAuth return.
+    // The stale force-push intent is still dropped on EVERY load — that is the
+    // documented behaviour (T4/T8 in tests/force-push-on-connect.test.js, and
+    // syncInit clears it on a normal load too). Only the PKCE secret is protected.
     try{ localStorage.removeItem("questa.sync.pendingForcePush"); }catch(e){}
-    try{ if(params.get("error")) history.replaceState(null, "", location.pathname); }catch(e){}
+    const _isOAuthReturn = !!(code || params.get("error"));
+    if(_isOAuthReturn){
+      try{ localStorage.removeItem(PKCE_KEY); }catch(e){}
+      // ...and strip the querystring for a ?code= too, not just ?error=. A failed
+      // exchange used to leave the authorization code in the address bar, in history,
+      // in any bookmark or PWA shortcut made from there, and in the Referer of every
+      // later outbound request, across every future reload.
+      try{ history.replaceState(null, "", location.pathname); }catch(e){}
+    }
     return;
   }
 
@@ -232,6 +250,10 @@ async function syncHandleRedirect(){
   }catch(e){
     try{ localStorage.removeItem(PKCE_KEY); }catch(e2){}
     localStorage.removeItem("questa.sync.pendingForcePush"); // never leave a sticky force-push intent behind on failure
+    // 2026-09-18 (round 2): the success path strips the querystring; this one did
+    // not, so a failed exchange left ?code=<authorization code> in the address bar
+    // permanently. Strip it here too -- the code is spent either way.
+    try{ history.replaceState(null, "", location.pathname); }catch(e2){}
     syncCfgSave({ lastError: "connect failed: " + (e && e.message || e) });
     if(typeof toast === "function") toast("Dropbox connect failed");
   }
@@ -409,7 +431,15 @@ function syncDisconnect(){
   const cfg = syncCfg();
   syncCfgSave(Object.assign(syncCfgDefaults(), {
     deviceId: cfg.deviceId || null,
-    lastSyncAt: cfg.lastSyncAt || null
+    lastSyncAt: cfg.lastSyncAt || null,
+    // 2026-09-18 (round 2): these two describe REMOTE content, not credentials, and
+    // deviceId is deliberately preserved -- so after a reconnect this device pushes
+    // to the very same <deviceId>-<YYYYMM>.json filenames. Resetting them to {}
+    // disarmed the event-push shrink guard (`const known = fileCounts[fname]; if
+    // (known != null ...)`), so a locally shrunken month would overwrite a fuller
+    // remote file with no diagnostic. Nothing on the pull side ever repopulates them.
+    evtFileCounts: cfg.evtFileCounts || {},
+    evtPushBlocked: cfg.evtPushBlocked || {}
   }));
   // 2026-09-18: also drop the one-shot OAuth leftovers. The PKCE verifier is a
   // secret for a single in-flight authorize/exchange pair; disconnecting used to
@@ -514,8 +544,16 @@ function syncApply(subset){
     }
     if(subset.pause){
       S.prefs.paused = !!subset.pause.paused;
-      S.prefs.pausedDays = Array.isArray(subset.pause.pausedDays) ? subset.pause.pausedDays.slice() : [];
-      S.prefs.pausedAt = subset.pause.at || 0;
+      // 2026-09-18 (round 2): the absent-key rule above listed `pause` among the keys
+      // that "correctly preserve local". It did not. A /state.json written by a build
+      // predating pausedDays -- or hand-edited in the user's own Dropbox folder --
+      // reached _syncForcePullAttempt's syncApply(raw remote) and wiped pausedDays to
+      // []. runCron's _cov cover then vanished, so every daily left unticked during
+      // the pause took miss damage and lost its streak, and mergePause's union of
+      // three now-empty lists made it unrecoverable. `at` was a clamp-to-0 of a
+      // timestamp on top of that -- the polarity this repo treats as a hard rule.
+      S.prefs.pausedDays = Array.isArray(subset.pause.pausedDays) ? subset.pause.pausedDays.slice() : (S.prefs.pausedDays || []);
+      if(subset.pause.at) S.prefs.pausedAt = subset.pause.at;
     }
     const _after = (typeof syncSubset === "function") ? stableStringify(syncSubset()) : null;
     const _changed = (_before === null || _after === null) ? true : (_before !== _after);
@@ -706,7 +744,14 @@ function _isCronEchoReset(l, r){
   if(_uaRaw(l) !== _uaRaw(r)) return false;        // a real edit always bumps updatedAt
   const da = Number(r.doneAt) || 0;
   if(!da) return false;                            // doneAt retracted -> a real un-tick
-  return dayStampOf(da) >= dayStampOf(Date.now()); // completion still current HERE
+  // 2026-09-18 (round 2): use the FROZEN completion day, not a re-derivation of
+  // doneAt in the merging device's timezone. doneDayOf() was introduced for exactly
+  // this and applied to resolveDailyConflict and normalizeDailyResets; this third
+  // sibling was left on the old derivation, so the two could disagree about whether
+  // the same record is current. A completion recorded 26h ago on a device 13h ahead
+  // has doneDay == TODAY but dayStampOf(doneAt) == TODAY-1: normalizeDailyResets kept
+  // it while this guard declined, and the echo erased it.
+  return doneDayOf(r) >= dayStampOf(Date.now()); // completion still current HERE
 }
 
 // ---- F4 (2026-07-11) subtask-granular merge --------------------------------
@@ -1019,7 +1064,16 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
           let w = l;
           if(Array.isArray(l && l.checklist) || Array.isArray(r && r.checklist)){
             // still merge subtasks so a remote toggle is not lost (F4 parity)
-            w = Object.assign({}, l, { checklist: mergeChecklist(b && b.checklist, (l&&l.checklist)||[], (r&&r.checklist)||[], true) });
+            // 2026-09-18 (round 2): pass NO base. This branch requires !localChanged,
+            // so `l` is deep-equal to `b` by construction -- handing `b` in makes
+            // mergeChecklist read every remote/local subtask difference as "remote
+            // changed, local didn't" and adopt the remote value one-sidedly, without
+            // ever consulting touchedAt. GUARD 1 has just declared this base
+            // unreliable; using it as the per-subtask authority let a demonstrably
+            // OLDER remote revert a tick, which is what the guard exists to prevent.
+            // With base absent, both-present items fall to the touchedAt comparison
+            // (newer edit wins) and no id can be inferred as a deletion.
+            w = Object.assign({}, l, { checklist: mergeChecklist(null, (l&&l.checklist)||[], (r&&r.checklist)||[], true) });
           }
           resultMap.set(id, w);
         } else {
@@ -1064,15 +1118,38 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
         winner = luc > ruc ? l : r;
       }
     }
+    // 2026-09-18 (round 2): capture the winner's identity ONCE, before the two
+    // Object.assign rebuilds below. Both the checklist splice and _accumCounters
+    // return a fresh object, so a later `winner === l` test is false for every task
+    // that carries a checklist or habit counters -- i.e. every todo, every daily and
+    // every habit. The conflictResolved event therefore always reported "remote won"
+    // and swapped winnerDev/loserDev. tests/conflict-attribution.test.js T5 missed it
+    // because its fixture is a checklist-less todo, so identity happened to survive.
+    const _winIsLocal = (winner === l);
     // F4 (2026-07-11): the whole-object winner above still discards the
     // OTHER side's checklist wholesale. Splice in a per-subtask merge
     // whenever either side carries a checklist array (todos and dailies;
     // habits carry an always-empty one; rewards/tags/an.views/an.metrics have
     // no checklist field at all, so Array.isArray guards them out here --
     // this is intentionally NOT gated on task `type`).
+    //
+    // K5 (2026-09-18, round 2): GUARD 2's cron-echo rule has to hold HERE too.
+    // _isCronEchoReset is only consulted in the one-sided branch above, but the
+    // moment the user ALSO edits the task locally (toggleSub and every other edit
+    // bumps updatedAt) control lands in this both-changed branch instead. The splice
+    // then reads every subtask the echo flipped as "remote changed, local didn't"
+    // and takes the remote's false -- re-clearing the very ticks GUARD 2 exists to
+    // save. normalizeDailyResets clears the ENTIRE checklist when it resets, so the
+    // echo side holds no real subtask edit to preserve: keep the completed side's
+    // list wholesale, exactly as GUARD 2 does.
+    let _echoKeep = null;
+    if(_isCronEchoReset(l, r)) _echoKeep = l;
+    else if(_isCronEchoReset(r, l)) _echoKeep = r;
     if(Array.isArray(l && l.checklist) || Array.isArray(r && r.checklist)){
       winner = Object.assign({}, winner, {
-        checklist: mergeChecklist(b && b.checklist, (l && l.checklist) || [], (r && r.checklist) || [], winner === l)
+        checklist: _echoKeep
+          ? ((_echoKeep.checklist || []).map(c => Object.assign({}, c)))
+          : mergeChecklist(b && b.checklist, (l && l.checklist) || [], (r && r.checklist) || [], _winIsLocal)
       });
     }
     // K3 (2026-09-11): same shape as the F4 splice above -- the whole-object winner also
@@ -1094,7 +1171,7 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
       // Legacy winner/loser stay so older readers keep rendering.
       const _cLd = _localDev;
       const _cRd = (remoteDeviceId != null) ? remoteDeviceId : null;
-      logEvent({kind:'conflictResolved', taskType:(winner&&winner.type)||'task', taskId:id, taskTitle:(winner&&winner.title)||'', winner:(winner===l)?'local':'remote', loser:(winner===l)?'remote':'local', winnerDev:(winner===l)?_cLd:_cRd, loserDev:(winner===l)?_cRd:_cLd, reason:'updatedAt recency'});
+      logEvent({kind:'conflictResolved', taskType:(winner&&winner.type)||'task', taskId:id, taskTitle:(winner&&winner.title)||'', winner:_winIsLocal?'local':'remote', loser:_winIsLocal?'remote':'local', winnerDev:_winIsLocal?_cLd:_cRd, loserDev:_winIsLocal?_cRd:_cLd, reason:'updatedAt recency'});
     }
     resultMap.set(id, winner);
     return;
@@ -1417,12 +1494,24 @@ function _cntBaseline(baseVal, baseAbs, otherAbs, key){
 // "no absorbed record applies, measure from the shared base".
 function _accumCounter(bv, lv, rv, lReset, rReset, lBaseIn, rBaseIn){
   const b = Math.max(0, _num(bv)), l = Math.max(0, _num(lv)), r = Math.max(0, _num(rv));
+  // 2026-09-18 (round 2): the per-side absorbed baselines are computed BEFORE the
+  // legacy branch now. They used to be derived below it, so the whole conflict-retry
+  // watermark guard was inert for every record whose base carries no cResetOn --
+  // which is every habit created since the last cron, and every weekly/monthly-reset
+  // habit for up to a month. Measured on the real merge: base cUp 0, local 5,
+  // remote 3 gave 8, then 11, then 14, then 17 across the retry limit. With the
+  // marker present the same inputs stayed at 8.
+  const lb = (lBaseIn == null) ? b : Math.max(0, _num(lBaseIn));
+  const rb = (rBaseIn == null) ? b : Math.max(0, _num(rBaseIn));
   if(lReset == null || rReset == null){
-    // Pre-2026-09-18 behaviour, kept verbatim for records whose base carries no
-    // reset marker (data written before this build, or before the first cron
-    // after upgrading). It infers a reset from `value < base` on BOTH sides.
-    const eff = (l < b && r < b) ? 0 : b;
-    return Math.max(eff + Math.max(0, l - eff) + Math.max(0, r - eff), l, r);
+    // Pre-2026-09-18 behaviour for records whose base carries no reset marker (data
+    // written before this build, or before the first cron after upgrading): infer a
+    // reset from "value below its own baseline" on BOTH sides. With no absorbed
+    // record lb === rb === b, so this is byte-for-byte the old arithmetic; the
+    // baselines only bite on a retry, where they are exactly what stops the
+    // peer's contribution being counted twice.
+    if(l < lb && r < rb) return Math.max(l + r, l, r);   // both restarted from 0
+    return Math.max(b + Math.max(0, l - lb) + Math.max(0, r - rb), l, r);
   }
   // A side that reset started its new period from 0, so its whole current value is
   // new taps; a side that did not reset has `base` already inside its value. The
@@ -1435,8 +1524,6 @@ function _accumCounter(bv, lv, rv, lReset, rReset, lBaseIn, rBaseIn){
   // remote 10 came back as 10, and with both sides lowered it INFLATED (base 10,
   // local 8, remote 7 -> 15) because two ordinary decrements were misread as a
   // double cron reset. Only the final value is floored, at zero.
-  const lb = (lBaseIn == null) ? b : Math.max(0, _num(lBaseIn));
-  const rb = (rBaseIn == null) ? b : Math.max(0, _num(rBaseIn));
   const effL = lReset ? 0 : lb;
   const effR = rReset ? 0 : rb;
   const carry = (lReset || rReset) ? 0 : b;
@@ -1474,8 +1561,20 @@ function _accumCounters(b, l, r, winner, localDeviceId, remoteDeviceId){
                                      _cntBaseline(null, bAbsR, lAbsR, 'cDown'));
   // Carry the newest reset stamp forward, or a merge whose winner happened to be the
   // side that had NOT reset would hand the next round a stale anchor.
-  const newest = Math.max(Number(l && l.cResetOn) || 0, Number(r && r.cResetOn) || 0);
+  //
+  // 2026-09-18 (round 2): drop a stamp that lies in THIS device's future before
+  // taking the max -- the same rule mergedLastCron already applies to lastCron, and
+  // for the same reason. cResetOn is a local day stamp merged with a plain max, so
+  // one device with a wrong date pinned the shared marker at a day nobody can ever
+  // exceed. _counterDidReset (side.cResetOn > base.cResetOn) was then false for every
+  // subsequent genuine cron reset while useMarkers stayed true, so effL/effR kept
+  // subtracting the stale pre-reset base and the result clamped to 0. Measured:
+  // remote stamped 20270101, next real period local 3 + remote 2 came back as cUp 0.
+  const _todayStamp = dayStampOf(Date.now());
+  const _lRes = Number(l && l.cResetOn) || 0, _rRes = Number(r && r.cResetOn) || 0;
+  const newest = Math.max(_lRes > _todayStamp ? 0 : _lRes, _rRes > _todayStamp ? 0 : _rRes);
   if(newest > 0) patch.cResetOn = newest;
+  else if(Number(b && b.cResetOn) || 0) patch.cResetOn = Number(b.cResetOn) || 0;
 
   // Record what this result absorbed. Each participant is authoritative about
   // itself, so its own values are written verbatim; entries for any THIRD device are
@@ -1509,6 +1608,12 @@ function mergeDayArray(localArr, remoteArr){
   const buckets = new Map(); // dayKey -> merged entry
 
   function fold(entry){
+    // 2026-09-18 (round 2): a malformed row used to throw straight out of merge(),
+    // into _syncNowAttempt's .catch, and every later round failed the same way with
+    // no recovery from inside the app. syncApply already reasons about a
+    // /state.json "hand-edited in the user's own Dropbox folder", and the tombstone
+    // union one block down guards its entries; this did not.
+    if(!entry || typeof entry !== "object") return;
     const key = dayOf(entry.date);
     if(!buckets.has(key)){ buckets.set(key, Object.assign({}, entry)); return; }
     const cur = buckets.get(key);
@@ -1524,8 +1629,10 @@ function mergeDayArray(localArr, remoteArr){
       // else: leave cur[k] as-is (non-numeric, non-array scalar collision — keep local/base value already present)
     });
   }
-  (localArr || []).forEach(fold);
-  (remoteArr || []).forEach(fold);
+  // ...and a non-array charHistory (a hand-edited or older /state.json) used to
+  // throw "(remoteArr || []).forEach is not a function" out of the same path.
+  (Array.isArray(localArr) ? localArr : []).forEach(fold);
+  (Array.isArray(remoteArr) ? remoteArr : []).forEach(fold);
   return [...buckets.values()].sort((a, b) => (a.date || 0) - (b.date || 0));
 }
 
@@ -1902,6 +2009,12 @@ async function _pushWithConflictRetry(mergedJson, knownRev, attempt){
   }catch(e){
     if(e instanceof ConflictError && attempt < SYNC_CONFLICT_RETRY_LIMIT){
       const fresh = await dbxDownload(STATE_PATH);
+      // 2026-09-18 (round 2): ratchet BEFORE applying, exactly as _syncNowAttempt and
+      // _syncForcePullAttempt do. This is the third site that imports a peer's rows
+      // and their updatedAt stamps, and it was the only one not ratcheting: the next
+      // local edit was then stamped BELOW the value just imported and lost the
+      // following both-changed merge tiebreak -- the edit is discarded, silently.
+      if(fresh && fresh.state && typeof ratchetHlc === 'function'){ try{ ratchetHlc(_maxOrderingTs(fresh.state)); }catch(e){} }
       const _baseRes2 = await syncBaseGet();
       let _base2 = _baseRes2 ? _baseRes2.base : null;
       const _storedRev2 = _baseRes2 ? _baseRes2.lastRev : null;
@@ -1952,6 +2065,12 @@ async function syncForcePush(){
     .then(() => {
       _syncInFlight = null;
       if(typeof syncRefreshSettingsUI==="function") syncRefreshSettingsUI();
+      // 2026-09-18 (round 2): honour a sync queued while the force op was running,
+      // the same tail _doSync has. syncNow() sets _syncRerunQueued and returns THIS
+      // promise, so without this the queued round was dropped entirely (a tick made
+      // during a force push waited for some later unrelated trigger) and the flag
+      // stayed true, making the next ordinary sync fire a second redundant round.
+      if(_syncRerunQueued){ _syncRerunQueued = false; syncNow(); }
     });
   return _syncInFlight;
 }
@@ -2011,6 +2130,8 @@ async function syncForcePull(){
     .then(() => {
       _syncInFlight = null;
       if(typeof syncRefreshSettingsUI==="function") syncRefreshSettingsUI();
+      // Same queued-sync tail as syncForcePush above (2026-09-18 round 2).
+      if(_syncRerunQueued){ _syncRerunQueued = false; syncNow(); }
     });
   return _syncInFlight;
 }
@@ -2130,7 +2251,10 @@ function exportSaveDropbox(blob, filename, eventCount){
 // ---- 3.8a Cycling backup tier infrastructure ---------------------------------
 // Tier bookkeeping lives in localStorage (off the sync/merge path).
 const _BK_LOCAL_KEY = 'questa.autobackup.local';
-const _BK_DEFAULT = {fourHour:{bkVersion:1,lastTs:0,idx:0}, daily:{bkVersion:1,lastTs:0,idx:0}, weekly:{bkVersion:1,lastTs:0,idx:0}, monthly:{bkVersion:1,lastTs:0,idx:0}};
+// bkVersion 0 means "slot bookkeeping unknown" and is what makes _bkFire's lazy
+// self-heal reachable (2026-09-18 round 2); _bkFire stamps 1 once it has listed
+// Dropbox and recovered the real slot index.
+const _BK_DEFAULT = {fourHour:{bkVersion:0,lastTs:0,idx:0}, daily:{bkVersion:0,lastTs:0,idx:0}, weekly:{bkVersion:0,lastTs:0,idx:0}, monthly:{bkVersion:0,lastTs:0,idx:0}};
 
 function bkLocalLoad(){
   try{
@@ -2141,7 +2265,12 @@ function bkLocalLoad(){
     const out = JSON.parse(JSON.stringify(_BK_DEFAULT));
     for(const k of ['fourHour','daily','weekly','monthly']){
       if(obj[k] && typeof obj[k] === 'object'){
-        out[k].bkVersion = typeof obj[k].bkVersion === 'number' ? obj[k].bkVersion : 1;
+        // 2026-09-18 (round 2): default to 0, not 1. Normalising an absent field to 1
+        // -- and seeding _BK_DEFAULT with 1 -- made `typeof !== 'number' || < 1` at
+        // the self-heal below impossible to satisfy, so the branch was dead. A device
+        // whose site data was evicted restarted the rotation at slot 0 and the dedup
+        // step then deleted the NEWEST backups first, keeping the oldest.
+        out[k].bkVersion = typeof obj[k].bkVersion === 'number' ? obj[k].bkVersion : 0;
         out[k].lastTs = typeof obj[k].lastTs === 'number' ? obj[k].lastTs : 0;
         out[k].idx = typeof obj[k].idx === 'number' ? obj[k].idx : 0;
       }
@@ -2269,9 +2398,17 @@ async function _bkFire(tierKey, blob){
     }
 
     // Deduplicate: keep newest per slot
+    // 2026-09-18 (round 2): "newest" was decided purely by string order on the
+    // filename stamp, with nothing anchoring the survivor to the file this call just
+    // wrote. After a clock correction backwards -- a rewind this repo already guards
+    // for elsewhere (tests/cron-day-rewind.test.js) -- the hour-old file sorted
+    // higher and the FRESH backup was deleted, while lastTs/idx still advanced and
+    // the log said the upload succeeded. Pin the just-written path to the front.
     for(const s in slotMap){
       if(slotMap[s].length > 1){
         slotMap[s].sort((a, b) => b.stamp.localeCompare(a.stamp));
+        const _justWritten = slotMap[s].findIndex(f => f.path === path);
+        if(_justWritten > 0) slotMap[s].unshift(slotMap[s].splice(_justWritten, 1)[0]);
         for(let i = 1; i < slotMap[s].length; i++){
           try{ await dbxDelete(slotMap[s][i].path); }catch(e){ /* best-effort */ }
         }
@@ -2310,11 +2447,18 @@ async function _bkFire(tierKey, blob){
       if(typeof save === 'function') save();
     }
 
+    if(syncCfg().lastBackupError) syncCfgSave({lastBackupError: null});   // this tier is healthy again
+
     if(typeof logEvent === 'function'){
       logEvent({kind:'export', taskTitle:'Auto Backup (' + tier.prefix + ')', notes:'Uploaded ' + path + ' to Dropbox'});
     }
   }catch(e){
-    syncCfgSave({lastError: tierKey + ' backup failed: ' + ((e && e.message) || String(e))});
+    // 2026-09-18 (round 2): own key. syncMaybeAutoExport is fired unawaited AFTER
+    // _syncNowAttempt has already written lastError:null, so a backup failure used to
+    // land on top of a fully successful sync and Settings reported a Dropbox error
+    // against a lastSyncAt of seconds ago. The guard at the call site only blocked
+    // the other direction. lastError belongs to the state-sync path alone.
+    syncCfgSave({lastBackupError: tierKey + ' backup failed: ' + ((e && e.message) || String(e))});
   }finally{
     _bkInFlight.delete(tierKey);
   }
@@ -2625,7 +2769,18 @@ async function syncEventsPush(opts){
   // diagnostics sync cross-device for remote debugging; the Activity Feed
   // still filters them at render via getEvents' default (app.js).
   const fresh = evtUploadable(await getEvents({ from: effectiveSince + 1, includeDiag: true }), myDev, effectiveSince);
-  if(!fresh.length) return;
+  if(!fresh.length){
+    // 2026-09-18 (round 2): still start the full-push clock. evtFullPushAt defaults
+    // to 0, which is falsy, so the `cfg.evtFullPushAt && …` gate above can never
+    // become true until something writes it — and the only writer is the syncCfgSave
+    // at the end of this function, which this early return skips. So the periodic
+    // re-push, the one mechanism that recovers own events sitting BELOW the
+    // watermark (a restored backup re-inserts them with their original ts), never
+    // started on exactly the idle device it was written for. The pull side already
+    // bootstraps evtFullScanAt unconditionally; mirror that.
+    if(!cfg.evtFullPushAt) syncCfgSave({ evtFullPushAt: Date.now() });
+    return;
+  }
   const months = [...new Set(fresh.map(e => evtMonthKey(e.ts)))].sort();
   let maxTs = since; // only advance the real watermark, not the full-push scan
   let anyBlocked = false;
@@ -3089,12 +3244,32 @@ function syncInit(){
               const store = tx.objectStore("events");
               const idx = store.index("ts");
               const req = idx.openCursor(null, "prev"); // descending, first = max
+              // 2026-09-18 (round 2): an ASYNC request error or a transaction abort
+              // is not caught by the surrounding try/catch, which only sees
+              // synchronous throws. Without these handlers a read failure meant the
+              // repair simply never happened: the future watermark stayed in place,
+              // evtUploadable's `e.ts > sinceTs` rejected every real event, the
+              // device uploaded nothing until wall-clock time overtook the poison,
+              // and the diagnostic showed no repair had even been attempted. Fall
+              // back to exactly what the two IDB-failure arms below already do.
+              let _repairDone = false;
+              const _repairFallback = function(err){
+                if(_repairDone) return; _repairDone = true;
+                syncCfgSave({ evtLastUploadTs: 0 });
+                if(typeof _qDiagPush === "function"){
+                  _qDiagPush('evtWatermarkRepaired', { was: watermark, now: now, resetTo: 0, maxLocalTs: 0, eventCount: 0, error: String(err) });
+                }
+              };
+              req.onerror = function(){ _repairFallback(req.error || 'cursor failed'); };
+              try{ tx.onabort = function(){ _repairFallback(tx.error || 'transaction aborted'); }; }catch(e){}
               req.onsuccess = function(){
+                _repairDone = true;
                 const cursor = req.result;
                 const maxLocalTs = cursor ? cursor.value.ts : 0;
                 const eventCount = cursor ? 1 : 0; // we only need max, but count for diag
                 // Count all events for diag
                 const countReq = store.count();
+                countReq.onerror = function(){ _repairDone = false; _repairFallback(countReq.error || 'count failed'); };
                 countReq.onsuccess = function(){
                   const totalCount = countReq.result;
                   // 2026-09-18: reset to 0, not to the max local ts. maxLocalTs is the
@@ -3154,10 +3329,10 @@ function syncInit(){
     }catch(e){ /* best-effort */ }
   })();
   window.addEventListener("online", () => syncNow());
-  document.addEventListener("visibilitychange", () => {
-    if(document.visibilityState === "visible") syncNow();
-    else syncNow(); // hidden: best-effort push, fire-and-forget (do not await)
-  });
+  // 2026-09-18 (round 2): both arms of the old `if` called syncNow() identically,
+  // so the branch was provably dead and its comment described behaviour the code
+  // did not have. Collapsed to the one call that was actually happening.
+  document.addEventListener("visibilitychange", () => { syncNow(); });
   setTimeout(() => {
     // F2 / D3 todo 14: tell app.js the first sync round settled, so its boot
     // day-rollover decision runs on POST-sync state instead of pre-sync state

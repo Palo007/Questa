@@ -538,6 +538,18 @@
     75%{opacity:1}100%{opacity:0;transform:scale(1.2)}}
   .settingsRow{display:flex;gap:8px;margin:10px 0}
   .settingsRow .btn{font-size:13px;padding:10px}
+  .settingsRow .btn:disabled{opacity:.45;pointer-events:none}
+  /* Granular export/import section picker (app.js showExportSectionPicker /
+     showImportSectionPicker). Scrolls on its own so a long section list never
+     pushes the action buttons off a phone screen. */
+  .ioPick{display:flex;flex-direction:column;gap:2px;max-height:46vh;overflow-y:auto;margin:8px 0 4px;
+          border:1px solid var(--line);border-radius:10px;padding:4px}
+  .ioPickRow{display:flex;align-items:flex-start;gap:10px;padding:9px 8px;border-radius:8px;cursor:pointer}
+  .ioPickRow:active{background:var(--card2,rgba(127,127,127,.12))}
+  .ioPickRow input{width:auto;margin:2px 0 0;flex:none;cursor:pointer}
+  .ioPickMain{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+  .ioPickMain strong{font-size:13px}
+  .ioPickCount{flex:none;align-self:center;font-variant-numeric:tabular-nums}
   .devNameWrap{margin:10px 0}
   .devNameHeader{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:baseline;margin:0 0 6px}
   .devSyncStatus{font-size:11px;color:var(--muted);margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

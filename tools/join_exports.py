@@ -176,7 +176,17 @@ TS_KEY_FALLBACK = "__savedAt"             # used for prefs (dict, no per-key ts)
 
 
 def _is_default(v):
-    """True for 'empty' values we should let a sibling non-default override."""
+    """True for 'empty' values we should let a sibling non-default override.
+
+    2026-09-18: `False == 0` is True in Python, so a boolean False used to be
+    classified as "empty". In the equal-ts field merge that made False always
+    lose to True and never the reverse, in either argument order -- so the
+    device reporting `done: False` for a daily could never be heard, and the
+    joined file marked it complete. False is a real value here (done, paused,
+    subtask done, hidden, synthetic), not an absent one.
+    """
+    if isinstance(v, bool):
+        return False
     return v is None or v == 0 or v == "" or v == [] or v == {}
 
 
@@ -310,6 +320,13 @@ def merge_exports(inputs):
     conflicts = []
     meta = {}  # per-export meta for prefs fallback
 
+    # 2026-09-18: order by __savedAt, not by argv position. The equal-updatedAt
+    # field merge below resolves a conflict with "newest file wins", but it
+    # iterated `inputs` in raw command-line order, so two runs over the same
+    # recovery set produced different state depending on shell glob order. The
+    # prefs block already sorted this way; now every collection does.
+    inputs = sorted(inputs, key=lambda p: int(p[1].get(TS_KEY_FALLBACK, 0) or 0))
+
     # ---- top-level scalars (max) -------------------------------------------
     # lastCron is carried as max (mirrors sync.js mergedLastCron = max of
     # inputs) so the joined export reflects the newest day-rollover that any
@@ -433,13 +450,46 @@ def merge_exports(inputs):
             rows_out = normalize_daily_resets(rows_out, out.get("lastCron", 0))
         out[col] = rows_out
 
-    # ---- charHistory (union by date) ---------------------------------------
+    # ---- charHistory (union by LOCAL day, numeric fields max-folded) -------
+    # 2026-09-18: mirror sync.js mergeDayArray (K3). This used to key on the raw
+    # Date.now() millisecond and `setdefault` -- so a collision kept whichever
+    # file was listed FIRST and silently dropped the newer export's xp/gold/hp
+    # for that row. Two devices either side of local midnight also produced two
+    # unmergeable rows for one day. Bucket by day_stamp_of and fold each numeric
+    # field with max, exactly as the app does.
     ch = {}
     for (fn, d) in inputs:
         for row in d.get("charHistory", []) or []:
-            if isinstance(row, dict) and "date" in row:
-                ch.setdefault(row["date"], row)
-    out["charHistory"] = list(ch.values())
+            if not (isinstance(row, dict) and "date" in row):
+                continue
+            key = day_stamp_of(row.get("date") or 0)
+            cur = ch.get(key)
+            if cur is None:
+                ch[key] = dict(row)
+                continue
+            for k, ev in row.items():
+                if k == "date":
+                    cur["date"] = max(cur.get("date") or 0, row.get("date") or 0)
+                    continue
+                cv = cur.get(k)
+                if isinstance(ev, bool) or isinstance(cv, bool):
+                    if k not in cur:
+                        cur[k] = ev
+                elif isinstance(ev, (int, float)) and isinstance(cv, (int, float)):
+                    cur[k] = max(cv, ev)
+                elif isinstance(ev, list) and isinstance(cv, list):
+                    by_id = {}
+                    for x in cv:
+                        if isinstance(x, dict) and x.get("id") is not None:
+                            by_id[x["id"]] = x
+                    for x in ev:
+                        if isinstance(x, dict) and x.get("id") is not None:
+                            by_id[x["id"]] = x
+                    cur[k] = list(by_id.values())
+                elif k not in cur:
+                    cur[k] = ev
+                # else: non-numeric, non-array scalar collision -- keep cur
+    out["charHistory"] = sorted(ch.values(), key=lambda r: r.get("date") or 0)
 
     # ---- deletions (tombstones: union by id, newest at wins) ---------------
     del_by = {}
@@ -452,6 +502,35 @@ def merge_exports(inputs):
                 if cur is None or ts > cur["ts"]:
                     del_by[k] = {"ts": ts, "value": row}
     out["deletions"] = [v["value"] for v in del_by.values()]
+
+    # ---- tombstone overlay -------------------------------------------------
+    # 2026-09-18: join_exports.md promised "deletions win over live tasks: a task
+    # id present in `deletions` is excluded from the output even if another export
+    # carries it as live". Nothing applied it: tasks/rewards/tags were the plain
+    # id-union of every input, so a task deleted on the newer device came back on
+    # import and stayed back until a Dropbox sync happened to run the overlay.
+    # Mirror sync.js mergeCollection's rule exactly (sync.js ~1104-1122): remove an
+    # id iff the tombstone's `at` is >= the surviving row's own raw edit time, so
+    # an edit or re-create made AFTER the delete still resurrects it. Raw on both
+    # operands -- never clamp either, per the K1 polarity note in sync.js.
+    if del_by:
+        for (col, key, tsf) in ROW_MERGED:
+            if key is None or col not in out or not isinstance(out[col], list):
+                continue
+            kept = []
+            for row in out[col]:
+                rid = row.get(key) if isinstance(row, dict) else None
+                tomb = del_by.get(rid)
+                if tomb is not None:
+                    row_ts = int(row.get("updatedAt") or row.get("createdAt") or 0)
+                    if int(tomb["ts"]) >= row_ts:
+                        conflicts.append(_conflict(col, rid, [
+                            {"file": "(deletions)", "ts": int(tomb["ts"]), "value": tomb["value"]},
+                            {"file": "(live row)", "ts": row_ts, "value": row},
+                        ], "tombstone applied"))
+                        continue
+                kept.append(row)
+            out[col] = kept
 
     # ---- events (union by id; disjoint epochs, but guard collisions) -------
     ev_by = {}

@@ -1373,15 +1373,61 @@ function _absBetter(e, cur){
 // already carries two incompatible numbering schemes ("site 4 of 4" for the clamp-helper
 // sites, "site 6 of 6" after K1), so a third count would just add noise.
 // Read the _uaRaw block comment above
-// before touching this. Both operands are absorbed WATERMARKS -- factual records of
-// "have I already folded this contribution in?", not competitors in a tiebreak.
-// _clampFuture on either side makes this test FALSE, which falls back to the base
-// totals; on the conflict-retry path base does NOT yet contain the absorbed remote
-// contribution, so the same delta is counted a SECOND time and the user's earnings
-// DOUBLE. Both operands must stay RAW.
-function _accBaseline(baseTotals, baseAbs, otherAbs){
-  if(otherAbs && otherAbs.ua > (baseAbs ? baseAbs.ua : 0)) return otherAbs;
-  return baseTotals;
+// before touching this. Every operand below is an absorbed WATERMARK -- a factual
+// record of "have I already folded this contribution in?", not a competitor in a
+// tiebreak. Clamping any of them (_ua/_clampFuture on a stamp, or a fallback to the
+// base on a value) leaves the baseline at the shared base; on the conflict-retry path
+// base does NOT yet contain the absorbed remote contribution, so the same delta is
+// counted a SECOND time and the user's earnings DOUBLE. Everything here stays RAW.
+//
+// F1 (2026-09-19). The previous rule -- return the peer's `abs` entry for a side when
+// it is newer than the base's -- was right for two devices and wrong for three.
+// `abs[k]` is keyed by the device whose DOCUMENT was folded in, and it stores that
+// document's WHOLE totals (see the two writes at the end of _charAccumulate), so it
+// already carries every peer that document had merged. Reading one entry as "what
+// device k contributed" under-states the shared part, and the excess is added again
+// on every retry: base 160 total xp, A+50 / B+30 / C+40 with A's upload failing, then
+// B+20, retried to 340 where the truth is 300 (gold 38 where the truth is 34).
+//
+// What both sides must be measured from is the LARGEST aggregate BOTH sides have
+// already folded in. For every device k recorded on both sides, min(L_k, R_k) is a
+// k-authored document both descend from; the best of those -- floored at the shared
+// base, which is common by definition -- is that quantity. A side reads its OWN key
+// from its own current totals, because a document always contains every earlier value
+// of itself; that is what lets a device recognise its own contribution inside a peer's
+// document even when it has never merged. xp/gold/mp are independent accumulators and
+// are reduced independently.
+//
+// This is a strict generalisation, not a reinterpretation: with two devices at most
+// one of the two old per-side baselines is ever raised above the base, and
+// `c + (l - c) + (r - c)` with c = that baseline is arithmetically identical to the
+// old `base + (l - lBase) + (r - rBase)`. Nothing STORED changes shape or meaning, so
+// entries written by an older build read correctly here and vice versa.
+function _accCommon(bT, l, r, localDeviceId, remoteDeviceId){
+  const out = { xp: bT.xp, gold: bT.gold, mp: bT.mp };
+  if(localDeviceId == null || remoteDeviceId == null || localDeviceId === remoteDeviceId) return out;
+  const lT = _charTotals(l), rT = _charTotals(r);
+  // A side's own key: its live totals, raised by any recorded entry for itself.
+  function sideEntry(doc, selfDev, ownTotals, k){
+    const e = _absEntry(doc, k);
+    if(k !== selfDev) return e;
+    if(!e) return ownTotals;
+    return { xp: Math.max(e.xp, ownTotals.xp), gold: Math.max(e.gold, ownTotals.gold), mp: Math.max(e.mp, ownTotals.mp) };
+  }
+  const seen = {};
+  [l, r].forEach(function(d){
+    const a = d && d.abs;
+    if(a && typeof a === "object") Object.keys(a).forEach(function(k){ seen[k] = 1; });
+  });
+  seen[localDeviceId] = 1; seen[remoteDeviceId] = 1;
+  Object.keys(seen).forEach(function(k){
+    const le = sideEntry(l, localDeviceId, lT, k), re = sideEntry(r, remoteDeviceId, rT, k);
+    if(!le || !re) return;   // only a device BOTH sides record can be a common ancestor
+    out.xp   = Math.max(out.xp,   Math.min(le.xp, re.xp));
+    out.gold = Math.max(out.gold, Math.min(le.gold, re.gold));
+    out.mp   = Math.max(out.mp,   Math.min(le.mp, re.mp));
+  });
+  return out;
 }
 // Returns the accumulating fields to overlay on the arbitration winner, or null for
 // "not applicable" -- in which case the caller keeps exact pre-K3 LWW behaviour.
@@ -1398,24 +1444,26 @@ function _charAccumulate(b, l, r, localDeviceId, remoteDeviceId){
   if(localDeviceId == null || remoteDeviceId == null || localDeviceId === remoteDeviceId) return null;
 
   const bT = _charTotals(b), lT = _charTotals(l), rT = _charTotals(r);
-  // Each side's delta is measured from the newest thing we can prove it started from:
-  // normally the agreed base, but the peer's absorbed record when that is newer.
-  const lBase = _accBaseline(bT, _absEntry(b, localDeviceId),  _absEntry(r, localDeviceId));
-  const rBase = _accBaseline(bT, _absEntry(b, remoteDeviceId), _absEntry(l, remoteDeviceId));
-  const dXp   = (lT.xp - lBase.xp)     + (rT.xp - rBase.xp);
-  const dGold = (lT.gold - lBase.gold) + (rT.gold - rBase.gold);
-  const dMp   = (lT.mp - lBase.mp)     + (rT.mp - rBase.mp);
+  // Both deltas are measured from the largest aggregate BOTH sides have already
+  // folded in -- the agreed base when no absorbed record beats it. See _accCommon.
+  const cB = _accCommon(bT, l, r, localDeviceId, remoteDeviceId);
+  const dXp   = (lT.xp - cB.xp)     + (rT.xp - cB.xp);
+  const dGold = (lT.gold - cB.gold) + (rT.gold - cB.gold);
+  const dMp   = (lT.mp - cB.mp)     + (rT.mp - cB.mp);
   if(dXp === 0 && dGold === 0 && dMp === 0) return null; // no numeric conflict -> leave LWW alone
-  let totXp = Math.max(0, bT.xp + dXp);
-  let gold  = Math.max(0, bT.gold + dGold);
-  let mp    = Math.max(0, bT.mp + dMp);
+  // The shared part is carried ONCE, and it is the common aggregate, not the base:
+  // cB + (lT - cB) + (rT - cB). Using bT here is what re-added the peer's earnings
+  // on a retry once cB had moved past the stale base.
+  let totXp = Math.max(0, cB.xp + dXp);
+  let gold  = Math.max(0, cB.gold + dGold);
+  let mp    = Math.max(0, cB.mp + dMp);
   // Safety floor, EARNINGS-ONLY. mp has no consumer anywhere in app.js and xp only
   // falls on death(), so when NEITHER side lost ground the merged total cannot
   // legitimately sit below either side -- a floor there means an arithmetic slip in an
   // exotic 3-device ordering loses nothing. gold is a SPENDABLE balance (rewards,
   // potions, death's *0.75) and must be free to fall, so it never gets a floor; and a
   // side that DID lose ground must keep that loss, so the floor is skipped entirely.
-  const lostGround = (lT.xp < lBase.xp) || (rT.xp < rBase.xp) || (lT.mp < lBase.mp) || (rT.mp < rBase.mp);
+  const lostGround = (lT.xp < cB.xp) || (rT.xp < cB.xp) || (lT.mp < cB.mp) || (rT.mp < cB.mp);
   if(!lostGround){ totXp = Math.max(totXp, lT.xp, rT.xp); mp = Math.max(mp, lT.mp, rT.mp); }
   const relv = _charFromTotalXp(totXp);
   // Record what this result absorbed. Each participant is authoritative about itself,
@@ -1458,17 +1506,14 @@ function _counterDidReset(side, base){
 // back as 8, then 11, then 14 across the retry limit, and a plain upload failure
 // left the same stale-base/advanced-local shape for the NEXT ordinary round.
 //
-// char solved this with an absorbed watermark (see _absEntry/_accBaseline above).
-// This is the same mechanism for cUp/cDown: t.cAbs[deviceId] records "the counter
-// values I have already folded in from that device, at that device's updatedAt".
-// When the peer's own record about a side is newer than the base's, that record --
-// not the base -- is what the side's delta is measured from, so a contribution
-// already absorbed measures as zero.
+// char solved this with an absorbed watermark (see _absEntry/_accCommon above).
+// This is the same mechanism for cUp/cDown: t.cAbs[deviceId] records the counter
+// values of THAT device's document which are already folded into this task.
 //
-// INVERTED POLARITY, same as _accBaseline: both operands are absorbed WATERMARKS,
-// factual records of "have I already folded this in?", not competitors in a
-// tiebreak. _clampFuture on either side makes the test false, falls back to the
-// base, and the delta is counted a SECOND time. Both must stay RAW (_uaRaw).
+// INVERTED POLARITY, same as _accCommon: every operand is an absorbed WATERMARK, a
+// factual record of "have I already folded this in?", not a competitor in a
+// tiebreak. Clamping one (_ua/_clampFuture on a stamp, or falling back to the base
+// on a value) makes the delta count a SECOND time. All of it stays RAW (_uaRaw).
 function _cAbsEntry(t, dev){
   const a = t && t.cAbs;
   if(!a || typeof a !== "object" || dev == null) return null;
@@ -1484,14 +1529,42 @@ function _cAbsBetter(e, cur){
   for(let i = 0; i < 3; i++){ if(a[i] !== c[i]) return a[i] > c[i]; }
   return false;
 }
-function _cntBaseline(baseVal, baseAbs, otherAbs, key){
-  if(otherAbs && otherAbs.ua > (baseAbs ? baseAbs.ua : 0)) return otherAbs[key];
-  return baseVal;
+// F1 (2026-09-19), the counter twin of _accCommon -- read that block comment first.
+// `cAbs[k]` stores device k's whole DOCUMENT value, which carries every peer k had
+// already merged, so reading one entry as "what device k contributed" is only true
+// with two devices. Measured on the real merge: base cUp 0, B+3, C+4, A+5 with A's
+// upload failing, then B+2 -- A retried to 18 where the truth is 14, and stayed at 18
+// on every further retry. The common baseline is the largest aggregate BOTH sides have
+// already folded in: max over devices recorded on both sides of min(L_k, R_k), floored
+// at the shared base. A side reads its own key from its own live value.
+function _cntCommon(bv, l, r, localDeviceId, remoteDeviceId, key){
+  let c = Math.max(0, _num(bv));
+  if(localDeviceId == null || remoteDeviceId == null || localDeviceId === remoteDeviceId) return c;
+  function sideVal(doc, selfDev, k){
+    const e = _cAbsEntry(doc, k);
+    if(k !== selfDev) return e ? e[key] : null;
+    return Math.max(e ? e[key] : 0, Math.max(0, _num(doc && doc[key])));
+  }
+  const seen = {};
+  [l, r].forEach(function(d){
+    const a = d && d.cAbs;
+    if(a && typeof a === "object") Object.keys(a).forEach(function(k){ seen[k] = 1; });
+  });
+  seen[localDeviceId] = 1; seen[remoteDeviceId] = 1;
+  Object.keys(seen).forEach(function(k){
+    const lv = sideVal(l, localDeviceId, k), rv = sideVal(r, remoteDeviceId, k);
+    if(lv == null || rv == null) return;  // only a device BOTH sides record is common
+    const m = Math.min(lv, rv);
+    if(m > c) c = m;
+  });
+  return c;
 }
 // `lReset`/`rReset` are booleans, or NULL meaning "no reset markers available —
 // use the legacy heuristic". See _accumCounters for when that applies.
-// `lBaseIn`/`rBaseIn` are the per-side baselines from _cntBaseline; null means
-// "no absorbed record applies, measure from the shared base".
+// `lBaseIn`/`rBaseIn` are the baselines from _cntCommon; null means "no absorbed
+// record applies, measure from the shared base". They are the SAME value on both
+// sides since F1 -- the two parameters are kept so the 5-argument calls in
+// tests/counter-reset-marker.test.js keep meaning exactly what they meant.
 function _accumCounter(bv, lv, rv, lReset, rReset, lBaseIn, rBaseIn){
   const b = Math.max(0, _num(bv)), l = Math.max(0, _num(lv)), r = Math.max(0, _num(rv));
   // 2026-09-18 (round 2): the per-side absorbed baselines are computed BEFORE the
@@ -1503,6 +1576,12 @@ function _accumCounter(bv, lv, rv, lReset, rReset, lBaseIn, rBaseIn){
   // marker present the same inputs stayed at 8.
   const lb = (lBaseIn == null) ? b : Math.max(0, _num(lBaseIn));
   const rb = (rBaseIn == null) ? b : Math.max(0, _num(rBaseIn));
+  // F1 (2026-09-19): the shared part is carried ONCE, and it is the common absorbed
+  // baseline -- not `b`. With no absorbed record lb === rb === b and this is the old
+  // value byte for byte. On a retry, carrying `b` while subtracting a HIGHER baseline
+  // from each side added the difference back: b + (l-lb) + (r-rb) counts the shared
+  // part once at `b` and once more at every lb/rb that moved past it.
+  const carry = Math.max(lb, rb);
   if(lReset == null || rReset == null){
     // Pre-2026-09-18 behaviour for records whose base carries no reset marker (data
     // written before this build, or before the first cron after upgrading): infer a
@@ -1511,7 +1590,7 @@ function _accumCounter(bv, lv, rv, lReset, rReset, lBaseIn, rBaseIn){
     // baselines only bite on a retry, where they are exactly what stops the
     // peer's contribution being counted twice.
     if(l < lb && r < rb) return Math.max(l + r, l, r);   // both restarted from 0
-    return Math.max(b + Math.max(0, l - lb) + Math.max(0, r - rb), l, r);
+    return Math.max(carry + Math.max(0, l - lb) + Math.max(0, r - rb), l, r);
   }
   // A side that reset started its new period from 0, so its whole current value is
   // new taps; a side that did not reset has `base` already inside its value. The
@@ -1526,8 +1605,7 @@ function _accumCounter(bv, lv, rv, lReset, rReset, lBaseIn, rBaseIn){
   // double cron reset. Only the final value is floored, at zero.
   const effL = lReset ? 0 : lb;
   const effR = rReset ? 0 : rb;
-  const carry = (lReset || rReset) ? 0 : b;
-  return Math.max(0, carry + (l - effL) + (r - effR));
+  return Math.max(0, ((lReset || rReset) ? 0 : carry) + (l - effL) + (r - effR));
 }
 function _accumCounters(b, l, r, winner, localDeviceId, remoteDeviceId){
   const has = k => (l && typeof l[k] === "number") || (r && typeof r[k] === "number");
@@ -1547,18 +1625,17 @@ function _accumCounters(b, l, r, winner, localDeviceId, remoteDeviceId){
   // precondition 3 as _charAccumulate. Without them this degrades to measuring both
   // sides from the shared base, i.e. exactly the pre-2026-09-18 behaviour.
   const idsOk = (localDeviceId != null && remoteDeviceId != null && localDeviceId !== remoteDeviceId);
-  const bAbsL = idsOk ? _cAbsEntry(b, localDeviceId)  : null;
-  const bAbsR = idsOk ? _cAbsEntry(b, remoteDeviceId) : null;
-  const rAbsL = idsOk ? _cAbsEntry(r, localDeviceId)  : null;  // what remote already absorbed from us
-  const lAbsR = idsOk ? _cAbsEntry(l, remoteDeviceId) : null;  // what we already absorbed from remote
+  // F1 (2026-09-19): ONE baseline per field, not one per side -- the largest aggregate
+  // both sides have already folded in. _cntCommon falls back to the shared base, so
+  // without ids, without cAbs, or on a first merge this is the pre-F1 arithmetic.
+  const cUpBase = idsOk ? _cntCommon(b && b.cUp,   l, r, localDeviceId, remoteDeviceId, 'cUp')   : null;
+  const cDnBase = idsOk ? _cntCommon(b && b.cDown, l, r, localDeviceId, remoteDeviceId, 'cDown') : null;
 
   const patch = {};
   if(hU) patch.cUp = _accumCounter(b && b.cUp, l && l.cUp, r && r.cUp, lReset, rReset,
-                                   _cntBaseline(null, bAbsL, rAbsL, 'cUp'),
-                                   _cntBaseline(null, bAbsR, lAbsR, 'cUp'));
+                                   cUpBase, cUpBase);
   if(hD) patch.cDown = _accumCounter(b && b.cDown, l && l.cDown, r && r.cDown, lReset, rReset,
-                                     _cntBaseline(null, bAbsL, rAbsL, 'cDown'),
-                                     _cntBaseline(null, bAbsR, lAbsR, 'cDown'));
+                                     cDnBase, cDnBase);
   // Carry the newest reset stamp forward, or a merge whose winner happened to be the
   // side that had NOT reset would hand the next round a stale anchor.
   //

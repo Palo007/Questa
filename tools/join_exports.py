@@ -10,6 +10,11 @@ construction. Verified against real exports: tasks/rewards/devices/char have
 
 Rules (mirror of the app state schema — keep in sync with AGENTS.md):
   tasks/rewards/devices : key=id,      ts=updatedAt  -> newest wins
+    task.cAbs (K3, 2026-09-18): {deviceId: {ua,cUp,cDown}} -- the habit-counter
+      twin of char.abs (sync.js _accumCounters). Whole-row newest-wins would keep
+      only the winning row's map, so it is UNIONED per task id by (ua, cUp, cDown)
+      across all inputs, for the same reason char.abs is: a dropped entry lets a
+      later merge count that peer's taps a second time. NOT tokenized.
   char                  : singleton,   ts=updatedAt  -> newest wins
     char.abs (K3, 2026-09-11): {deviceId: {ua,xp,gold,mp}} -- the per-device
       "already absorbed" record sync.js writes when it accumulates earnings
@@ -501,6 +506,50 @@ def merge_exports(inputs):
                     conflicts.append(_conflict(col, k, [cur, {"file": fn, "ts": ts, "value": row}], "equal ts, field-merged"))
                     by_key[k] = {"ts": ts, "file": fn, "value": merged_row}
         rows_out = [v["value"] for v in by_key.values()]
+        # F1 (2026-09-19): union task.cAbs across every input, exactly as char.abs is
+        # unioned above and for the same reason. cAbs is the habit-counter twin of
+        # char.abs -- {deviceId: {ua,cUp,cDown}}, the counter values of THAT device's
+        # document already folded into this task (sync.js _accumCounters). Whole-row
+        # newest-wins keeps only the winning row's map, so every entry for a device
+        # that is not on the winning row is dropped. sync.js _cntCommon reads the
+        # entries BOTH sides record to find the largest already-absorbed aggregate; a
+        # missing entry lowers that baseline toward the shared base and the peer's taps
+        # are counted a second time on the next conflict retry -- the very defect F1
+        # fixed. Strict total order on (ua, cUp, cDown), mirroring sync.js _cAbsBetter,
+        # so the join is order-independent the same way the merge is.
+        # NOT tokenized: like `abs`, `cAbs` must never get an _EXPORT_FIELD_MAP code.
+        if col == "tasks":
+            _cabs = {}   # task id -> {deviceId: (rank, entry)}
+            for (fn, d) in inputs:
+                if not _has_section(d, "tasks"):
+                    continue
+                rows = d.get("tasks")
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict) or "id" not in row:
+                        continue
+                    a = row.get("cAbs")
+                    if not isinstance(a, dict):
+                        continue
+                    per = _cabs.setdefault(row["id"], {})
+                    for dev, e in a.items():
+                        if not isinstance(e, dict):
+                            continue
+                        def _n(v):
+                            try:
+                                return float(v or 0)
+                            except (TypeError, ValueError):
+                                return 0.0
+                        rank = (_n(e.get("ua")), _n(e.get("cUp")), _n(e.get("cDown")))
+                        cur = per.get(dev)
+                        if cur is None or rank > cur[0]:
+                            per[dev] = (rank, e)
+            if _cabs:
+                for row in rows_out:
+                    per = _cabs.get(row.get("id"))
+                    if per:
+                        row["cAbs"] = {dev: e for dev, (_r, e) in per.items()}
         # After whole-row merge, apply the daily reset overlay keyed to the
         # joined lastCron (mirrors sync.js mergedLastCron -> normalizeDailyResets).
         # This corrects the case where an older, not-yet-cronned export's

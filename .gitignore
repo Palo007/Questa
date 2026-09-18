@@ -13,6 +13,12 @@
 # and without a licence file default copyright applies -- nobody may legally
 # fork, modify or redistribute this, which is the opposite of the intent.
 !/LICENSE
+# AGENTS.md is the single source of truth for every project rule, invariant and
+# deploy gate (CLAUDE.md just points at it). It was untracked, so the whitelist
+# above made it invisible to git: a `git clean -fdx` would have erased every rule
+# in this repo with no way to restore them, and a fresh clone gave a contributor
+# -- human or agent -- no rules at all.
+!/AGENTS.md
 !/INSTALL.md
 !/app.js
 !/habitica_to_questa.py

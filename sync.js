@@ -2576,7 +2576,13 @@ function evtOwnMonthRecords(events, myDev){
 // asserts they agree, so drift fails the suite instead of silently splitting the
 // two dedup paths.
 function evtIncomingSig(r){
-  return [r.ts, r.kind, r.taskId || '', r.dir || 0, r.reps || 0].join('|');
+  // LOCKSTEP with app.js eventMergeSig() — tests/uid-collision.test.js C9a pins
+  // the two to be byte-identical. 2026-09-18 (round 2): widened together to carry
+  // detail/subId/done, because the app emits two DISTINCT lifecycle records with
+  // the same ts from one visibilitychange (flushState + the Tier-1 handler) and
+  // the old five-field signature collapsed them into one.
+  return [r.ts, r.kind, r.taskId || '', r.dir || 0, r.reps || 0,
+          r.detail || '', r.subId || '', (r.done === undefined ? '' : (r.done ? 1 : 0))].join('|');
 }
 // LOCKSTEP: must match app.js eventUidDisambiguate(). Same reason as above.
 function evtUidDisambiguate(uid, sig){

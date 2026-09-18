@@ -24,8 +24,10 @@
 //       important assertion in this file)
 //   I4  clearAllEvents is never called on this path (spy, zero calls across
 //       every scenario, plus a static source check)
-//   I5  the import still rejects a file lacking char/tasks, and S is never
-//       touched (migrate/doImport never runs) by the rejected attempt
+//   I5  a file carrying only SOME sections imports exactly those and leaves the
+//       rest of S untouched; a file carrying no recognised section at all is
+//       still rejected, and S is never touched by the rejected attempt
+//       (was: "rejects a file lacking char/tasks" -- see the I5 block for why)
 //
 // Run: node tests/import-data-merge.test.js  (also run by node tests/run.js)
 const fs = require('fs'), path = require('path'), vm = require('vm');
@@ -42,12 +44,57 @@ const eventMergeFilterFn = extractFunction(appSrc, /^function eventMergeFilter\(
 const eventUidDisambiguateFn = extractFunction(appSrc, /^function eventUidDisambiguate\(uid, sig\)\{/, 'eventUidDisambiguate');
 const eventUidOfFn = extractFunction(appSrc, /^function eventUidOf\(rec, idx\)\{/, 'eventUidOf');
 const reparentEventsForImportFn = extractFunction(appSrc, /^function reparentEventsForImport\(list\)\{/, 'reparentEventsForImport');
+// 2026-09-18 (granular import): importData() no longer does the work itself. It
+// parses + hash-gates the file, detects which sections the file contains, and
+// hands off to showImportSectionPicker() -> applyImportSections(). The merge
+// behaviour this file exists to protect now lives in applyImportSections(), so
+// the whole chain is loaded and driven end to end -- including a "click" on the
+// picker's Import button -- rather than stubbing the split point away.
+const granularHelpers = (function () {
+  const a = appSrc.indexOf('/* BEGIN_GRANULAR_IO_HELPERS */');
+  const b = appSrc.indexOf('/* END_GRANULAR_IO_HELPERS */');
+  if (a < 0 || b < 0) {
+    console.error('FAIL: GRANULAR_IO_HELPERS markers missing from app.js');
+    process.exit(1);
+  }
+  return appSrc.slice(a, b + '/* END_GRANULAR_IO_HELPERS */'.length);
+})();
+const applyImportSectionsFn = extractFunction(appSrc, /^async function applyImportSections\(data, keys, mode\)\{/, 'applyImportSections');
+const showImportSectionPickerFn = extractFunction(appSrc, /^function showImportSectionPicker\(data, detected\)\{/, 'showImportSectionPicker');
+const ioRowsHTMLFn = extractFunction(appSrc, /^function _ioRowsHTML\(keys, counts, sel\)\{/, '_ioRowsHTML');
+const ioBindRowsFn = extractFunction(appSrc, /^function _ioBindRows\(sel, onChange\)\{/, '_ioBindRows');
+const ioSetAllFn = extractFunction(appSrc, /^function _ioSetAll\(sel, keys, val, onChange\)\{/, '_ioSetAll');
+const ioSelectedFn = extractFunction(appSrc, /^function _ioSelected\(sel, keys\)\{/, '_ioSelected');
+
+// Minimal DOM the picker needs: an id-keyed node bag plus a querySelectorAll that
+// returns empty lists. With no checkbox nodes to bind, every detected section
+// stays ticked and the mode stays 'replace' -- i.e. exactly the historic
+// whole-file import, which is what the assertions below were written against.
+function makeFakeDoc() {
+  const nodes = {};
+  function node(id) {
+    if (!nodes[id]) {
+      nodes[id] = {
+        id: id, innerHTML: '', textContent: '', disabled: false,
+        onclick: null, onchange: null, value: '',
+        classList: { add: function () {}, remove: function () {} },
+        querySelector: function () { return null; }
+      };
+    }
+    return nodes[id];
+  }
+  return {
+    nodes: nodes,
+    getElementById: function (id) { return node(id); },
+    querySelectorAll: function () { return []; }
+  };
+}
 
 // Sanity: the fix must have actually removed the clearAllEvents() CALL from
 // importData's own source (a comment explaining why it was removed is fine
 // and expected -- strip `//` line comments before checking so that comment
 // doesn't trip this guard).
-const importDataCodeOnly = importDataFn
+const importDataCodeOnly = (importDataFn + '\n' + applyImportSectionsFn)
   .replace(/\r\n/g, '\n')
   .split('\n')
   .map(function (line) { return line.replace(/\/\/.*$/, ''); })
@@ -124,15 +171,34 @@ function makeCtx(opts) {
     eventImportSummary: function (list) { return { total: list.length, diagnostic: 0, visible: list.length, byCat: {} }; },
     eventImportSummaryText: function (sum) { return sum.total + ' stored'; },
     eventImportSummaryHTML: function () { return '<div></div>'; },
+    esc: function (s) { return String(s == null ? '' : s); },
+    localStorage: { removeItem: function () {}, getItem: function () { return null; }, setItem: function () {} },
+    STORE_KEY: 'questa',
+    countEvents: function () { return Promise.resolve(0); },
   };
+  sandbox.document = makeFakeDoc();
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
 
-  const src = [eventMergeSigFn, eventUidDisambiguateFn, eventMergeFilterFn, eventUidOfFn, reparentEventsForImportFn, importDataFn].join('\n');
+  const src = [granularHelpers, ioRowsHTMLFn, ioBindRowsFn, ioSetAllFn, ioSelectedFn,
+               eventMergeSigFn, eventUidDisambiguateFn, eventMergeFilterFn, eventUidOfFn,
+               reparentEventsForImportFn, applyImportSectionsFn, showImportSectionPickerFn,
+               importDataFn].join('\n');
   try { vm.runInContext(src, sandbox); }
   catch (e) { console.error('FAIL: extracted source threw during eval:', e); process.exit(1); }
 
   return { sandbox: sandbox, calls: calls };
+}
+
+// The picker is a real dialog now, so "importing" is two steps: feed the file in,
+// let the parse + hash gate settle, then press Import. clickImport() is that press.
+// It is a no-op if the picker never opened, which is what the rejection case (I5f)
+// relies on.
+async function clickImport(ctx) {
+  await flush();
+  const go = ctx.sandbox.document.nodes['ioImpGo'];
+  if (go && typeof go.onclick === 'function') go.onclick();
+  await flush();
 }
 
 function makeEv(dataObj) {
@@ -152,7 +218,7 @@ async function main() {
     const backupEvent = { uid: 'backup-1', dev: 'dev-other', ts: 2000, kind: 'tap', taskId: 't2', dir: 1, reps: 0 };
     const ctx = makeCtx({ getEvents: function () { return Promise.resolve([localOnly]); } });
     ctx.sandbox.importData(makeEv(makeBackup([], [backupEvent])));
-    await flush();
+    await clickImport(ctx);
     assert('I1a: clearAllEvents never called', ctx.calls.clearAllEvents === 0);
     assert('I1b: bulkAddEvents called exactly once', ctx.calls.bulkAddEvents.length === 1);
     const added = ctx.calls.bulkAddEvents[0];
@@ -176,12 +242,12 @@ async function main() {
     const ctx = makeCtx({ getEvents: function () { return Promise.resolve(store.slice()); } });
 
     ctx.sandbox.importData(makeEv(makeBackup([], fileEvents.map(function (e) { return Object.assign({}, e); }))));
-    await flush();
+    await clickImport(ctx);
     assert('I2a: first import adds both events', ctx.calls.bulkAddEvents[0].length === 2);
     store = store.concat(ctx.calls.bulkAddEvents[0]); // simulate persistence
 
     ctx.sandbox.importData(makeEv(makeBackup([], fileEvents.map(function (e) { return Object.assign({}, e); }))));
-    await flush();
+    await clickImport(ctx);
     assert('I2b: second identical import adds nothing', ctx.calls.bulkAddEvents[1].length === 0);
     assert('I2c: clearAllEvents never called across either import', ctx.calls.clearAllEvents === 0);
   }
@@ -202,7 +268,7 @@ async function main() {
     const ctx = makeCtx({ getEvents: function () { return Promise.resolve([syncOriginEvent]); } });
 
     ctx.sandbox.importData(makeEv(makeBackup([], [backupRecord])));
-    await flush();
+    await clickImport(ctx);
 
     assert('I3a: clearAllEvents never called', ctx.calls.clearAllEvents === 0);
     assert('I3b: bulkAddEvents called exactly once', ctx.calls.bulkAddEvents.length === 1);
@@ -220,20 +286,38 @@ async function main() {
   // (covered inline by each scenario's own assertion + the static check above)
 
   // -----------------------------------------------------------------------
-  // I5: a file lacking char/tasks is rejected, and S is never touched
-  // (doImport/migrate never runs for the rejected attempt).
+  // I5: CHANGED 2026-09-18 by the granular export/import work.
+  //
+  // This used to assert that an events-only payload is REJECTED, because the old
+  // gate was `if(!data.char||!Array.isArray(data.tasks)) throw 0;`. That gate is
+  // gone on purpose: an events-only file is now a legitimate partial export, and
+  // refusing it was the exact thing that made a partial restore impossible. The
+  // assertions below encode the NEW contract, and keep the property the old ones
+  // were really protecting -- a file may not touch data it does not carry:
+  //   I5a-e  an events-only file imports its events and leaves tasks/char alone
+  //   I5f-i  a file with no recognised section at all is still rejected outright
   // -----------------------------------------------------------------------
   {
     const initialS = { char: { name: 'Orig' }, tasks: [{ id: 1 }, { id: 2 }, { id: 3 }] };
     const ctx = makeCtx({ initialS: initialS });
-    // events-only payload: no char, no tasks array.
-    ctx.sandbox.importData(makeEv({ events: [{ uid: 'e1', ts: 1, kind: 'tap' }] }));
-    await flush();
-    assert('I5a: confirmDialog never reached (gate threw before it)', ctx.calls.confirmDialog === 0);
-    assert('I5b: bulkAddEvents never called on the rejected attempt', ctx.calls.bulkAddEvents.length === 0);
-    assert('I5c: clearAllEvents never called on the rejected attempt', ctx.calls.clearAllEvents === 0);
-    assert('I5d: S.tasks.length is unchanged (migrate never ran)', ctx.sandbox.S.tasks.length === 3);
-    assert('I5e: an error dialog was shown', ctx.calls.alertDialog.some(function (a) { return /does not look like a valid Questa backup/.test(a.text || ''); }));
+    ctx.sandbox.importData(makeEv({ events: [{ uid: 'e1', ts: 1, kind: 'tap', taskId: 't9', dir: 1, reps: 0 }] }));
+    await clickImport(ctx);
+    assert('I5a: an events-only file is accepted (it is a valid partial export)', ctx.calls.confirmDialog === 1);
+    assert('I5b: its events were added', ctx.calls.bulkAddEvents.length === 1 && ctx.calls.bulkAddEvents[0].length === 1);
+    assert('I5c: clearAllEvents still never called', ctx.calls.clearAllEvents === 0);
+    assert('I5d: S.tasks is UNTOUCHED -- the file carries no tasks section', ctx.sandbox.S.tasks.length === 3);
+    assert('I5e: S.char is UNTOUCHED -- the file carries no char section', ctx.sandbox.S.char.name === 'Orig');
+  }
+  {
+    const initialS = { char: { name: 'Orig' }, tasks: [{ id: 1 }, { id: 2 }, { id: 3 }] };
+    const ctx = makeCtx({ initialS: initialS });
+    // No recognised section at all: not a Questa file.
+    ctx.sandbox.importData(makeEv({ hello: 'world', nested: { a: 1 } }));
+    await clickImport(ctx);
+    assert('I5f: confirmDialog never reached (gate threw before it)', ctx.calls.confirmDialog === 0);
+    assert('I5g: bulkAddEvents never called on the rejected attempt', ctx.calls.bulkAddEvents.length === 0);
+    assert('I5h: S.tasks.length is unchanged (migrate never ran)', ctx.sandbox.S.tasks.length === 3);
+    assert('I5i: an error dialog was shown', ctx.calls.alertDialog.some(function (a) { return /does not look like a valid Questa backup/.test(a.text || ''); }));
   }
 
   if (failures) {

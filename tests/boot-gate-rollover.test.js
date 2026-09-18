@@ -348,8 +348,6 @@ function boot(opts) {
   // on the import path"; assert that directly instead, which is what S1c is
   // actually protecting and what survives the next refactor too.
   assert('S1c the two import-flow startDay() call sites survive untouched',
-    (bare.match(/^\s+startDay\(\);\s*$/gm) || []).length === 2);
-  assert('S1c-i both live inside applyImportSections()',
     (stripComments(extractFunction(appSrc, /^async function applyImportSections\(data, keys, mode\)\{/, 'applyImportSections'))
       .match(/(?<![A-Za-z_$])startDay\(\)/g) || []).length === 2);
   // Total startDay() call sites: 2 imports + exactly 1 from the runner.

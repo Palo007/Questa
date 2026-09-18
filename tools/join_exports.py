@@ -151,6 +151,11 @@ def _detokenize_export(data):
     snap["events"] = _detok_events(data)
     # carry schema + appVersion so downstream consumers can tell, but the
     # merged output is emitted as legacy schema-1 (long keys) for compatibility.
+    # `_backup` itself (incl. `partial`/`sections` for a granular export) rides
+    # along too -- merge_exports()/_has_section() read it to know which
+    # top-level keys this input actually has an opinion about; it never ends
+    # up in the joined OUTPUT since `out` in merge_exports() is built fresh.
+    snap["_backup"] = meta
     return snap
 
 
@@ -173,6 +178,44 @@ ROW_MERGED = [
 ]
 
 TS_KEY_FALLBACK = "__savedAt"             # used for prefs (dict, no per-key ts)
+
+
+# --- granular ("partial") export support ------------------------------------
+# 2026-09-18: buildBackupFile (app.js) can now write a PARTIAL export -- only
+# the ticked IO_SECTIONS are included, and every top-level key belonging to an
+# unticked section is entirely ABSENT from the file (not an empty list: gone).
+# Mirrors app.js IO_SECTIONS -- which top-level state keys each section owns.
+SECTION_KEYS = {
+    "char": ("char",),
+    "habits": ("tasks",), "dailies": ("tasks",), "todos": ("tasks",),
+    "rewards": ("rewards",),
+    "tags": ("tags",),
+    "prefs": ("prefs", "lastCron"),
+    "history": ("history", "charHistory", "monthlyBackups"),
+    "devices": ("devices", "deletions"),
+    "events": ("events",),
+}
+
+
+def _has_section(d, key):
+    """True iff input `d` actually carries data for top-level `key` -- the
+    single choke point every collection/singleton read in merge_exports()
+    goes through so a partial export's absent sections can never win a
+    last-writer-wins comparison, empty out a collection, or be mistaken for a
+    deletion. `d._backup.sections` (written by buildBackupFile for a partial
+    export) is authoritative when present: a key outside it is treated as
+    absent even if it happens to be physically present in the JSON (defense
+    in depth), and a key inside it is trusted even when its value is an empty
+    list/dict, because an empty covered section is real information ("this
+    device truly has none"), not silence. A full export / legacy file with no
+    manifest falls back to plain key presence, unchanged from before."""
+    meta = d.get("_backup")
+    if isinstance(meta, dict) and meta.get("partial") and isinstance(meta.get("sections"), list):
+        owned = set()
+        for sec in meta["sections"]:
+            owned.update(SECTION_KEYS.get(sec, ()))
+        return key in owned and key in d
+    return key in d
 
 
 def _is_default(v):
@@ -248,6 +291,8 @@ def merge_an_subarray(inputs, subkey, conflicts):
             order.append(v["id"])
     by_id = {}
     for (fn, d) in inputs:
+        if not _has_section(d, "prefs"):
+            continue
         arr = (d.get("prefs", {}).get("an", {}) or {}).get(subkey, []) or []
         if not isinstance(arr, list):
             continue
@@ -335,9 +380,17 @@ def merge_exports(inputs):
     top_int_max = ["__seq", "__savedAt", "__hlcLast", "version", "lastCron"]
     out = {}
     for k in top_int_max:
-        vals = [int(d.get(k) or 0) for (_, d) in inputs]
-        if any(d.get(k) is not None for (_, d) in inputs):
-            out[k] = max(vals)
+        # lastCron rides inside the "prefs" IO_SECTION (see SECTION_KEYS): a
+        # partial export that didn't tick prefs carries no opinion on it, so
+        # (unlike the other, envelope-level keys here) it is gated through
+        # _has_section like every other section-owned key -- otherwise an
+        # absent lastCron would default to 0 and, being a min not a max, do
+        # no harm here, but would wrongly count as "present" for the
+        # _plausible-future-clock checks just below.
+        gated = [d for (_, d) in inputs
+                 if (_has_section(d, "lastCron") if k == "lastCron" else d.get(k) is not None)]
+        if gated:
+            out[k] = max(int(d.get(k) or 0) for d in gated)
     # K1 (2026-09-11): mirrors the sync.js mergedLastCron rule. A lastCron that
     # lies in the FUTURE carries no authority, because normalize_daily_resets
     # below force-unchecks every daily under it and clears every subtask tick.
@@ -346,7 +399,7 @@ def merge_exports(inputs):
     # today keep the plain max, so ordinary archive joins are unaffected.
     if "lastCron" in out:
         _today = int(datetime.now().strftime("%Y%m%d"))  # LOCAL day, matching sync.js dayStampOf()
-        _plausible = [v for v in (int(d.get("lastCron") or 0) for (_, d) in inputs) if v <= _today]
+        _plausible = [v for v in (int(d.get("lastCron") or 0) for (_, d) in inputs if _has_section(d, "lastCron")) if v <= _today]
         if out["lastCron"] > _today:
             out["lastCron"] = max(_plausible) if _plausible else 0
     # K2 (2026-09-11): __hlcLast is the device hybrid logical clock. It is deliberately
@@ -368,6 +421,8 @@ def merge_exports(inputs):
     # ---- char (singleton) --------------------------------------------------
     char_winner = None
     for (fn, d) in inputs:
+        if not _has_section(d, "char"):
+            continue
         c = d.get("char")
         if not isinstance(c, dict):
             continue
@@ -381,6 +436,8 @@ def merge_exports(inputs):
         # join is order-independent the same way the merge is.
         _abs = {}
         for (_fn, d) in inputs:
+            if not _has_section(d, "char"):
+                continue
             c = d.get("char")
             if not isinstance(c, dict):
                 continue
@@ -413,6 +470,8 @@ def merge_exports(inputs):
             continue
         by_key = {}  # k -> {"ts","file","value"}
         for (fn, d) in inputs:
+            if not _has_section(d, col):
+                continue
             rows = d.get(col)
             if not isinstance(rows, list):
                 continue
@@ -459,6 +518,8 @@ def merge_exports(inputs):
     # field with max, exactly as the app does.
     ch = {}
     for (fn, d) in inputs:
+        if not _has_section(d, "charHistory"):
+            continue
         for row in d.get("charHistory", []) or []:
             if not (isinstance(row, dict) and "date" in row):
                 continue
@@ -494,6 +555,8 @@ def merge_exports(inputs):
     # ---- deletions (tombstones: union by id, newest at wins) ---------------
     del_by = {}
     for (fn, d) in inputs:
+        if not _has_section(d, "deletions"):
+            continue
         for row in d.get("deletions", []) or []:
             if isinstance(row, dict) and "id" in row:
                 k = row["id"]
@@ -535,6 +598,8 @@ def merge_exports(inputs):
     # ---- events (union by id; disjoint epochs, but guard collisions) -------
     ev_by = {}
     for (fn, d) in inputs:
+        if not _has_section(d, "events"):
+            continue
         for row in d.get("events", []) or []:
             if not isinstance(row, dict) or "id" not in row:
                 continue
@@ -556,6 +621,8 @@ def merge_exports(inputs):
     pref_sources = {}  # key -> (file, savedAt, value)
     an_sources = {}    # an sub-key -> (file, savedAt, value)  (newest __savedAt wins)
     for (fn, d) in ordered:
+        if not _has_section(d, "prefs"):
+            continue
         p = d.get("prefs")
         if not isinstance(p, dict):
             continue
@@ -593,14 +660,19 @@ def merge_exports(inputs):
     out["prefs"] = out_prefs
 
     # ---- habiticaHistory (keep if present in any) --------------------------
+    # Not one of IO_SECTIONS -- app.js never puts it in a partial export's
+    # slice, only in a full one's whole-state copy -- so _has_section already
+    # excludes it for any partial input with no extra rule needed here.
     for (fn, d) in inputs:
-        if isinstance(d.get("habiticaHistory"), dict):
+        if _has_section(d, "habiticaHistory") and isinstance(d.get("habiticaHistory"), dict):
             out["habiticaHistory"] = d["habiticaHistory"]
             break
 
     # ---- monthlyBackups (union of strings) ---------------------------------
     mb = {}
     for (fn, d) in inputs:
+        if not _has_section(d, "monthlyBackups"):
+            continue
         for s in d.get("monthlyBackups", []) or []:
             if isinstance(s, str):
                 mb[s] = True
@@ -625,7 +697,15 @@ def main(argv):
         if not os.path.exists(p):
             sys.stderr.write("MISSING: %s\n" % p)
             return 2
-        inputs.append((os.path.basename(p), _load(p)))
+        d = _load(p)
+        # Surface what a granular ("partial") input actually contributes, so
+        # a user joining several files can see at a glance what each one is
+        # for -- and, per _has_section() above, that everything else it
+        # doesn't list was left alone, not treated as deleted.
+        meta = d.get("_backup")
+        if isinstance(meta, dict) and meta.get("partial") and isinstance(meta.get("sections"), list):
+            print("partial export: %s (sections: %s)" % (os.path.basename(p), ", ".join(meta["sections"])))
+        inputs.append((os.path.basename(p), d))
 
     merged, conflicts = merge_exports(inputs)
 

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.18-2318";
+const APP_VERSION = "v2026.09.18-2331";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -963,9 +963,18 @@ function idbOpen(){
 // runCron, creditYesterday) stay synchronous; all async + failure handling is
 // internal here, so a missing/blocked IDB never breaks task scoring.
 function logEvent(ev){
+  // 2026-09-18 (round 2): ALWAYS mint a uid. index.html loads app.js before
+  // sync.js, so during app.js top-level init syncEventUid/syncDeviceId do not exist
+  // yet and this used to store a record with no uid at all -- which
+  // eventMergeFilter then rejects outright (`!r.uid` -> skipped) and evtUploadable
+  // excludes from upload (`e && e.uid && ...`). Those records are precisely the
+  // boot-time diagnostics you need when something goes wrong: hlcReset from
+  // _hlcHeal(), storagePersist, the reconcile lifecycle pair. They could never be
+  // restored from a backup and never left the device, and the import dialog
+  // counted them as "already present, skipped".
   const rec = (typeof syncEventUid==="function" && typeof syncDeviceId==="function")
     ? Object.assign({ts:Date.now(), uid:syncEventUid(), dev:syncDeviceId()}, ev)
-    : Object.assign({ts:Date.now()}, ev);
+    : Object.assign({ts:Date.now(), uid:'loc-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,9)}, ev);
   // 2026-07-29 hardening (W2.4): wire tx.onabort/tx.onerror so an async IndexedDB
   // transaction failure is no longer invisible -- previously only a synchronous
   // try/catch around the transaction+add call existed, with a silent swallow and
@@ -1222,7 +1231,18 @@ function republishImportedEvents(){
 // distinct taps on the same task, same direction, same rep count, in the
 // same millisecond. That is not real user behaviour.
 function eventMergeSig(r){
-  return [r.ts, r.kind, r.taskId || '', r.dir || 0, r.reps || 0].join('|');
+  // 2026-09-18 (round 2): include the fields that actually distinguish two records
+  // logged in the same millisecond. The old five-field signature omitted `detail`,
+  // `subId` and `done`, and the app emits same-ts pairs synchronously from ONE DOM
+  // event: flushState() and the Tier-1 snapshot handler are both bound to
+  // visibilitychange, and again to pagehide, so each backgrounding writes two
+  // lifecycle records with the same Date.now() and different `detail`. On a restore
+  // the second was dropped by the signature gate and counted as "already present",
+  // which is also why the dialog could say "N already present" against an empty
+  // store. The documented residual risk (two identical taps in one millisecond)
+  // is unchanged.
+  return [r.ts, r.kind, r.taskId || '', r.dir || 0, r.reps || 0,
+          r.detail || '', r.subId || '', (r.done === undefined ? '' : (r.done ? 1 : 0))].join('|');
 }
 // Deterministic tie-breaker for a uid COLLISION -- two logically different
 // events that hashed to the same 'rep-...' uid. Derived from the content
@@ -1365,6 +1385,14 @@ function reparentEventsForImport(list){
     if(myDev) e.dev = myDev;
     e.uid = eventUidOf(e, i);
     if('synthetic' in e) delete e.synthetic;
+    // 2026-09-18 (round 2): drop the republish opt-in too. evtUploadable lifts the
+    // imported-exclusion only for `e.republish === true`, and that flag used to
+    // survive export -> import onto a NEW device. Device C would then re-upload
+    // device A's history under C's own device id -- "publishing ANOTHER device's
+    // history under THIS device's uid, permanently duplicating it", exactly what
+    // the guard exists to prevent -- with no opt-in ever given on C. The opt-in
+    // must be re-given per device.
+    if('republish' in e) delete e.republish;
     e.imported = true;
   }
   return list;
@@ -1417,7 +1445,7 @@ function eventImportSummaryHTML(sum){
     + '<span>To-dos <b>'+(c.todo||0)+'</b></span>'
     + '<span>System <b>'+(c.system||0)+'</b></span>'
     + '</div>'
-    + '<p class="evSummaryNote">The feed hides '+sum.diagnostic+' system/diagnostic events and follows the date window, so its count (under \u201cAll\u201d) may be lower than stored. All events are kept locally and will sync.</p>'
+    + '<p class="evSummaryNote">The feed hides '+sum.diagnostic+' system/diagnostic events and follows the date window, so its count (under \u201cAll\u201d) may be lower than stored. Imported events stay on this device \u2014 they are not synced to your other devices unless you use \u201cRepublish imported events\u201d, and events older than about 18 months are pruned.</p>'
     + '</div>';
 }
 function bulkAddEvents(list){
@@ -1791,9 +1819,19 @@ function isoWeekKey(ts){
   // Thursday trick: set to Thursday of this week, then read its year
   d.setDate(d.getDate() - dow + 3);
   var isoYear = d.getFullYear();
-  // Jan 4 is always in ISO week 1; weekNo = 1 + days since first Thursday / 7
-  var jan4 = new Date(isoYear, 0, 4);
-  var weekNo = 1 + Math.floor((d - jan4) / 604800000);
+  // 2026-09-18 (round 2): measure from week 1's THURSDAY, not from Jan 4 itself.
+  // `d` has already been shifted to its own week's Thursday, so the divisor only
+  // gives whole weeks when the origin is also a Thursday. In the 3 years in 7 where
+  // 4 January falls on Fri/Sat/Sun, week 1's Thursday PRECEDES Jan 4, the numerator
+  // went negative for week 1 and Math.floor rounded to -1 — every week in that ISO
+  // year came out one low. Measured: 2026-06-15 returned 202624 for ISO week 25,
+  // and 2026-01-01 returned 202600, which is not a valid ISO week at all. The GFS
+  // keys stayed injective, so this mislabels rather than loses data.
+  var wk1Thu = new Date(isoYear, 0, 4);
+  wk1Thu.setDate(wk1Thu.getDate() - ((wk1Thu.getDay() + 6) % 7) + 3);
+  wk1Thu.setHours(0,0,0,0);
+  d.setHours(0,0,0,0);   // so a DST hour cannot perturb the division
+  var weekNo = 1 + Math.round((d - wk1Thu) / 604800000);
   return isoYear * 100 + weekNo;
 }
 // snapshotBoundaryKeys(ts): calendar-boundary keys for GFS tier rotation.
@@ -1945,9 +1983,16 @@ function death(){
 // Append/merge a dated point onto a task's history in Habitica's shape.
 // Same-day events merge (scoredUp accumulates, completed/ value updated) so
 // the series stays one-point-per-day, continuous with the imported data.
-function logHistory(t, patch){
+// atMs (2026-09-18 round 2): optional, for a point that belongs to a day other than
+// today. runCron's miss record is the case that needed it — it was stamped
+// Date.now(), so yesterday's miss landed in TODAY's bucket, and when the user then
+// completed that same daily today logHistory merged into the very same point and set
+// completed = true, erasing the miss. History then showed no record of the missed day
+// even though HP had been charged for it. creditYesterday already hand-rolled a
+// backdated push for the mirror-image reason.
+function logHistory(t, patch, atMs){
   t.history = t.history || [];
-  const now = Date.now();
+  const now = (typeof atMs === 'number' && atMs > 0) ? atMs : Date.now();
   const dayOf = ms => Math.floor(ms/86400000);
   const last = t.history[t.history.length-1];
   if(last && dayOf(last.date)===dayOf(now)){
@@ -1963,6 +2008,10 @@ function logHistory(t, patch){
     if('scored' in patch) last.scored = last.scored || patch.scored;
   } else {
     t.history.push(Object.assign({date:now}, patch));
+    // A backdated point must not leave the series out of order — analytics and the
+    // snapshot walk both read it ascending.
+    const n = t.history.length;
+    if(n > 1 && (t.history[n-2].date || 0) > now) t.history.sort((a,b)=>(a.date||0)-(b.date||0));
   }
 }
 function completeTask(t, ev){
@@ -1994,7 +2043,12 @@ function completeTask(t, ev){
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:_realizedDelta };  // remember exactly what was granted
   if(t.type==='daily'){ if(!S.prefs.paused) t.streak = (t.streak||0) + 1;
     const cl=(t.checklist||[]); const snap = cl.length? {checklist:cl.map(c=>({text:c.text,done:!!c.done}))} : {};
+    // 2026-09-18 (round 2): record whether THIS completion created the day's history
+    // point or merged into one that already existed (runCron's miss record, an
+    // imported row). unlogToday may only pop a point it created — see unlogToday.
+    const _hLen = (t.history||[]).length;
     logHistory(t,Object.assign({value:t.value,completed:true,isDue:true,reward:Object.assign({},t._gr),repeat:(t.repeat||[]).slice()},snap));
+    t._histCreated = ((t.history||[]).length > _hLen);
     // isDue:true is safe here: non-due dailies are gated above
     logEvent({kind:'complete', taskType:'daily', taskId:t.id, taskTitle:t.title,
               streak:t.streak, reward:Object.assign({},t._gr), repeat:(t.repeat||[]).slice(),
@@ -2021,9 +2075,16 @@ function unlogToday(t){
   const last = t.history[t.history.length-1];
   if(dayOf(last.date)===dayOf(Date.now())){
     if(last.completed){ last.completed=false; }
-    // if the point carried no other signal, drop it
-    if(!last.scoredUp && !last.scoredDown && !last.completed) t.history.pop();
-    else last.value = t.value;
+    // 2026-09-18 (round 2): only drop a point THIS completion created. logHistory is
+    // a merge -- "same-day events merge... so the series stays one-point-per-day" --
+    // so `last` is frequently a point somebody else wrote: runCron's miss record
+    // (isDue/repeat/value), or an imported history row dated today. The old guard
+    // tested only scoredUp/scoredDown/completed, none of which those carry, so
+    // un-ticking a daily deleted the whole day's record. `_new` is stamped by
+    // logHistory on the push branch and cleared here.
+    if(t._histCreated && !last.scoredUp && !last.scoredDown && !last.completed) t.history.pop();
+    else { last.value = t.value; delete last.reward; }
+    delete t._histCreated;
   }
 }
 function uncompleteDaily(t){
@@ -2341,6 +2402,16 @@ function commitYesterCheck(){
   document.getElementById('yScrim').classList.remove('show');
   document.getElementById('yScrim').innerHTML='';
   _yesterMissed=[]; _yesterTick={};
+  // 2026-09-18 (round 2): persist unconditionally. creditYesterday() is documented
+  // as staying silent for batch use, so persistence is the caller's job, and this
+  // used to delegate it entirely to runCron() below. But runCron()'s FIRST
+  // statement is `if(today <= S.lastCron) return;` with no save() -- and a sync
+  // round landing while the modal is open merges lastCron up to today, which is
+  // exactly the case this function's own 2026-08-18 note describes. Every credit
+  // (XP, gold, MP, value, streak, done, doneDay, the history point) then existed
+  // only in memory, and a reload before the next save-triggering action lost them
+  // all, under a toast that said "Credited N dailies".
+  if(credited>0 && typeof save==='function') save();
   runCron();            // finalize the day; corrected dailies are now done, so cron skips them
   render();
   if(credited>0) toast('Credited '+credited+' daily'+(credited===1?'':'s')+' from yesterday');
@@ -2529,7 +2600,9 @@ function runCron(){
       t.value = clamp(t.value - valueDelta(t.value), -47.27, 99);
       t.streak = 0;
       t.missedOn = yesterdayStamp; // F3 (2026-07-11): recency channel for cron-aware merge — cleared on completion/credit
-      logHistory(t,{value:t.value,completed:false,isDue:true,repeat:(t.repeat||[]).slice()});
+      // 2026-09-18 (round 2): stamp the miss on YESTERDAY, the day it belongs to —
+      // the same day t.missedOn records one line above. See logHistory's atMs note.
+      logHistory(t,{value:t.value,completed:false,isDue:true,repeat:(t.repeat||[]).slice()}, Date.now()-86400000);
       const cl=(t.checklist||[]);
       logEvent({kind:'miss', taskType:'daily', taskId:t.id, taskTitle:t.title,
                 dmg: dmg,
@@ -4302,7 +4375,6 @@ function renderEventDetail(from,to){
       h+='<div id="evFeedContent"></div>';
       cur.innerHTML = h;
       feedContent = document.getElementById('evFeedContent');
-      const eo = document.getElementById('evOverview'); if(eo) eo.textContent = filtered.length + ' events shown in feed';
     } else {
       // Sync filter chips active class without re-rendering controls
       const chips = cur.querySelectorAll('.evFilterChip');
@@ -4325,6 +4397,15 @@ function renderEventDetail(from,to){
       if(searchReset) {
         searchReset.style.display = _evSearchQuery ? 'block' : 'none';
       }
+    }
+
+    // 2026-09-18 (round 2): update the summary on EVERY pass. This assignment used
+    // to live inside the `if(!feedContent)` build branch, so it ran only on the
+    // first render: after any chip, search or page change the list below updated
+    // while the header still reported the original unfiltered count.
+    {
+      const eo = document.getElementById('evOverview');
+      if(eo) eo.textContent = filtered.length + ' events shown in feed';
     }
 
     if(!filtered.length){
@@ -6077,6 +6158,19 @@ function resetEverything() {
     applyCardThick();
     closeSheet();
     render();
+  }).catch(e => {
+    // 2026-09-18 (round 2): the async body had no .catch, so its rejection was
+    // unobserved. The destructive steps run FIRST — the remote /events files are
+    // deleted and the local event store is cleared — while the state reset is last.
+    // Anything in between (syncCfgSave, syncDisconnect, syncBasePut,
+    // localStorage.removeItem) can throw on a storage-blocked origin such as Safari
+    // private mode, and then the whole event log was already gone, locally and in
+    // Dropbox, with the sheet still open, no toast and nothing in the log. The user
+    // would reasonably conclude nothing had happened.
+    try{ if(typeof _qDiagPush === "function") _qDiagPush('resetFailed', {error:(e && e.message) || String(e)}); }catch(_){}
+    alertDialog('Reset Error',
+      'The reset did not finish: ' + ((e && e.message) || String(e)) +
+      '\n\nSome data may already have been erased. Check Settings before continuing.');
   });
 }
 // Tooltip delay is fixed at Instant (0); the user-facing control was removed.
@@ -7441,8 +7535,18 @@ async function confirmRestore(id){
       const merge = eventMergeFilter(events, existingUidSet, existingSigSet);
       const add = merge.add, skipped = merge.skipped;
       const bulkResult = await bulkAddEvents(add);
-      const added = bulkResult.added;
+      // 2026-09-18 (round 2): read the RESULT, the way the import path does. This
+      // reported bulkResult.added unguarded and never looked at .failed/.aborted, so
+      // a quota-exhausted or aborted transaction still produced a cheerful "Restored
+      // snapshot from ..." toast with an empty Activity Feed — the same failure that
+      // made a user delete their backup file believing 4000 events had landed.
+      const added = (bulkResult && typeof bulkResult.added === 'number') ? bulkResult.added : 0;
       logEvent({kind: 'restore', taskTitle: 'Restore from snapshot', notes: 'Restored ' + added + ' events (' + skipped + ' already present, skipped)'});
+      if(bulkResult && (bulkResult.aborted || bulkResult.failed)){
+        alertDialog('Restore incomplete',
+          'The character and tasks were restored, but only ' + added + ' of ' + add.length +
+          ' events could be written to this device. Keep the snapshot and free up storage, then restore again.');
+      }
     }
 
     closeSheet();

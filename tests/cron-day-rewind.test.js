@@ -58,7 +58,11 @@ const code = [
   extractFunction(appSrc, /^function gainXp\(xp\)\{/, 'gainXp'),
   extractFunction(appSrc, /^function death\(\)\{/, 'death'),
   extractFunction(appSrc, /^function takeDamage\(amount\)\{/, 'takeDamage'),
-  extractFunction(appSrc, /^function logHistory\(t, patch\)\{/, 'logHistory'),
+  // 2026-09-18 (round 2): logHistory gained an optional third parameter, atMs, so
+  // runCron can stamp yesterday's miss on yesterday instead of today. Anchor on the
+  // first two parameters only, so an added optional argument does not break the
+  // extraction again.
+  extractFunction(appSrc, /^function logHistory\(t, patch/, 'logHistory'),
   extractFunction(appSrc, /^function logCharSnapshot\(\)\{/, 'logCharSnapshot'),
   extractFunction(appSrc, /^function isDailyDueOn\(t, dow\)\{/, 'isDailyDueOn'),
   extractFunction(appSrc, /^function periodBoundaryCrossed\(freq, lastStamp, now\)\{/, 'periodBoundaryCrossed'),

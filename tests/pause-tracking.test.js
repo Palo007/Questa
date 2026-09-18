@@ -78,7 +78,9 @@ const clampFn = extractFunction(appSrc, /^function clamp\(v,a,b\)\{/, 'clamp');
 const valueDeltaFn = extractFunction(appSrc, /^function valueDelta\(value\)\{/, 'valueDelta');
 const missDamageFn = extractFunction(appSrc, /^function missDamage\(task\)\{/, 'missDamage');
 const takeDamageFn = extractFunction(appSrc, /^function takeDamage\(amount\)\{/, 'takeDamage');
-const logHistoryFn = extractFunction(appSrc, /^function logHistory\(t, patch\)\{/, 'logHistory');
+// 2026-09-18 (round 2): anchor on the first two parameters — logHistory gained an
+// optional third, atMs, so runCron can backdate yesterday's miss to yesterday.
+const logHistoryFn = extractFunction(appSrc, /^function logHistory\(t, patch/, 'logHistory');
 const logEventFn = extractFunction(appSrc, /^function logEvent\(ev\)\{/, 'logEvent');
 const logCharSnapshotFn = extractFunction(appSrc, /^function logCharSnapshot\(\)\{/, 'logCharSnapshot');
 const runCronFn = extractFunction(appSrc, /^function runCron\(\)\{/, 'runCron');

@@ -1,53 +1,114 @@
 # ⚔️ Questa — Gamified Habit Tracker RPG
 
-**Questa** is a highly polished, offline-first gamified habit and productivity tracker styled after classic fantasy RPGs. It transforms your daily routine, self-discipline, and to-do lists into an immersive role-playing experience. Form positive habits, complete your daily quests, and vanquish your real-life tasks to gain experience, earn gold, and level up your warrior wizard avatar!
+**Questa** is an offline-first habit and productivity tracker styled after
+classic fantasy RPGs. Habits, daily quests and to-dos earn XP, gold and levels;
+missed dailies cost health. It is a single static web page — no build step, no
+account, no backend.
+
+**[→ How to install and run it](./INSTALL.md)**
+
+Quick version: serve the repository folder over http(s) and open it. Opening
+`index.html` straight from your file system will *not* work — the service worker
+needs a real origin.
+
+```bash
+python3 -m http.server 8080    # then open http://localhost:8080
+```
 
 ---
 
-## 🎮 Immersive RPG Mechanics
+## 🎮 RPG mechanics
 
-- **Level & Classes**: Start your journey as a humble level 1 adventurer and advance. Rise to power and watch your level, health, and mana grow.
-- **Dynamic Stats Canvas**:
-  - ❤️ **HP (Health Points)**: Failing to complete your scheduled Dailies deals damage! Drink potions from the Shop to recover before a tragic death wipes your gold and levels.
-  - 💛 **XP (Experience Points)**: Gain XP by checking off Habits, completing Dailies, and conquering To-Dos.
-  - 🪙 **Gold / Coin Economy**: Earn gold for your hard work and spend it in the built-in Shop on survival potions or customizable rewards.
-- **Customizable Avatar**: Match your playstyle with beautifully styled, customizable wizard avatars and real-time visual face updates.
-- **Daily Upkeep checks**: Wake up to a morning resolution page summarizing yesterday's missed dailies, checking off your active streaks, and deducting health seamlessly.
-
----
-
-## 📊 Advanced Analytics & Custom Views Builder
-
-Questa includes a powerhouse analytics suite allowing you to build, customize, and configure bespoke visualization dashboards:
-
-- **Bento-Style Dashboards**: Beautiful, responsive layout featuring multiple data grids and visual metrics.
-- **Sparklines & Charts**: Uses custom responsive SVG visualizations for sparklines, trends, and progress paths.
-- **Heatmaps**: Includes an interactive activity heatmap detailing your completion intensity over custom ranges (7d, 30d, 90d, 180d, 1y, All).
-- **Custom View Creator**:
-  - Filter by specific tasks, habits, dailies, or to-dos.
-  - Group by **Day, Week, Month, Tag, or Type**.
-  - Choose layouts: **List, Bar, Line, or Heatmap**.
-  - Completely customizable with full clone, edit, cancel, and delete controls.
+- **Levels & stats**: start at level 1 and grow your level, health and mana.
+  - ❤️ **HP** — failing a scheduled Daily deals damage. Buy potions in the Shop
+    before a death wipes your gold and levels.
+  - 💛 **XP** — earned from Habits, Dailies and To-Dos.
+  - 🪙 **Gold** — earned for work done, spent in the built-in Shop on potions or
+    on rewards you define yourself.
+- **Customizable avatar** with real-time visual face updates.
+- **Daily upkeep**: a morning resolution page summarising yesterday's missed
+  dailies, checking off active streaks and applying health loss.
 
 ---
 
-## 📱 Mobile-First Responsive Design
+## 📊 Analytics and custom views
 
-Crafted with desktop-first precision and mobile-first touch fluidity:
-- **Scroll-Lock Modals**: Beautiful overlay sheets that perfectly fit all screens. Long forms adapt, scroll independently, and respect touch limits.
-- **Optimized Controls**: High-contrast, beautifully padded tap targets, rounded segments, and micro-animations designed to feel fast, native, and premium.
-- **Fluid Drag-and-Drop**: Reorder your daily list easily with high-performance grab-and-drag interactions.
-
----
-
-## ⚙️ Offline Architecture & Portability
-
-- **100% Client-Side & Local**: No logins, no tracking, and no external server overhead.
-- **Durable Local Storage**: Fully cached state engine handles updates and page reloads instantly.
-- **Data Portability**: Full support for raw JSON export and import to keep your data completely safe, private, and transferable.
+- **Bento-style dashboards** — responsive grids of visual metrics.
+- **Sparklines & charts** — custom responsive SVG, no chart library.
+- **Heatmaps** — activity intensity over 7d, 30d, 90d, 180d, 1y or all time.
+- **Custom view creator** — filter by task, habit, daily or to-do; group by day,
+  week, month, tag or type; render as list, bar, line or heatmap; clone, edit
+  and delete.
 
 ---
 
-## 🛠️ Syncing and Contributing
+## 📱 Mobile-first design
 
-For a detailed step-by-step guide on how to safely sync updates from the Google AI Studio builder into your existing public GitHub repository, check out the [INSTALL.md](./INSTALL.md) file.
+- Scroll-lock modal sheets that fit any screen and scroll independently.
+- High-contrast tap targets, rounded segments and micro-animations.
+- Drag-and-drop reordering built for touch.
+
+---
+
+## ☁️ Optional Dropbox sync
+
+Questa can keep **two or more devices** in sync through your own Dropbox app
+folder. It is **off by default** and entirely optional — the app is fully
+functional without it, and without any account.
+
+What it does:
+
+- Syncs your character, tasks, settings and event history between devices.
+- Merges field by field rather than last-write-wins, so two devices editing
+  different things both keep their edits.
+- Records conflict decisions in the Activity Feed so you can see what it chose.
+- Can take automatic rolling backups into the same folder.
+
+What it means for your data: with sync enabled, your data is stored in **your
+Dropbox account**, in an app folder scoped to Questa alone. There is still no
+Questa server, no analytics and no telemetry — but "no external server" stops
+being true the moment you switch it on, and that is your call to make.
+
+Read before enabling it:
+
+- [docs/SYNC-USER-GUIDE.md](./docs/SYNC-USER-GUIDE.md) — what syncs, how merging
+  works, force push/pull, troubleshooting.
+- [docs/SYNC-MULTI-DEVICE-CASES.md](./docs/SYNC-MULTI-DEVICE-CASES.md) — the
+  multi-device scenarios and how each resolves.
+- [docs/BACKUP-USER-GUIDE.md](./docs/BACKUP-USER-GUIDE.md) — snapshots, exports
+  and restoring.
+
+**Running your own copy?** The Dropbox app key in this repository is registered
+for the original deployment's address only, so login will fail on your fork
+until you register your own Dropbox app. It takes about two minutes —
+[instructions are in INSTALL.md](./INSTALL.md#self-hosting-and-dropbox-sync).
+
+---
+
+## ⚙️ Architecture and privacy
+
+- **Client-side only.** No login, no tracking, no analytics, no Questa server.
+  State lives in `localStorage`; the event history lives in IndexedDB.
+- **Offline-first.** A service worker caches the app shell network-first, so
+  updates land on the next launch and the app still opens with no connection.
+- **Data portability.** Full JSON export and import, plus local snapshots.
+- **The one exception** to "nothing leaves this device" is Dropbox sync, above.
+  Leave it off and nothing ever does.
+
+---
+
+## 🛠️ Development
+
+```bash
+node tests/run.js
+```
+
+No framework, no dependencies. The suite is the deploy gate — never ship it red.
+Design notes for the sync engine, backup format, event log and diagnostics
+bundle are in [`docs/`](./docs/).
+
+---
+
+## 📄 Licence
+
+[MIT](./LICENSE). Fork it, change it, ship it.

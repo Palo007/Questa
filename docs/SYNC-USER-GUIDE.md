@@ -6,7 +6,7 @@ Questa can keep your progress the same across multiple devices (e.g. desktop and
 
 ## TL;DR
 
-- **Setup:** Settings → **Connect Dropbox** → log in and approve once. Do this on every device you want kept in sync.
+- **Setup:** Settings → **Connect Dropbox** → log in and approve once. Do this on every device you want kept in sync. *(Running your own copy of Questa? One extra one-time step first — see [Setting it up](#setting-it-up).)*
 - **Day to day:** you don't do anything. It syncs automatically a few seconds after any change, when you switch tabs/apps, and when you come back online.
 - **To sync right now:** Settings → **Sync now**.
 - **To stop syncing this device:** Settings → **Disconnect**. Your local data is untouched.
@@ -43,6 +43,16 @@ None of this means sync is "missing" anything that matters for keeping your task
 ---
 
 ## Setting it up
+
+> **Running your own copy of Questa?** Do the one-time step in
+> [INSTALL.md → Self-hosting and Dropbox sync](../INSTALL.md#self-hosting-and-dropbox-sync)
+> **first**. The Dropbox app key shipped in this repository is registered for the
+> original deployment's web address only, and Dropbox refuses any login whose
+> return address is not registered on that app. On your own address — a fork on
+> GitHub Pages, a different host, or `localhost` — step 1 below sends you to
+> Dropbox and the approval simply never comes back. Registering your own Dropbox
+> app takes about two minutes and fixes it. If you are using the original
+> deployment, ignore this and carry on.
 
 1. Open **Settings** and tap **Connect Dropbox**.
 2. You'll be sent to Dropbox's own login/approval page. Log in and tap **Allow**. Nothing about your password ever passes through Questa.
@@ -246,6 +256,8 @@ Settings always shows the most recent problem, if any, right under "Last sync." 
 - **"Sync blocked: N month file(s) would shrink"** — the push shrink guard detected that your local event count for one or more months is smaller than what Dropbox already has. Tap **Force Push Events** in Settings to override and push anyway, or investigate why events were lost locally first.
 
 If Settings still just shows **Connect Dropbox** after you thought you connected: the connection attempt didn't complete. Try again, and make sure you don't close or reload the tab in the few seconds right after Dropbox's approval page sends you back.
+
+If it keeps failing on **every** attempt, and you are running your own copy of Questa rather than the original deployment, the cause is almost certainly the unregistered redirect address described at the top of [Setting it up](#setting-it-up). Dropbox will not send the approval back to an address that is not listed on the app the key belongs to, so no amount of retrying helps — register your own Dropbox app instead ([INSTALL.md](../INSTALL.md#self-hosting-and-dropbox-sync)).
 
 **Double-checking that event sync is actually keeping up:** the diagnostic overlay (Settings → tap the version number 5× within 3 seconds) includes a per-device event divergence readout — this device's local event count for every known device, next to what the last Dropbox pull cached for that device's files. A device showing zero local events while its file still exists in Dropbox is flagged in red — that combination means this device's copy of that device's history hasn't actually arrived, even if ordinary sync otherwise looks healthy.
 

@@ -1,110 +1,154 @@
-# Questa Synchronization & Integration Guide
+# Installing and running Questa
 
-This guide documents **Option B: The Git Remote Pull Method (Semi-Automated)** to seamlessly sync your updates from Google AI Studio into your existing GitHub repository using VS Code, including instructions for resolving initial merge conflicts.
+Questa is a **static web app**. There is no build step, no package to install, no
+server code and no database. Four files do the work — `index.html`, `app.js`,
+`sync.js` and `sw.js` — plus the icons and `manifest.json`.
 
----
-
-## 1. Quick Setup in VS Code
-
-You can run these commands directly inside the **VS Code Terminal** (``Ctrl + ` `` or ``Cmd + ` ``).
-
-### Step 1: Add the AI Studio Shared Build as a Remote
-Add a new git remote pointing to the git repository of your AI Studio applet:
-```bash
-git remote add questa-temp-sync https://github.com/aistudio-build/2d556de8-722e-4215-9905-a9ba6fd886f0.git
-```
-
-### Step 2: Fetch the Latest Changes
-```bash
-git fetch questa-temp-sync
-```
-
-### Step 3: Trigger the Merge (Allowing Unrelated Histories)
-Since the local and remote repositories don't share a common commit history initially, you must allow unrelated histories on the first merge:
-```bash
-git merge questa-temp-sync/main --allow-unrelated-histories -m "Sync updates from AI Studio"
-```
+You only need one thing: a way to serve those files over **`http://` or
+`https://`**.
 
 ---
 
-## 2. Resolving the Initial Merge Conflicts
+## The one rule: do not open `index.html` from your file system
 
-During the first sync, Git will detect conflicts because the same files (`app.js`, `index.html`, `.gitignore`, `sw.js`, and icons) exist in both trees but don't share history. Here is how to clean them up cleanly:
+Double-clicking `index.html` gives you a `file://` URL, and that **will not
+work properly**. Browsers refuse to register a service worker on `file://`, so
+you lose offline support, the install-to-home-screen prompt and the update
+mechanism. Dropbox sync cannot complete its login either, because the redirect
+comes back to an origin the browser treats as opaque.
 
-### A. Binary Files (Icons)
-Git cannot automatically merge binary files (`icon-192.png` and `icon-512.png`). You should resolve these conflicts by choosing the latest assets from the AI Studio workspace:
+Serve the folder instead. Every option below does that.
 
-To accept the AI Studio version (incoming changes):
+---
+
+## Option 1 — Run it locally (fastest way to try it)
+
+Clone or download the repository, then start any static file server **in the
+repository root** and open the address it prints.
+
+Python (already installed on most machines):
+
 ```bash
-git checkout --theirs icon-192.png icon-512.png
-git add icon-192.png icon-512.png
+python3 -m http.server 8080
 ```
 
-### B. Text Files (`.gitignore`, `app.js`, `index.html`, `sw.js`)
-Open each conflicting file in VS Code. VS Code's **Source Control Tab** will list these under "Merge Changes". Clicking on any of these files will open the interactive merge conflict editor.
+Node, if you prefer:
 
-1. **`.gitignore`**:
-   - You want to keep the custom whitelisting rules that ignore unnecessary workspace cruft but track the core files.
-   - Choose **Accept Incoming Change** (from AI Studio) or keep the version with the whitelist rule.
-   - Stage the file once resolved: `git add .gitignore`
-
-2. **`app.js`, `index.html`, `sw.js`**:
-   - The AI Studio builds contain all the new features (e.g. customized scrollable layouts, optimized buttons, and XP/Gold/MP/HP indicators).
-   - In almost all cases, you should **Accept Incoming Change** (the version from `questa-temp-sync/main`) so that you get the latest polished application state.
-   - If you have any custom configurations in your local main branch, you can copy-paste them in or choose "Accept Both Changes" and adjust manually.
-   - Stage the files:
-     ```bash
-     git add app.js index.html sw.js
-     ```
-
-### C. Commit the Resolved Merge
-Once all conflicts are resolved and staged (which you can verify via `git status` showing all green/staged files), complete the merge commit:
 ```bash
-git commit -m "Merge and resolve conflicts with AI Studio"
+npx serve -l 8080
 ```
+
+Then open <http://localhost:8080> in your browser. That is the whole install.
+
+Your data lives in that browser profile, under that exact origin
+(`http://localhost:8080`). Change the port and the browser treats it as a
+different site with an empty save file.
 
 ---
 
-## 3. Seamless Future Syncs (Zero Conflicts)
+## Option 2 — Host it on GitHub Pages (what most people want)
 
-For all future updates, syncing will be extremely simple and conflict-free because Git now understands the shared history:
+1. Fork this repository, or push a copy to your own GitHub account.
+2. In the repository, go to **Settings → Pages**.
+3. Under **Build and deployment**, set **Source** to *Deploy from a branch*,
+   pick branch `main` and folder `/ (root)`, then **Save**.
+4. Wait a minute. GitHub gives you a URL like
+   `https://<your-username>.github.io/<repo-name>/`.
 
-1. Fetch changes:
-   ```bash
-   git fetch questa-temp-sync
-   ```
-2. Merge changes:
-   ```bash
-   git merge questa-temp-sync/main -m "Sync updates from AI Studio"
-   ```
-3. Push to your main GitHub repository:
-   ```bash
-   git push origin main
-   ```
+Open that URL on your phone or desktop. It is served over `https://`, so the
+service worker registers and everything works offline afterwards.
 
----
-
-## 4. One-Line PowerShell Command (For Automated & Smooth Syncs)
-
-If you have uncommitted local changes on your computer (e.g., a modified `.gitignore`), Git will abort the merge to protect your files. Choose one of the two PowerShell one-liners below to run the sync smoothly depending on your needs:
-
-### Option A: The "Clean Slate" Sync (Recommended)
-This discards any local uncommitted files/changes and guarantees a 100% clean, error-free overwrite using the polished AI Studio builds:
-```powershell
-git reset --hard HEAD; git checkout main; git fetch questa-temp-sync; git merge -X theirs --allow-unrelated-histories questa-temp-sync/main -m "Sync updates from AI Studio"; git push origin main
-```
-
-### Option B: The "Keep My Local Edits" Sync
-This temporarily stashes your uncommitted local edits, fetches and merges the AI Studio updates, and then restores your local modifications back on top:
-```powershell
-git stash; git checkout main; git fetch questa-temp-sync; git merge -X theirs --allow-unrelated-histories questa-temp-sync/main -m "Sync updates from AI Studio"; git stash pop; git push origin main
-```
+**Note for Dropbox sync users:** your fork will be on a different address from
+the original, and Dropbox will refuse to log in until you register that address.
+See [Self-hosting and Dropbox sync](#self-hosting-and-dropbox-sync) below.
 
 ---
 
-### Why these commands are completely robust:
-- **`git reset --hard HEAD`**: Clears any uncommitted local noise that blocks the merge (Option A).
-- **`git stash` / `git stash pop`**: Safely bookmarks your local code before merging and reapplies it after (Option B).
-- **`git checkout main`**: Confirms you are on your primary branch.
-- **`-X theirs`**: This is the magic Git merge strategy! In the event of any line-by-line conflict, Git will **automatically choose the incoming AI Studio changes** as the winner, eliminating manual merge screens.
-- **`--allow-unrelated-histories`**: Guarantees Git won't fail if this is your very first sync.
+## Option 3 — Any other static host
+
+Netlify, Cloudflare Pages, Vercel, an S3 bucket, nginx, Apache, a Raspberry Pi
+on your LAN — anything that serves a folder over http(s) works. Upload the
+repository root as-is. There is nothing to configure.
+
+---
+
+## Installing it as an app
+
+Once the page is open over http(s):
+
+- **Android / Chrome:** menu → *Add to Home screen* (or *Install app*).
+- **iOS / Safari:** Share → *Add to Home Screen*.
+- **Desktop Chrome / Edge:** the install icon at the right of the address bar.
+
+After that it launches full-screen and runs with no network.
+
+---
+
+## Updating
+
+`sw.js` uses a network-first strategy for the app shell, so a new version
+appears **on the next launch** after you deploy it. There is nothing to press.
+
+If you are hacking on the code and an old version seems stuck, bump the cache
+name in `sw.js` (line 3, `const CACHE = "questa-vN"`) and reload twice.
+
+---
+
+## Self-hosting and Dropbox sync
+
+Dropbox sync is **optional**. Everything else in Questa works without it, and
+without any account at all.
+
+If you do want it on your own copy, there is a step you cannot skip. Questa logs
+in with Dropbox's PKCE flow, which sends the browser back to a `redirect_uri`
+computed from the address the app is served from. **Dropbox rejects any redirect
+URI that is not pre-registered on the app it belongs to.** The key shipped in
+this repository is registered for the original deployment only, so on your own
+address the login will fail.
+
+To fix it, register your own Dropbox app:
+
+1. Go to <https://www.dropbox.com/developers/apps> and **Create app**.
+2. Choose **Scoped access**, then **App folder** access. Name it anything.
+3. On the app's **Settings** tab, under **OAuth 2 → Redirect URIs**, add the
+   exact address you serve Questa from, with no trailing slash — for example
+   `https://your-name.github.io/questa` or `http://localhost:8080`. Add one
+   entry per address you use.
+4. On the **Permissions** tab, tick `files.content.read` and
+   `files.content.write`, then **Submit**.
+5. Copy the **App key** from the Settings tab. It is a public client id, not a
+   secret.
+6. In `sync.js`, replace the value of `DBX_APP_KEY` (near the top, around line
+   17) with your app key.
+
+Reload, then **Settings → Connect Dropbox**. It will work against your own app
+folder now.
+
+*(The key is also read from the sync config field `appKey` if one is set, which
+is how a fork can override it without editing the file. There is no UI for that
+field yet, so editing `DBX_APP_KEY` is the simpler route.)*
+
+---
+
+## Developing
+
+The test suite needs Node and nothing else — no framework, no dependencies:
+
+```bash
+node tests/run.js
+```
+
+It runs every file in `tests/` and `archive/tests/` and exits non-zero if any of
+them fail. Keep it green: it is the deploy gate.
+
+The design documents in [`docs/`](./docs/) are the place to start if you want to
+understand the sync and backup behaviour before changing it.
+
+---
+
+## Maintainer note
+
+The old contents of this file — the workflow for merging an internal Google AI
+Studio build into this repository — moved to
+[`docs/MAINTAINER-SYNC.md`](./docs/MAINTAINER-SYNC.md). It is a private workflow
+against a remote nobody else can reach, and it was never install instructions.

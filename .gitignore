@@ -9,6 +9,10 @@
 !/.gitignore
 
 # === Questa reference repo files (only these should ever be tracked) ===
+# LICENSE must be listed here or the whitelist above makes it invisible to git,
+# and without a licence file default copyright applies -- nobody may legally
+# fork, modify or redistribute this, which is the opposite of the intent.
+!/LICENSE
 !/INSTALL.md
 !/app.js
 !/habitica_to_questa.py

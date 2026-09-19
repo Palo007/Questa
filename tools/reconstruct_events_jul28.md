@@ -68,8 +68,8 @@ hardcoded. The only hardcoded values are two verified anchor assertions
 (never used to derive output, only to sanity-check the detokenization):
 
 ```
-28c5f43b-bfa8-481f-8b6e-06d6bef397fc == "20 klikov" (type:"habit")
-c9cfe1b2-d3be-432d-a6cd-c1b1143712f1 == "15 klikov" (type:"habit")
+00000000-0000-4000-8000-000000000001 == "Example habit A" (type:"habit")
+00000000-0000-4000-8000-000000000002 == "Example habit B" (type:"habit")
 ```
 
 ## Usage
@@ -102,7 +102,7 @@ habitTap events    == 6
 total              == 20
 every taskId       resolves to a real task in the snapshot
 no duplicate synthetic uids (event_uid_of pre-write assertion)
-anchor ids resolve to "20 klikov" / "15 klikov" (type:"habit")
+anchor ids resolve to "Example habit A" / "Example habit B" (type:"habit")
 ```
 
 The script itself enforces every one of these with a hard `SystemExit` — a

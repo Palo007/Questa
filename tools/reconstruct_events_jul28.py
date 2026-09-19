@@ -44,8 +44,8 @@ What gets emitted:
 
 Nothing here is guessed: every id/title is looked up in the detokenized
 snapshot. The two anchor ids below are asserted, never used to derive data:
-  28c5f43b-bfa8-481f-8b6e-06d6bef397fc == "20 klikov" (type:"habit")
-  c9cfe1b2-d3be-432d-a6cd-c1b1143712f1 == "15 klikov" (type:"habit")
+  00000000-0000-4000-8000-000000000001 == "Example habit A" (type:"habit")
+  00000000-0000-4000-8000-000000000002 == "Example habit B" (type:"habit")
 
 CLI:
   python tools/reconstruct_events_jul28.py [--input BACKUP.json] [--output OUT.json]
@@ -61,9 +61,17 @@ DEFAULT_INPUT = "questa-backup-20260729-1023.json"
 DEFAULT_OUTPUT = "tools/out/reconstructed_events_jul28.json"
 TARGET_DATE = date(2026, 7, 28)
 
+# 2026-09-19: these two anchors are PLACEHOLDERS. They used to be two real task
+# UUIDs mapped to two real habit titles from the maintainer's own device -- the
+# only personal data in this repository, and the last open release blocker from
+# REVIEW-2026-09-18.md Part 3. They are asserted below, so running this script
+# against your own backup will fail here until you replace both entries with
+# two task ids that genuinely exist in YOUR snapshot. That failure is the
+# intended behaviour: the assertion exists to prove the detokenization resolved
+# real rows, and it cannot do that against invented ids.
 ANCHOR_IDS = {
-    "28c5f43b-bfa8-481f-8b6e-06d6bef397fc": "20 klikov",
-    "c9cfe1b2-d3be-432d-a6cd-c1b1143712f1": "15 klikov",
+    "00000000-0000-4000-8000-000000000001": "Example habit A",
+    "00000000-0000-4000-8000-000000000002": "Example habit B",
 }
 
 

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.19-1720";
+const APP_VERSION = "v2026.09.19-2150";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -434,7 +434,7 @@ if(typeof window!=='undefined'){
         var incoming = JSON.parse(e.newValue);
         var incomingSeq = Number(incoming.__seq) || 0;
         var liveSeq = Number(S.__seq) || 0;
-        if(incomingSeq > liveSeq){
+        if(_stateIsNewer(incoming, S)){   // item 15: __seq, then __savedAt
           S = migrate(incoming);
           if(typeof _adoptStateStamps==='function') _adoptStateStamps();   // 2026-09-18 round 2 — see _adoptStateStamps
           if(typeof render==='function') render();
@@ -477,6 +477,23 @@ function _idbReadState(){
 // Never resurrects an OLDER IDB copy over a newer localStorage one (equal
 // __seq is a cheap no-op -- localStorage stays authoritative, no spurious
 // re-render on the common path).
+// 2026-09-19 (round 3, item 15): __seq is a PER-BRANCH counter, not a global
+// one. Two tabs that diverged both bump the same preBumpSeq and both arrive at
+// N+1 holding different content, so a strict `>` adopted neither and whichever
+// copy happened to be written last silently won, with nothing recorded. Break
+// the tie on __savedAt, the wall-clock stamp save() writes beside __seq on the
+// same line -- same device, same clock, so it is comparable. Equal on both is
+// genuinely indistinguishable: keep what we already have rather than churn.
+// NOT used by save()'s own clobber check: a tie there means "no newer writer",
+// and adopting on a tie would throw away the edit the user is mid-way through.
+function _stateIsNewer(cand, cur){
+  var cs = Number(cand && cand.__seq) || 0;
+  var ls = Number(cur && cur.__seq) || 0;
+  if(cs !== ls) return cs > ls;
+  var ca = Number(cand && cand.__savedAt) || 0;
+  var la = Number(cur && cur.__savedAt) || 0;
+  return ca > la;
+}
 function reconcileDurableState(){
   return _idbReadState().then(function(raw){
     if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'reconcile:read', found: !!raw});
@@ -486,7 +503,7 @@ function reconcileDurableState(){
     var idbSeq = Number(idbS.__seq) || 0;
     var liveSeq = Number(S.__seq) || 0;
     if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'reconcile:compare', idbSeq:idbSeq, liveSeq:liveSeq});
-    if(idbSeq > liveSeq){
+    if(_stateIsNewer(idbS, S)){   // item 15: __seq, then __savedAt
       S = idbS;
       if(typeof _adoptStateStamps==='function') _adoptStateStamps();   // 2026-09-18 round 2 — see _adoptStateStamps
       if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'reconcile:idb-won', idbSeq:idbSeq, liveSeq:liveSeq});
@@ -1603,6 +1620,85 @@ async function _shouldStartupSnapshot(){
     return (Date.now() - newestTs) > 43200000;    // 12 h
   }catch(e){ return true; }                        // cannot tell: prefer having a backup
 }
+// ---- avatar de-duplication (2026-09-19, round 3, item 15) -----------------
+// S.char.faceImg is a base64 data URL, and every snapshot used to carry its own
+// full copy: one ~100 KB image multiplied by the whole GFS snapshot set, in the
+// same IndexedDB the event log competes for. The image is now written ONCE per
+// distinct hash into the syncmeta store and each snapshot carries only the hash.
+//
+// Why syncmeta and not a new object store: a new store needs an IDB_VERSION
+// bump, and a bumped database cannot be opened by an older build at all -- a
+// service-worker rollback would take the whole app down, not just the avatar.
+// syncmeta already exists at version 4, so nothing about the schema changes.
+//
+// Forward/backward shape: the reference lives in a NEW top-level `avatarRef`
+// field on the payload and `char.faceImg` is simply absent. An older build
+// restoring a newer snapshot ignores the unknown field and finds no avatar, so
+// the user sees a blank avatar and re-picks one -- it does not see a broken
+// image, and nothing throws. A newer build restoring an OLDER snapshot finds
+// faceImg inline exactly as before and never consults avatarRef.
+const AVATAR_KEY_PREFIX = "avatar:";
+// Below this, the indirection costs more than it saves.
+const AVATAR_INLINE_MAX = 2048;
+// Distinct avatars to retain. The user has one at a time; this is headroom for
+// a few changes of mind so older snapshots stay restorable.
+const AVATAR_KEEP_MAX = 5;
+
+async function avatarPut(hash, dataUrl){
+  try{
+    const db = await idbOpen();
+    if(!db) return false;
+    const tx = db.transaction("syncmeta","readwrite");
+    const store = tx.objectStore("syncmeta");
+    store.put({ img: dataUrl, at: Date.now() }, AVATAR_KEY_PREFIX + hash);
+    // Prune by age, oldest first, and ONLY our own keys -- syncmeta also holds
+    // 'base', the last synced sync baseline, which must never be touched here.
+    //
+    // Both reads are issued in the SAME synchronous turn on purpose. Awaiting
+    // getAllKeys() and then issuing a store.get() per key from the resulting
+    // microtask is the classic way to meet TransactionInactiveError, and here it
+    // would fail silently -- the catch returns false and the avatar just stays
+    // inline. getAllKeys() and getAll() return their results in the same order
+    // by spec, so one paired wait replaces N follow-up reads.
+    const pairs = await new Promise(res=>{
+      const rk = store.getAllKeys();
+      const rv = store.getAll();
+      let ks = null, vs = null;
+      const settle = ()=>{ if(ks !== null && vs !== null) res({ keys: ks, vals: vs }); };
+      rk.onsuccess = ()=>{ ks = rk.result || []; settle(); };
+      rk.onerror   = ()=>{ ks = []; settle(); };
+      rv.onsuccess = ()=>{ vs = rv.result || []; settle(); };
+      rv.onerror   = ()=>{ vs = []; settle(); };
+    });
+    const mine = [];
+    pairs.keys.forEach((k, i)=>{
+      if(typeof k === "string" && k.indexOf(AVATAR_KEY_PREFIX) === 0){
+        mine.push({ k: k, at: Number(pairs.vals[i] && pairs.vals[i].at) || 0 });
+      }
+    });
+    if(mine.length > AVATAR_KEEP_MAX){
+      mine.sort((a,b)=>a.at - b.at);
+      mine.slice(0, mine.length - AVATAR_KEEP_MAX).forEach(e=>{
+        // Never evict the one we just wrote, whatever its stamp says.
+        if(e.k !== AVATAR_KEY_PREFIX + hash) store.delete(e.k);
+      });
+    }
+    return await new Promise(res=>{ tx.oncomplete=()=>res(true); tx.onerror=()=>res(false); tx.onabort=()=>res(false); });
+  }catch(e){ return false; }
+}
+
+async function avatarGet(hash){
+  try{
+    const db = await idbOpen();
+    if(!db) return null;
+    return await new Promise(res=>{
+      const rq = db.transaction("syncmeta","readonly").objectStore("syncmeta").get(AVATAR_KEY_PREFIX + hash);
+      rq.onsuccess = ()=>{ const v = rq.result; res(v && typeof v.img === "string" ? v.img : null); };
+      rq.onerror = ()=>res(null);
+    });
+  }catch(e){ return null; }
+}
+
 async function readSnapshot(id){
   try{
     const db = await idbOpen();
@@ -1634,7 +1730,27 @@ async function writeSnapshot(type, tier){
         type = "full";
       }
     }
-    const payload = JSON.stringify({stateSnapshot: S, events});
+    // 2026-09-19 (round 3, item 15): park the avatar instead of inlining it.
+    // Two rules this must never break. (1) The live S is NEVER mutated -- the
+    // faceImg is removed from a shallow clone, because writeSnapshot runs
+    // alongside ordinary use and stripping the real object would blank the
+    // user's avatar on screen. (2) If parking FAILS for any reason, the inline
+    // copy stays. A fatter snapshot is a cost; a snapshot that silently lost the
+    // avatar is data loss.
+    let _snapState = S;
+    let _avatarRef = null;
+    const _face = (S && S.char && typeof S.char.faceImg === "string") ? S.char.faceImg : "";
+    if(_face && _face.length > AVATAR_INLINE_MAX){
+      try{
+        const _h = await computeHash(_face);
+        if(_h && await avatarPut(_h, _face)){
+          _avatarRef = _h;
+          _snapState = Object.assign({}, S, { char: Object.assign({}, S.char) });
+          delete _snapState.char.faceImg;
+        }
+      }catch(e){ _avatarRef = null; _snapState = S; }
+    }
+    const payload = JSON.stringify({stateSnapshot: _snapState, events, avatarRef: _avatarRef});
     const hash = await computeHash(payload);
     const rec = {
       payload, hash, type,
@@ -2497,6 +2613,18 @@ function _syncConfiguredForBoot(){
 }
 // Pure: no globals, no DOM. Extracted so the boot gate's decision is unit-testable on
 // its own return value (AGENTS.md §4), not merely covered through its caller.
+// 2026-09-19 (round 3, item 15): the round-1 note called `elapsedMs`/`timeoutMs`
+// dead. They are not dead IN HERE -- the body reads both, and
+// tests/boot-gate-predicates.test.js exercises the predicate across real values
+// and pins this exact signature by regex. What is degenerate is the ONE call
+// site: bootStartDay() sets _bootRolloverT0 = Date.now() and passes
+// Date.now() - _bootRolloverT0 on the very next statement, so elapsedMs is
+// always ~0 and `0 < 8000` can never be false. The predicate therefore reduces
+// to !!cfgConnected there. That is not a bug -- the real timeout is enforced by
+// the scheduled timer further down, not by this call -- but a reader who
+// assumes the elapsed check is live at boot will misread the gate. Left as a
+// pure predicate on purpose: it is the testable unit, and the signature is
+// pinned. Do not "simplify" it to take cfgConnected alone.
 function shouldDeferDayRollover(cfgConnected, elapsedMs, timeoutMs){
   return !!cfgConnected && elapsedMs < timeoutMs;
 }
@@ -2943,13 +3071,16 @@ function addTag(name){ name=(name||'').trim(); if(!name) return null; ensureTags
   const ex=S.tags.find(t=>t.name.toLowerCase()===name.toLowerCase()); if(ex) return ex.id;
   const col=TAG_COLORS[S.tags.length%TAG_COLORS.length]; const tg={id:uid(),name:name,color:col,createdAt:Date.now(),updatedAt:now()}; S.tags.push(tg); return tg.id; }
 // 2026-09-18: renameTag() removed. It had no callers anywhere (app.js, sync.js,
-// index.html, tests/) — the tag editor offers add, toggle and delete only — and it
-// would not have refreshed the UI if wired up, since it called save() without
-// render(). Re-add it WITH a render() if a rename control is ever built.
-function deleteTag(id){ ensureTags(); delMark(id); S.tags=S.tags.filter(t=>t.id!==id);
-  (S.tasks||[]).forEach(t=>{ if(Array.isArray(t.tags)) t.tags=t.tags.filter(x=>x!==id); });
-  Object.keys(TAGFILTER).forEach(k=>{ TAGFILTER[k]=(TAGFILTER[k]||[]).filter(x=>x!==id); });
-  save(); }
+// index.html, tests/) and it would not have refreshed the UI if wired up, since it
+// called save() without render(). Re-add it WITH a render() if a rename control is
+// ever built.
+// 2026-09-19 (round 3, item 14): deleteTag() removed for the same two reasons, and the
+// line above used to claim "the tag editor offers add, toggle and delete only" -- it
+// does not. deleteTag() had zero callers repo-wide, so that sentence described a
+// control that has never existed, and it also called save() without render(). Its body
+// is the recipe if the control is ever built: delMark(id) for the tombstone, drop the
+// id from S.tags, strip it from every task's tags array, strip it from every TAGFILTER
+// list, then save() AND render(). The tag editor offers add and toggle only.
 function tagChips(t){ const ids=taskTags(t); if(!ids.length) return '';
   return '<span class="tagChips">'+ids.map(id=>{ const g=tagById(id); if(!g) return '';
     return '<span class="tagChip" style="--tc:'+esc(g.color)+'">'+esc(g.name)+'</span>'; }).join('')+'</span>'; }
@@ -3243,6 +3374,14 @@ function anWindow(noFloor){
 /**
  * @note Feed-only noFloor mode creates a deliberate chart/feed x-axis divergence — charts use clamped window, feed uses unclamped.
  */
+// 2026-09-19 (round 3, item 15): the rule is "the FIRST digit run anywhere in
+// the title", and the round-1 note is right that it is loose -- "Read 2 chapters
+// of book 3" gives 2, and "Chapter 3 review x10" gives 3 rather than 10.
+// Owner's call 2026-09-19: LEAVE IT. Every habit already in the wild was named
+// under this rule, and tightening it to an explicit marker ("x10" / "10x")
+// would silently drop any bare-number habit back to 1 rep per tap -- a change
+// to counts the user never asked for, applied retroactively to their history.
+// If this is ever revisited it needs a migration, not a parser swap.
 function repsPerTap(title){ const m=(title||'').match(/\d+/); return m?parseInt(m[0],10):1; }
 function repsPerTapTitle(t){ return t; }
 function anCumulativeReps(metric,from,to){
@@ -4331,8 +4470,22 @@ function _evDiffText(from,to){
 // tasks/rewards/tags via mergeCollection), fall back to the same truncated
 // raw deviceId already shown in Settings so an unnamed device is still
 // distinguishable from others instead of showing nothing.
+// 2026-09-19 (round 3, item 15): split out so a caller can ask "is there a
+// REGISTERED name?" without being handed the truncated-id fallback. Returns ''
+// when the device is unknown or its name is blank/whitespace.
+function deviceRegisteredName(devices, devId){
+  if(!devId) return '';
+  const d = (devices||[]).find(x=>x && x.id===devId);
+  return d && d.name ? String(d.name).trim() : '';
+}
+// Unchanged contract: a truthy devId always yields something printable. The
+// truncated id is the LAST resort, which is exactly why the event-log fallback
+// below had to stop going through this function -- see the call site.
 function deviceDisplayName(devices, devId){
   if(!devId) return '';
+  // Deliberately NOT delegating to deviceRegisteredName: several tests pull
+  // this function out of app.js by name with _extract.js and run it alone, so
+  // it has to stay self-contained. The three lines are duplicated on purpose.
   const d = (devices||[]).find(x=>x && x.id===devId);
   const name = d && d.name ? String(d.name).trim() : '';
   return name || String(devId).slice(0,6);
@@ -4372,7 +4525,14 @@ function renderEventDetail(from,to){
     function getCachedDeviceName(devId){
       if(!devId) return '';
       if(deviceNameCache.has(devId)) return deviceNameCache.get(devId);
-      const name = deviceDisplayName(S.devices, devId) || devNameFromEvents[devId] || String(devId).slice(0,6);
+      // 2026-09-19 (round 3, item 15): this used to start with
+      // deviceDisplayName(), whose own `|| String(devId).slice(0,6)` is never
+      // falsy for a truthy devId -- so the `|| devNameFromEvents[devId]` rung
+      // could never be reached and the feed showed a 6-character id even when
+      // the device had broadcast its real name in a `devicename` event. Ask for
+      // the REGISTERED name only, so the intended precedence actually runs:
+      // registered name, then the event-sourced name, then the truncated id.
+      const name = deviceRegisteredName(S.devices, devId) || devNameFromEvents[devId] || String(devId).slice(0,6);
       deviceNameCache.set(devId, name);
       return name;
     }
@@ -4752,7 +4912,25 @@ window.addEventListener('scroll',()=>{ if(_scrollT)return; _scrollT=setTimeout((
 // tap-triggered localStorage write is committed, reverting to an older snapshot on
 // relaunch (e.g. filter re-opens). Force a synchronous flush on the durable
 // 'page is going away' signals: visibilitychange->hidden and pagehide.
+// 2026-09-19 (round 3, item 15): backgrounding a tab fires BOTH
+// visibilitychange(hidden) and pagehide -- that is the normal mobile sequence,
+// not an edge case -- so one user action ran flushState twice: two save()
+// round trips (each a full JSON.stringify(S) plus a localStorage write and an
+// IndexedDB mirror), two saveScroll() writes, and two 'lifecycle' rows in the
+// diagnostic ring, which made the ring's own history read as if the user had
+// backgrounded twice. Coalesce repeats inside a short window. This cannot lose
+// a write: the second call is redundant precisely because the first one
+// already flushed the same state microseconds earlier, and a genuinely later
+// flush (a real second backgrounding, or a beforeunload after some work) is
+// always outside the window. The sibling pair at the bottom of this file fires
+// takeSnapshot(), not flushState, and is already deduplicated by IS_DIRTY --
+// do not conflate the two.
+var _lastFlushAt = 0;
+var FLUSH_COALESCE_MS = 400;
 function flushState(){
+  var _t = Date.now();
+  if((_t - _lastFlushAt) < FLUSH_COALESCE_MS) return;
+  _lastFlushAt = _t;
   if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'flushState', visibilityState:(typeof document!=="undefined"?document.visibilityState:'?')});
   if(_scrollT){ clearTimeout(_scrollT); _scrollT=null; }
   saveScroll();
@@ -7875,6 +8053,18 @@ async function confirmRestore(id){
     if(!stateSnapshot || !stateSnapshot.char || !Array.isArray(stateSnapshot.tasks)){
       alertDialog('Restore Error', 'Snapshot does not contain valid state.');
       return;
+    }
+
+    // 2026-09-19 (round 3, item 15): rehydrate a parked avatar. Older snapshots
+    // carry faceImg inline and have no avatarRef, so they skip this untouched.
+    // A missing parked image is NOT a restore failure -- the avatar is
+    // decoration, and refusing to restore a user's tasks over a lost picture
+    // would be the wrong trade. It restores blank and they pick a new one.
+    if(data.avatarRef && !stateSnapshot.char.faceImg){
+      try{
+        const _img = await avatarGet(data.avatarRef);
+        if(_img) stateSnapshot.char.faceImg = _img;
+      }catch(e){ /* restore proceeds without the avatar */ }
     }
 
     // Chain continuity check for delta snapshots

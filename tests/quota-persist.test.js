@@ -1,4 +1,20 @@
 // quota-persist.test.js -- #11a Quota failure resilience + #11b navigator.storage.persist()
+//
+// READ THIS BEFORE TRUSTING A GREEN RUN (2026-09-19, round 3, item 15):
+// P1..P5 below load NOTHING from app.js. There is no readFileSync and no
+// _extract here -- the save() they exercise is a hand-written reimplementation
+// living in this file. Two consequences, both load-bearing:
+//   1. app.js's real quota handling could break completely and P1..P5 would
+//      still pass. Treat them as tests OF THE MODEL, not of the app.
+//   2. Worse, the model wraps its commit in env.locks.request('questa-sync'),
+//      which is the DEFERRED-WRITE DESIGN app.js deleted on 2026-07-13 (P0-1):
+//      save() must be fully synchronous, because deferring the write meant
+//      save() returned before anything persisted and the pagehide flush lost
+//      data on an OS kill. So this file still encodes, and quietly endorses, a
+//      design that is now forbidden in app.js.
+// P6 was added to stop that drift being invisible: it is the only assertion in
+// this file that reads the real app.js. Rewriting P1..P5 against the extracted
+// save() is the proper fix and is still open.
 // Tests that a QuotaExceededError on localStorage.setItem still writes the
 // IDB mirror and surfaces the error, and that navigator.storage.persist()
 // is called at boot with the correct logEvent.
@@ -328,6 +344,29 @@ async function main() {
   await new Promise(function(r) { setTimeout(r, 10); });
   assertEq('P5a: no logEvent when navigator undefined', events.length, 0);
 }
+
+// ── P6: the real app.js save() must stay synchronous ──────────────────
+// The only assertion here that touches the shipped file. If someone
+// reintroduces the deferred navigator.locks write that P0-1 removed, every
+// other test in this file keeps passing -- this one does not.
+function p6_realAppSaveIsSynchronous(){
+  var fs = require('fs'), path = require('path');
+  var src = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
+  // Crude but sufficient: strip // line comments, then look for a LIVE call.
+  // String.fromCharCode(10) rather than an escape so this line survives being
+  // moved through shells and generators.
+  var NL = String.fromCharCode(10);
+  var code = src.split(NL).map(function(line){
+    var i = line.indexOf('//');
+    return i === -1 ? line : line.slice(0, i);
+  }).join(NL);
+  var live = (code.match(/locks\s*\.\s*request\s*\(/g) || []).length;
+  assertEq('P6a: app.js has NO live navigator.locks.request() call (P0-1 stays fixed)', live, 0);
+  // ...and the reason is still written down for the next reader.
+  assert('P6b: app.js still documents why save() is synchronous',
+    src.indexOf('save() must be fully SYNCHRONOUS') !== -1);
+}
+p6_realAppSaveIsSynchronous();
 
 } // end main
 

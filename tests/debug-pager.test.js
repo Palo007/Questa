@@ -72,19 +72,46 @@ function buildApiWithEvents(events) {
   return fn(S, doc, sandbox.window, sandbox.navigator, console, function () {}, function () {});
 }
 
+let failures = 0;
+function assert(d, c) { if (c) console.log('[PASS] ' + d); else { console.error('[FAIL] ' + d); failures++; } }
+
 const api = buildApiWithEvents(pagerFixture);
-console.log('CONFLICT_CATEGORY:', api.CONFLICT_CATEGORY);
-console.log('getEventCategory(conflictResolved):', api.getEventCategory({ kind: 'conflictResolved' }));
-console.log('isFeedNoise(conflictResolved):', api.isFeedNoise({ kind: 'conflictResolved' }));
-console.log('S.prefs.hideConflictDecisions:', S.prefs.hideConflictDecisions);
-console.log('S.prefs.hideSyncDiag:', S.prefs.hideSyncDiag);
+assert('CONFLICT_CATEGORY is a non-empty string', typeof api.CONFLICT_CATEGORY === 'string' && api.CONFLICT_CATEGORY.length > 0);
+assert('getEventCategory(conflictResolved) returns CONFLICT_CATEGORY', api.getEventCategory({ kind: 'conflictResolved' }) === api.CONFLICT_CATEGORY);
+assert('isFeedNoise(conflictResolved) is false when hideConflictDecisions=false', api.isFeedNoise({ kind: 'conflictResolved' }) === false);
+assert('S.prefs.hideConflictDecisions is false', S.prefs.hideConflictDecisions === false);
+assert('S.prefs.hideSyncDiag is true', S.prefs.hideSyncDiag === true);
 
 // Now call renderEventDetail and check the filtered count
 api.renderEventDetail(0, 1e15);
 setTimeout(() => {
-  const html = doc.getElementById('evFeedContent').innerHTML;
+  // 2026-09-19 (round 3, item 15): this read 'evFeedContent', which
+  // renderEventDetail never writes to -- it writes to 'anEventDetail'. The fake
+  // document auto-creates any id on demand, so the probe silently read a blank
+  // element and reported 0 rows no matter what the renderer did. That is why
+  // this file could assert nothing for months without anyone noticing.
+  const html = doc.getElementById('anEventDetail').innerHTML;
   const count = (html.match(/class="evRow"/g) || []).length;
-  console.log('Row count:', count);
-  console.log('Has Noise event:', html.indexOf('Noise event') >= 0);
-  console.log('Has Real habit:', html.indexOf('Real habit') >= 0);
+  // 2026-09-19 (round 3, item 15): do NOT read these three as "noise filtering
+  // works". This harness does not reach the row-building code at all. The
+  // extracted render block is missing at least one dependency, so the .then()
+  // body throws, renderEventDetail's own catch swallows it without a
+  // diagnostic (app.js, the `}).catch(()=>{` next to "Event log unavailable"),
+  // and the element is left holding that message. Zero rows is the SYMPTOM of
+  // an incomplete extraction, not evidence about the pager.
+  //
+  // Pinned deliberately and stated out loud so the gap is visible. To close it
+  // properly: extend the extraction until the .then() body runs clean, then
+  // replace these three with the real contract -- 25 "Noise event" rows
+  // filtered or paged, "Real habit" and "Real daily" present. When someone
+  // does that, these assertions SHOULD fail; that is the point of them.
+  assert('render path is still uncovered: renderEventDetail hit its catch',
+    html.indexOf('Event log unavailable') >= 0);
+  assert('...so no rows were built (symptom of the harness gap, not the pager)',
+    count === 0);
+  assert('...and neither fixture event reached the DOM',
+    html.indexOf('Noise event') === -1 && html.indexOf('Real habit') === -1);
+
+  if (failures) { console.error(failures + ' debug-pager assertion(s) FAILED'); process.exit(1); }
+  console.log('debug-pager.test.js: all assertions passed');
 }, 100);

@@ -1008,9 +1008,12 @@ function _ca(x){ var v = (x && Number(x.createdAt)) || 0; return v > _futureCeil
 // future-skewed value. Three sites use it: the tombstone overlay's ENTITY operand,
 // mergeCollection's GUARD 1, and (K2) GUARD 3. See the block comments at each site.
 function _uaRaw(x){ return (x && (Number(x.updatedAt) || Number(x.createdAt) || 0)) || 0; }
-// K2 (2026-09-11): _ca's unclamped twin, for GUARD 3's local-absent branch. Exists so
-// both arms of that one test read raw; see the polarity comment at GUARD 3.
-function _caRaw(x){ return (x && Number(x.createdAt)) || 0; }
+// 2026-09-19 (round 3, item 14): _caRaw is GONE. It was K2's unclamped twin of _ca,
+// added for GUARD 3's local-absent arm -- and that arm was a no-op, so this was the
+// only caller. Not a drive-by: unlike _ua/_ca above, _caRaw had no test poking it and
+// no "canonical shape" role, so deleting it costs no coverage. If a future arbitration
+// site needs an unclamped createdAt, classify the polarity FIRST (see _uaRaw) and
+// re-add it with the reasoning written down.
 // F1 (2026-08-18): clamp a RAW scalar timestamp for ARBITRATION only.
 // Use this ONLY where 0 means "loses the tiebreak". There are four sites where 0
 // means "destroy data" instead -- mergeChecklist's survivor-vs-deletion test, the
@@ -1088,6 +1091,14 @@ function _skewDiagFlush(){
 // degrades to the pre-existing behaviour, so the older 3-, 4-, 5- and 6-argument call
 // sites in tests/ and archive/tests/ keep working unchanged. It must never reach the
 // user as a printed value.
+// 2026-09-19 (round 3, item 14): `remoteSavedAt` is UNUSED. Nothing in this body reads
+// it, and there is no `staleRemote` counterpart to `staleLocal` anywhere in the file --
+// the remote side is arbitrated by GUARD 1's per-record recency instead, not by the
+// whole-snapshot timestamp. It is kept on purpose. Owner's call 2026-09-19: removing a
+// positional parameter from the merge core shifts the argument list at all five call
+// sites (tasks, rewards, tags, an.views, an.metrics), and a silently shifted argument
+// there is precisely how the inverted-polarity bugs got in. If a `staleRemote` guard is
+// ever written, the value is already threaded through and waiting.
 function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSavedAt, tombstoneMap, remoteDeviceId){
   // Resolved ONCE per call, never per record: syncDeviceId() reads localStorage and
   // lazily PERSISTS a new id when none exists, so calling it inside the per-task loop
@@ -1127,19 +1138,26 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
       // snapshot saved AFTER the record it touched, so this never suppresses
       // real user changes.
       // K2 (2026-09-11) -- INVERTED POLARITY, and it was never classified as one.
-      // These operands used to run through _ua/_ca. Both arms compare ONE clamped
-      // value against an UNCLAMPED scalar (localSavedAt), and the operand is `b` --
-      // the agreed ANCESTOR, not a competitor trying to win a tiebreak. So a clamped
-      // 0 does not "lose": it makes staleLocal FALSE, this guard FAILS OPEN, and the
-      // stale local revert is kept AND uploaded -- exactly the amplifier loss the
-      // guard exists to stop. The question here is factual ("could local have known
-      // about base's current state?"), so a future-skewed base must be compared as it
-      // is. Both arms read RAW. This was already live on any peer whose HLC had not
-      // ratcheted to the skewed value; K2's physical ceiling would have made it fire
-      // on the skewed device too. Same reasoning as GUARD 1 above. Test: K2-D.
-      if(b && localSavedAt != null){
-        const staleLocal = localHad ? (_uaRaw(b) >= Number(localSavedAt)) : (_caRaw(b) >= Number(localSavedAt));
-        if(staleLocal){ resultMap.set(id, b); return; }
+      // This operand used to run through _ua. It compares ONE clamped value against an
+      // UNCLAMPED scalar (localSavedAt), and the operand is `b` -- the agreed ANCESTOR,
+      // not a competitor trying to win a tiebreak. So a clamped 0 does not "lose": it
+      // makes staleLocal FALSE, this guard FAILS OPEN, and the stale local revert is
+      // kept AND uploaded -- exactly the amplifier loss the guard exists to stop. The
+      // question here is factual ("could local have known about base's current
+      // state?"), so a future-skewed base must be compared as it is. The operand reads
+      // RAW. This was already live on any peer whose HLC had not ratcheted to the
+      // skewed value; K2's physical ceiling would have made it fire on the skewed
+      // device too. Same reasoning as GUARD 1 above. Test: K2-D.
+      //
+      // 2026-09-19 (round 3, item 14): the guard now runs ONLY when localHad. K2 gave
+      // it a second arm for the local-absent case (_caRaw(b) >= localSavedAt), and
+      // that arm could not change the outcome: when local is absent, a TRUE staleLocal
+      // set resultMap to `b` and returned, and a FALSE one fell straight through to
+      // `else if(b) resultMap.set(id, b)` -- the same value, by the same `b` truthiness
+      // this block already requires. Both paths agreed, so the test was decoration.
+      // Removing it is provably behaviour-preserving; R3-H pins that.
+      if(b && localHad && localSavedAt != null){
+        if(_uaRaw(b) >= Number(localSavedAt)){ resultMap.set(id, b); return; }
       }
       if(localHad) resultMap.set(id, l);
       else if(b) resultMap.set(id, b); // TOMBSTONE MODEL (2026-07-12): local absence is NOT a deletion signal; keep -- the S.deletions overlay removes it iff a real tombstone exists

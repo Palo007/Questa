@@ -24,8 +24,22 @@ for(const f of files){
   const rel = path.relative(path.join(root,'..'), f);
   process.stdout.write('\n=== ' + rel + ' ===\n');
   try {
-    process.stdout.write(cp.execFileSync('node', [f], { encoding: 'utf8' }));
-    pass++;
+    const out = cp.execFileSync('node', [f], { encoding: 'utf8' });
+    process.stdout.write(out);
+    // 2026-09-19 (round 3, item 15): exit 0 used to BE the pass. A file whose
+    // assertions had all been deleted, or which returned before reaching the
+    // first one, was indistinguishable from a green run -- debug-pager.test.js
+    // sat in this suite asserting nothing and was counted as a passing file.
+    // Every test here prints evidence per assertion: tests/*.test.js use
+    // "[PASS] ", the older archive/tests/*-tests.js use a bare "PASS " line.
+    // Demand at least one. A new test that prints neither is a bug in that
+    // test, not a reason to loosen this check.
+    if(!/\[PASS\]|^PASS[ \t]/m.test(out)){
+      process.stdout.write('\n[RUNNER] no assertions ran in ' + rel + ' -- exit 0 is not a pass\n');
+      fail++; failed.push(rel + '  (no assertions ran)');
+    } else {
+      pass++;
+    }
   } catch(e){
     process.stdout.write((e.stdout||'') + (e.stderr||''));
     fail++; failed.push(rel);

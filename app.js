@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.19-0758";
+const APP_VERSION = "v2026.09.19-1115";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -1025,11 +1025,19 @@ function getEvents(opts){
   const wantKind = opts.kind || null;
   const wantTask = opts.taskId || null;
   const includeDiag = !!opts.includeDiag;
+  // 2026-09-19 (round 3, item 4): opt-in failure reporting. By default every IDB
+  // failure here resolves [] -- or, on a mid-cursor error, the PARTIAL rows read so
+  // far -- which is right for the read-only UI callers (an empty feed beats a
+  // crash) but WRONG for a caller building a duplicate guard: a short list there
+  // silently duplicates data. With `strict:true` every failure path resolves null
+  // instead, so such a caller can tell "nothing stored" from "could not read".
+  // Default stays [] -- no existing caller changes behaviour.
+  const strict = !!opts.strict;
   return idbOpen().then(db=>new Promise((resolve)=>{
     const out=[];
     let tx;
     try{ tx = db.transaction(EVENTS_STORE, "readonly"); }
-    catch(e){ resolve([]); return; }
+    catch(e){ resolve(strict ? null : []); return; }
     const store = tx.objectStore(EVENTS_STORE);
     let range=null;
     try{
@@ -1048,8 +1056,8 @@ function getEvents(opts){
       }
       cur.continue();
     };
-    cursorReq.onerror = ()=>resolve(out);
-  })).catch(()=>[]);
+    cursorReq.onerror = ()=>resolve(strict ? null : out);
+  })).catch(()=>strict ? null : []);
 }
 // Count of stored events (diagnostic / docs). Resolves 0 on failure.
 function countEvents(){

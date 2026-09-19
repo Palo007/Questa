@@ -1,0 +1,426 @@
+{
+ "version": 2,
+ "char": {
+  "name": "Héro — \"the bold\"",
+  "lvl": 0,
+  "xp": 0,
+  "title": "",
+  "updatedAt": 1720000000001
+ },
+ "tasks": [
+  {
+   "id": "task-1",
+   "title": "Drink water",
+   "type": "habit",
+   "done": false,
+   "notes": "",
+   "reps": 0,
+   "updatedAt": 1720000000002
+  },
+  {
+   "id": "task-2",
+   "title": "__proto__",
+   "type": "daily",
+   "done": true,
+   "notes": null,
+   "reps": 3,
+   "updatedAt": 1720000000003
+  },
+  {
+   "id": "task-3",
+   "title": "constructor",
+   "type": "todo",
+   "done": false,
+   "notes": "line1\nline2",
+   "checklist": [
+    {
+     "id": "c1",
+     "text": "",
+     "done": false
+    },
+    {
+     "id": "c2",
+     "text": "x",
+     "done": true
+    }
+   ],
+   "updatedAt": 1720000000004
+  }
+ ],
+ "rewards": [
+  {
+   "id": "r1",
+   "title": "",
+   "cost": 0,
+   "updatedAt": 1720000000005
+  }
+ ],
+ "tags": [
+  {
+   "id": "g1",
+   "label": "toString",
+   "color": "",
+   "updatedAt": 1720000000006
+  }
+ ],
+ "devices": [
+  {
+   "id": "devA",
+   "name": "",
+   "updatedAt": 1720000000007
+  }
+ ],
+ "prefs": {
+  "width": 0,
+  "notesLines": 0,
+  "hideStreak": false,
+  "theme": ""
+ },
+ "an": {
+  "views": [],
+  "metrics": []
+ },
+ "history": [],
+ "charHistory": [],
+ "monthlyBackups": [],
+ "deletions": [],
+ "lastCron": 0,
+ "events": [
+  {
+   "uid": "fx-0",
+   "dev": "devB",
+   "ts": 1720000000000,
+   "kind": "complete",
+   "taskTitle": "constructor",
+   "taskId": null,
+   "source": null,
+   "reps": 0,
+   "value": 0,
+   "notes": ""
+  },
+  {
+   "uid": "fx-1",
+   "dev": "devA",
+   "ts": 1720000001000,
+   "kind": "tap",
+   "taskTitle": "__proto__",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1,
+   "value": 1.5,
+   "notes": "note 1"
+  },
+  {
+   "uid": "fx-2",
+   "dev": "devB",
+   "ts": 1720000002000,
+   "kind": "export",
+   "taskTitle": "toString",
+   "taskId": "task-2",
+   "source": "app",
+   "reps": 2,
+   "value": 3,
+   "notes": ""
+  },
+  {
+   "uid": "fx-3",
+   "dev": "devA",
+   "ts": 1720000003000,
+   "kind": "complete",
+   "taskTitle": "valueOf",
+   "taskId": "task-3",
+   "source": "app",
+   "reps": 0,
+   "value": 4.5,
+   "notes": "note 3"
+  },
+  {
+   "uid": "fx-4",
+   "dev": "devB",
+   "ts": 1720000004000,
+   "kind": "tap",
+   "taskTitle": "hasOwnProperty",
+   "taskId": null,
+   "source": "app",
+   "reps": 4,
+   "value": 0,
+   "notes": ""
+  },
+  {
+   "uid": "fx-5",
+   "dev": "devA",
+   "ts": 1720000005000,
+   "kind": "export",
+   "taskTitle": "isPrototypeOf",
+   "taskId": "task-0",
+   "source": null,
+   "reps": 5,
+   "value": 7.5,
+   "notes": "note 5"
+  },
+  {
+   "uid": "fx-6",
+   "dev": "devB",
+   "ts": 1720000006000,
+   "kind": "complete",
+   "taskTitle": "toLocaleString",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 0,
+   "value": 9,
+   "notes": ""
+  },
+  {
+   "uid": "fx-7",
+   "dev": "devA",
+   "ts": 1720000007000,
+   "kind": "tap",
+   "taskTitle": "propertyIsEnumerable",
+   "taskId": "task-2",
+   "source": "app",
+   "reps": 7,
+   "value": 10.5,
+   "notes": "note 7"
+  },
+  {
+   "uid": "fx-8",
+   "dev": "devB",
+   "ts": 1720000008000,
+   "kind": "export",
+   "taskTitle": "",
+   "taskId": null,
+   "source": "app",
+   "reps": 8,
+   "value": 0,
+   "notes": ""
+  },
+  {
+   "uid": "fx-9",
+   "dev": "devA",
+   "ts": 1720000009000,
+   "kind": "complete",
+   "taskTitle": "0",
+   "taskId": "task-4",
+   "source": "app",
+   "reps": 0,
+   "value": 13.5,
+   "notes": "note 9"
+  },
+  {
+   "uid": "fx-10",
+   "dev": "devB",
+   "ts": 1720000010000,
+   "kind": "tap",
+   "taskTitle": "false",
+   "taskId": "task-0",
+   "source": null,
+   "reps": 10,
+   "value": 15,
+   "notes": ""
+  },
+  {
+   "uid": "fx-11",
+   "dev": "devA",
+   "ts": 1720000011000,
+   "kind": "export",
+   "taskTitle": "null",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 11,
+   "value": 16.5,
+   "notes": "note 11"
+  },
+  {
+   "uid": "fx-12",
+   "dev": "devB",
+   "ts": 1720000012000,
+   "kind": "complete",
+   "taskTitle": "undefined",
+   "taskId": null,
+   "source": "app",
+   "reps": 0,
+   "value": 0,
+   "notes": ""
+  },
+  {
+   "uid": "fx-13",
+   "dev": "devA",
+   "ts": 1720000013000,
+   "kind": "tap",
+   "taskTitle": "Quote \" and backslash  and newline\nhere",
+   "taskId": "task-3",
+   "source": "app",
+   "reps": 13,
+   "value": 19.5,
+   "notes": "note 13"
+  },
+  {
+   "uid": "fx-14",
+   "dev": "devB",
+   "ts": 1720000014000,
+   "kind": "export",
+   "taskTitle": "emoji flag and accents: café äöü 中文",
+   "taskId": "task-4",
+   "source": "app",
+   "reps": 14,
+   "value": 21,
+   "notes": ""
+  },
+  {
+   "uid": "fx-15",
+   "dev": "devA",
+   "ts": 1720000015000,
+   "kind": "complete",
+   "taskTitle": "comma,separated,like,a,token,table",
+   "taskId": "task-0",
+   "source": null,
+   "reps": 0,
+   "value": 22.5,
+   "notes": "note 15"
+  },
+  {
+   "uid": "fx-16",
+   "dev": "devB",
+   "ts": 1720000016000,
+   "kind": "tap",
+   "taskTitle": "   leading and trailing   ",
+   "taskId": null,
+   "source": "app",
+   "reps": 16,
+   "value": 0,
+   "notes": ""
+  },
+  {
+   "uid": "fx-null",
+   "dev": "devA",
+   "ts": 1720000999000,
+   "kind": "complete",
+   "taskTitle": null,
+   "taskId": null,
+   "source": null,
+   "notes": null,
+   "reps": 0,
+   "value": 0
+  },
+  {
+   "uid": "fx-rep-0",
+   "dev": "devA",
+   "ts": 1720002000000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  },
+  {
+   "uid": "fx-rep-1",
+   "dev": "devA",
+   "ts": 1720002001000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  },
+  {
+   "uid": "fx-rep-2",
+   "dev": "devA",
+   "ts": 1720002002000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  },
+  {
+   "uid": "fx-rep-3",
+   "dev": "devA",
+   "ts": 1720002003000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  },
+  {
+   "uid": "fx-rep-4",
+   "dev": "devA",
+   "ts": 1720002004000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  },
+  {
+   "uid": "fx-rep-5",
+   "dev": "devA",
+   "ts": 1720002005000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  },
+  {
+   "uid": "fx-rep-6",
+   "dev": "devA",
+   "ts": 1720002006000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  },
+  {
+   "uid": "fx-rep-7",
+   "dev": "devA",
+   "ts": 1720002007000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  },
+  {
+   "uid": "fx-rep-8",
+   "dev": "devA",
+   "ts": 1720002008000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  },
+  {
+   "uid": "fx-rep-9",
+   "dev": "devA",
+   "ts": 1720002009000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  },
+  {
+   "uid": "fx-rep-10",
+   "dev": "devA",
+   "ts": 1720002010000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  },
+  {
+   "uid": "fx-rep-11",
+   "dev": "devA",
+   "ts": 1720002011000,
+   "kind": "tap",
+   "taskTitle": "Drink water",
+   "taskId": "task-1",
+   "source": "app",
+   "reps": 1
+  }
+ ]
+}

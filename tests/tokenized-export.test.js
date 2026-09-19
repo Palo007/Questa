@@ -59,52 +59,96 @@ function assert(desc, cond){
   if(cond) console.log('[PASS] ' + desc);
   else { console.error('[FAIL] ' + desc); failures++; }
 }
+// LENIENT compare: sorts the list and drops `undefined` keys. Kept ONLY for the
+// optional real-backup pass below, where event order is not guaranteed. It cannot
+// see key-order differences, which is exactly what the integrity hash compares --
+// so the committed-fixture passes use strictEq() instead.
 function shallowNorm(list){
   return list.map(function(e){
     const o={}; for(const k in e){ if(e[k]!==undefined) o[k]=e[k]; } return o;
   }).map(function(x){ return JSON.stringify(x); }).sort();
 }
+// STRICT compare: byte-identical JSON, so key order AND element order both count.
+// buildBackupFile() hashes JSON.stringify of the DETOKENIZED object, so a tokenizer
+// that restores the same values in a different key order silently breaks every
+// backup's own hash gate. shallowNorm() sorts that difference away; this does not.
+function strictEq(a, b){ return JSON.stringify(a) === JSON.stringify(b); }
 
-// T1: event tokenize -> detokenize round-trips exactly (on a real export)
+// 2026-09-19 (round 3, item 8): T1-T3 used to read an UNTRACKED 3.9 MB personal
+// backup (questa-MERGED-20260716.json). T1 skipped without it, but T2 and T3 threw
+// ENOENT -- so on any fresh clone, including the planned public copy, the suite
+// aborted here. The primary source is now a small committed fixture with
+// adversarial titles (prototype keys, quotes, newlines, unicode, empty strings)
+// and explicit nulls. The personal backup is still used when it happens to be
+// present, as an extra real-world pass, and cleanly SKIPPED when it is not.
+const FIXTURE = path.join(__dirname, 'fixtures', 'tokenized-export-sample.json');
+const fixture = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
+const fixEvents = fixture.events || [];
+const fixSnap = {}; for(const k in fixture){ if(k!=='events') fixSnap[k]=fixture[k]; }
+
+const mergedPath = path.join(__dirname, '..', 'questa-MERGED-20260716.json');
+const hasMerged = fs.existsSync(mergedPath);
+const merged = hasMerged ? JSON.parse(fs.readFileSync(mergedPath, 'utf8')) : null;
+
+// T1: event tokenize -> detokenize round-trips EXACTLY (committed fixture)
 {
-  const mergedPath = path.join(__dirname, '..', 'questa-MERGED-20260716.json');
-  if (!fs.existsSync(mergedPath)) {
-    console.log('[SKIP] T1: merged export not present');
-  } else {
-    const data = JSON.parse(fs.readFileSync(mergedPath, 'utf8'));
-    const evs = data.events || [];
-    const tok = _tokenizeEvents(evs);
-    const back = _detokenizeEvents({ E: tok.E, K: tok.K, SRC: tok.SRC, TID: tok.TID, TT: tok.TT });
-    const a = shallowNorm(evs), b = shallowNorm(back);
-    assert('T1a: event count preserved (' + evs.length + ')', a.length === b.length);
-    assert('T1b: event content round-trips exactly', a.join('|') === b.join('|'));
-  }
+  const tok = _tokenizeEvents(fixEvents);
+  const back = _detokenizeEvents({ E: tok.E, K: tok.K, SRC: tok.SRC, TID: tok.TID, TT: tok.TT });
+  assert('T1a: fixture event count preserved (' + fixEvents.length + ')', back.length === fixEvents.length);
+  assert('T1b: fixture events round-trip byte-identically (key order included)',
+         strictEq(fixEvents, back));
 }
 
-// T2: snapshot tokenize -> detokenize round-trips exactly (real export snapshot)
+// T2: snapshot tokenize -> detokenize round-trips EXACTLY (committed fixture)
 {
-  const mergedPath = path.join(__dirname, '..', 'questa-MERGED-20260716.json');
-  const d = JSON.parse(fs.readFileSync(mergedPath, 'utf8'));
-  const snap = {}; for(const k in d){ if(k!=='events') snap[k]=d[k]; }
-  const tok = _tokenizeSnapshot(snap);
+  const tok = _tokenizeSnapshot(fixSnap);
   const back = _detokenizeSnapshot({ S: tok.S, FM: tok.FM });
-  assert('T2a: snapshot round-trips exactly', JSON.stringify(back) === JSON.stringify(snap));
+  assert('T2a: fixture snapshot round-trips byte-identically', strictEq(back, fixSnap));
 }
 
-// T3: tokenized envelope is materially smaller than the raw file
+// T3: the tokenized envelope is materially smaller than the raw file.
+// Built from a generated bulk set so the assertion does not need a multi-MB file
+// committed to the repo: the dictionaries only pay for themselves at volume.
 {
-  const mergedPath = path.join(__dirname, '..', 'questa-MERGED-20260716.json');
-  const d = JSON.parse(fs.readFileSync(mergedPath, 'utf8'));
-  const snap = {}; for(const k in d){ if(k!=='events') snap[k]=d[k]; }
-  const tok = _tokenizeEvents(d.events);
-  const snapTok = _tokenizeSnapshot(snap);
+  const bulk = [];
+  const titles = ['Drink water', 'Walk the dog', 'Read 10 pages', '__proto__', 'Stretch'];
+  for(let i = 0; i < 2000; i++){
+    bulk.push({ uid: 'b-' + i, dev: (i % 3 ? 'devA' : 'devB'), ts: 1720000000000 + i * 60000,
+                kind: (i % 2 ? 'complete' : 'tap'), taskTitle: titles[i % titles.length],
+                taskId: 'task-' + (i % 7), source: 'app', reps: i % 4 });
+  }
+  const tok = _tokenizeEvents(bulk);
+  const snapTok = _tokenizeSnapshot(fixSnap);
   const env = { _backup:{schema:2}, K: tok.K, SRC: tok.SRC, TID: tok.TID, TT: tok.TT,
                 FM: snapTok.FM, S: snapTok.S, E: tok.E };
-  const raw = JSON.stringify(d).length;
+  const raw = JSON.stringify(Object.assign({}, fixSnap, { events: bulk })).length;
   const tokLen = JSON.stringify(env).length;
-  assert('T3a: tokenized file is smaller (' + (tokLen/1048576).toFixed(2) + 'MB < ' + (raw/1048576).toFixed(2) + 'MB)',
-         tokLen < raw);
-  assert('T3b: at least 20% reduction', (1 - tokLen/raw) >= 0.20);
+  assert('T3a: tokenized envelope is smaller (' + tokLen + ' < ' + raw + ')', tokLen < raw);
+  assert('T3b: at least 20% reduction (' + Math.round((1 - tokLen/raw) * 100) + '%)',
+         (1 - tokLen/raw) >= 0.20);
+}
+
+// T1r/T2r/T3r: the same three checks against the real personal backup, when the
+// developer happens to have it. SKIPPED, never fatal, on a clean checkout.
+if(!hasMerged){
+  console.log('[SKIP] T1r/T2r/T3r: optional real backup questa-MERGED-20260716.json not present');
+} else {
+  const evs = merged.events || [];
+  const tok = _tokenizeEvents(evs);
+  const back = _detokenizeEvents({ E: tok.E, K: tok.K, SRC: tok.SRC, TID: tok.TID, TT: tok.TT });
+  const na = shallowNorm(evs), nb = shallowNorm(back);
+  assert('T1r: real backup event count preserved (' + evs.length + ')', na.length === nb.length);
+  assert('T1r: real backup events round-trip', na.join('|') === nb.join('|'));
+
+  const snap = {}; for(const k in merged){ if(k!=='events') snap[k]=merged[k]; }
+  const stok = _tokenizeSnapshot(snap);
+  assert('T2r: real backup snapshot round-trips exactly',
+         strictEq(_detokenizeSnapshot({ S: stok.S, FM: stok.FM }), snap));
+
+  const env = { _backup:{schema:2}, K: tok.K, SRC: tok.SRC, TID: tok.TID, TT: tok.TT,
+                FM: stok.FM, S: stok.S, E: tok.E };
+  const raw = JSON.stringify(merged).length, tokLen = JSON.stringify(env).length;
+  assert('T3r: real backup tokenizes at least 20% smaller', (1 - tokLen/raw) >= 0.20);
 }
 
 // T4: schema-1 files never reach _detokenizeSnapshot in importData (the else
@@ -222,6 +266,23 @@ function recomputeHash(data){
   const recomputedT = recomputeHash(dataT);
   assert('T7a: tampered snapshot yields a DIFFERENT hash (gate would fire)',
          recomputedT !== tampered._backup.hash);
+}
+
+// T8: KNOWN OPEN DEFECT -- round-2 review item 7. The boolean tokenizer collapses
+// an explicit null to false for `synthetic`, `repCounted`, `inferred` and `done`.
+// Nothing in the app writes an explicit null today, and the obvious fix (a -1
+// sentinel) reads back as TRUE on older builds, so the compatibility call has been
+// deferred deliberately. This test PINS the current behaviour: when item 7 is
+// fixed, T8 fails and forces whoever fixed it to update this note and the fixture
+// (which keeps explicit nulls out of those four fields for exactly this reason).
+{
+  const withNulls = [{ uid: 'n1', dev: 'devA', ts: 1720000000000, kind: 'tap',
+                       taskTitle: 'x', synthetic: null, repCounted: null, inferred: null, done: null }];
+  const tok = _tokenizeEvents(withNulls);
+  const back = _detokenizeEvents({ E: tok.E, K: tok.K, SRC: tok.SRC, TID: tok.TID, TT: tok.TT })[0];
+  const collapsed = back.synthetic === false && back.repCounted === false
+                 && back.inferred === false && back.done === false;
+  assert('T8: [known, item 7] explicit boolean null still collapses to false', collapsed);
 }
 
 if (failures) {

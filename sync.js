@@ -1941,6 +1941,25 @@ function wrap(subset){
   return { schema: 1, savedAt: Date.now(), deviceId: syncDeviceId(), state: subset };
 }
 
+// 2026-09-19 (round 3, item 2): ONE definition of the cross-tab sync lock.
+// syncNow() took the 'questa-sync' Web Lock; the two force paths did not -- they
+// only checked `_syncInFlight`, a per-tab variable no other tab can see. So a
+// force push in tab A ran fully concurrently with tab B's ordinary sync, and B's
+// conflict retry then re-merged and re-uploaded exactly the stale records the
+// force push was invoked to remove. Route every remote-mutating round through
+// this helper instead.
+//
+// Deadlock note: a caller's tail may fire syncNow() again, which requests the same
+// lock. That is safe ONLY because the tail calls it fire-and-forget (it does not
+// await or return it), so the locked chain settles and releases before the nested
+// request is granted. Do not make any such tail call awaited.
+function _withSyncLock(run){
+  if(typeof navigator!=='undefined' && navigator.locks && typeof navigator.locks.request==='function'){
+    return navigator.locks.request('questa-sync', {mode:'exclusive'}, run);
+  }
+  return Promise.resolve().then(run);
+}
+
 // ---- 3.5 syncNow() — the only orchestrator ---------------------------------
 let _syncInFlight = null;
 let _syncRerunQueued = false;
@@ -2138,7 +2157,7 @@ async function syncForcePush(){
     if(typeof syncRefreshSettingsUI==="function") syncRefreshSettingsUI();
     return;
   }
-  _syncInFlight = _syncForcePushAttempt(0)
+  _syncInFlight = _withSyncLock(() => _syncForcePushAttempt(0))
     .then(() => {
       _syncInFlight = null;
       if(typeof syncRefreshSettingsUI==="function") syncRefreshSettingsUI();
@@ -2203,7 +2222,7 @@ async function syncForcePull(){
     if(typeof syncRefreshSettingsUI==="function") syncRefreshSettingsUI();
     return;
   }
-  _syncInFlight = _syncForcePullAttempt()
+  _syncInFlight = _withSyncLock(() => _syncForcePullAttempt())
     .then(() => {
       _syncInFlight = null;
       if(typeof syncRefreshSettingsUI==="function") syncRefreshSettingsUI();
@@ -2582,6 +2601,7 @@ const EVT_PULL_MIN_INTERVAL_MS = 60000; // list_folder at most once/min
 const EVT_FULL_SCAN_INTERVAL_MS = 24 * 3600000; // periodic rev-cache-ignoring re-scan
 const EVT_BAD_REV_RETRY_MS = 15 * 60000;        // corrupt/failed payload retry backoff
 const EVT_BAD_REVS_MAX = 200;                   // cap on cfg.evtBadRevs so it can't grow unbounded
+const EVT_FILE_COUNTS_MAX = 240;                // cap on cfg.evtFileCounts (20y of months) so it can't grow unbounded
 
 /* BEGIN_EVTSYNC_HELPERS */
 // UTC month key for an event timestamp: 1467-style ms -> "YYYYMM".
@@ -2936,6 +2956,48 @@ async function syncEventsPush(opts){
   const clampedMaxTs = Math.min(maxTs, now + MAX_FUTURE_SKEW_MS);
   // Never write a watermark greater than now
   const finalMaxTs = Math.min(clampedMaxTs, now);
+  // 2026-09-19 (round 3, item 3): BOUND evtFileCounts. Each entry holds a full
+  // uid ARRAY for one device-month and nothing ever removed one -- the
+  // `if(!recs.length) continue;` above runs BEFORE the write, so a month whose
+  // records have all aged out is skipped, never cleaned. At ~1500 events/month
+  // that is ~48 KB/month forever; after a few years `questa.sync.v1` exceeds the
+  // localStorage budget, syncCfgSave() swallows the quota error and returns as if
+  // it succeeded, and from then on the watermark never advances and every sync
+  // re-lists and re-downloads everything -- silently. badRevs next to it is
+  // already capped for exactly this reason; mirror that.
+  //
+  // Rule 1a (primary): drop a month that ended before the age cutoff. Every record
+  // it described has been pruned locally (app.js pruneEvents), and the PULL side
+  // refuses that same month as 'tooOld' at the byte-identical boundary
+  // (evtMonthOlderThan: `(now - range.to) > ageLimit`), so no device will ever read
+  // that file again. `known` for it can only produce a false shrink block.
+  // Rule 1b: drop a month that has not STARTED yet, beyond the same 120s skew the
+  // watermark clamp already allows. There is no such thing as a legitimate record
+  // of "the file I uploaded for next year" -- those entries only appear from a
+  // badly wrong clock, and left in place they were the one input that could push
+  // the object past the cap, which then evicted by month name and threw away the
+  // CURRENT month's guard (the only one that matters) before any of them.
+  // Rule 2 (backstop): hard-cap the count, oldest month first. With 1a and 1b in
+  // front of it this should now be unreachable -- at most ~19 months can survive
+  // them -- so treat it firing as a bug signal, not as normal operation. Kept
+  // because an unbounded object here is exactly the failure this whole block fixes.
+  const fcCutoff = now - ageLimit;
+  const fcFutureLimit = now + MAX_FUTURE_SKEW_MS;
+  for(const fn of Object.keys(fileCounts)){
+    const parsed = evtParseFileName(fn);
+    if(!parsed){ delete fileCounts[fn]; continue; }
+    const mr = evtMonthRange(parsed.month);
+    if(mr.to < fcCutoff){ delete fileCounts[fn]; continue; }        // 1a: aged out
+    if(mr.from > fcFutureLimit){ delete fileCounts[fn]; continue; } // 1b: not started
+  }
+  const fcKeys = Object.keys(fileCounts);
+  if(fcKeys.length > EVT_FILE_COUNTS_MAX){
+    fcKeys.sort((a, b) => {
+      const pa = evtParseFileName(a), pb = evtParseFileName(b);
+      return ((pa && pa.month) || "").localeCompare((pb && pb.month) || "");
+    });
+    for(let i = 0; i < fcKeys.length - EVT_FILE_COUNTS_MAX; i++) delete fileCounts[fcKeys[i]];
+  }
   // T1: Do not advance watermark past a blocked month
   const newEvtLastUploadTs = anyBlocked ? since : finalMaxTs;
   syncCfgSave({ 
@@ -3050,9 +3112,23 @@ async function syncEventsPull(opts){
       // the stored record's signature to separate a real duplicate from a
       // content-hash uid collision, which used to drop the incoming event for
       // good. Month-scoped, so the Map stays small.
+      // 2026-09-19 (round 3, item 4): the duplicate guard must be COMPLETE or the
+      // file must be skipped. getEvents() swallows every IDB failure and resolves []
+      // -- or, on a mid-cursor error, only the rows read so far. A short `existing`
+      // makes evtIncomingFilter treat already-stored records as new, so one transient
+      // read error during a 24h full scan inserts every record of the re-downloaded
+      // month a SECOND time. Nothing downstream collapses them -- there is no unique
+      // index on `uid`. The rev was then cached as processed too, so the file was
+      // never re-examined and the duplicates were permanent. Ask for strict mode and
+      // route a failed read into the same badRevs retry path a failed INSERT uses.
+      const priorRows = await getEvents({ from: range.from, to: range.to, includeDiag: true, strict: true });
+      if(priorRows == null){
+        if(typeof _qDiagPush === "function") _qDiagPush('evtPullGuardReadFailed', { name: ent.name });
+        badRevs[ent.name] = { rev: dl.rev || ent.rev || null, at: now };
+        continue;
+      }
       const existing = new Map();
-      (await getEvents({ from: range.from, to: range.to, includeDiag: true }))
-        .forEach(e => { if(e && e.uid) existing.set(e.uid, evtIncomingSig(e)); });
+      priorRows.forEach(e => { if(e && e.uid) existing.set(e.uid, evtIncomingSig(e)); });
       const _evtRes = await evtInsertNew(evtIncomingFilter(records, existing, myDev, now, ageLimit));
       const _evtInserted = (_evtRes && _evtRes.added) || 0;
       // Successful parse + COMMITTED insert only: record the rev in the normal

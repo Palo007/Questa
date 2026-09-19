@@ -130,7 +130,28 @@ def _detok_events(env):
             if sk in ("u", "d", "i"):
                 ev[sk] = v
                 continue
-            f = SHORT.get(sk, sk)
+            # SHORT.get(sk, sk) used to fall back to the raw code as the field
+            # name for anything it didn't recognize, so a code added by a NEWER
+            # app build was silently kept verbatim and the record quietly
+            # changed shape instead of the join refusing the file.
+            #
+            # That fallback was doing TWO jobs. A key in E is either a SHORT
+            # CODE (a value of the app's _EXPORT_FIELD_MAP) or a LONG field
+            # name the tokenizer passed through untouched, because the app
+            # writes o[f]=v for any field the map does not cover (e.g.
+            # "winnerDev"). Only the first kind can come from a newer build.
+            # They are told apart by shape: every short code is 1-3 lowercase
+            # letters and no long field name is. Same rule, same invariant, as
+            # _detokenizeEvents in app.js. (AGENTS.md §6: mirrors item 5.)
+            f = SHORT.get(sk)
+            if f is None:
+                if len(sk) <= 3 and sk.isascii() and sk.isalpha() and sk.islower():
+                    raise ValueError(
+                        f"_detok_events: unknown schema-2 field code {sk!r} -- "
+                        "this export was probably written by a newer Questa "
+                        "build; refusing to guess its meaning"
+                    )
+                f = sk   # untokenized long field name: carried through as before
             if sk == "k":
                 ev["kind"] = K[v] if isinstance(v, int) and 0 <= v < len(K) else v
             elif sk == "o":
@@ -140,7 +161,13 @@ def _detok_events(env):
             elif sk == "n":
                 ev["taskTitle"] = TT[v] if isinstance(v, int) and 0 <= v < len(TT) else v
             elif sk in ("sy", "rc", "in", "do"):
-                ev[f] = bool(v)
+                # bool(v) used to turn an explicit null (synthetic/repCounted/
+                # inferred/done not yet decided) into False, indistinguishable
+                # from a real negative. The app's tokenizer now emits JSON
+                # null for that case, which parses to Python None here, so
+                # preserve it instead of collapsing it. (AGENTS.md §6: mirrors
+                # app.js round-2 item 7.)
+                ev[f] = None if v is None else bool(v)
             else:
                 ev[f] = v
         out.append(ev)

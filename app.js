@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.19-1115";
+const APP_VERSION = "v2026.09.19-1455";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -1507,6 +1507,19 @@ function bulkAddEvents(list){
 }
 // SHA-256 hash for backup integrity verification. Falls back to a simple
 // length-based digest when Web Crypto is unavailable (e.g. insecure context).
+//
+// 2026-09-19 (round 3, review item 6): the fallback used to be INVISIBLE. A
+// backup written on a plain-HTTP origin (not a secure context, so no
+// crypto.subtle) got the weak 32-bit digest, the file recorded only the digest
+// and never which algorithm made it, and importing that same file over HTTPS
+// re-hashed it with SHA-256, mismatched, and refused it as "corrupted or
+// tampered with". The user's own backup became unrestorable. The algorithm is
+// now a named, selectable thing: hashAlgoName() reports what THIS context can
+// do, and computeHashWith() reproduces a named algorithm on demand.
+//
+// Best-effort digest. Behaviour is UNCHANGED on purpose: writeSnapshot() hashes
+// and verifies inside one session, so it can never straddle two algorithms and
+// needs no algorithm record.
 async function computeHash(str){
   if(typeof crypto!=="undefined" && crypto.subtle && crypto.subtle.digest){
     try{
@@ -1515,9 +1528,36 @@ async function computeHash(str){
     }catch(e){ /* fall through */ }
   }
   // Fallback: deterministic string-length-based hash when crypto unavailable
+  return _hashFallback32(str);
+}
+function _hashFallback32(str){
   let h = 0;
   for(let i=0; i<str.length; i++){ h = ((h<<5)-h)+str.charCodeAt(i); h |= 0; }
   return 'fallback-' + Math.abs(h).toString(16).padStart(8,'0');
+}
+// 'sha256' when this context has Web Crypto, otherwise 'fallback32'.
+function hashAlgoName(){
+  return (typeof crypto!=="undefined" && crypto.subtle && crypto.subtle.digest)
+    ? 'sha256' : 'fallback32';
+}
+// Hash with a NAMED algorithm. Unlike computeHash() this never silently
+// downgrades: asking for sha256 where Web Crypto is missing rejects, so the
+// caller can decide (importData skips the integrity gate rather than calling a
+// good backup corrupt). The gate is a corruption check, not a signature.
+async function computeHashWith(str, algo){
+  if(algo === 'fallback32') return _hashFallback32(str);
+  if(algo !== 'sha256'){
+    const e = new Error('Unknown hash algorithm "' + algo + '"');
+    e.code = 'QUESTA_HASH_ALGO_UNKNOWN';
+    throw e;
+  }
+  if(!(typeof crypto!=="undefined" && crypto.subtle && crypto.subtle.digest)){
+    const e = new Error('SHA-256 is unavailable in this context (not a secure origin)');
+    e.code = 'QUESTA_HASH_ALGO_UNAVAILABLE';
+    throw e;
+  }
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
 }
 
 // --- Backup snapshot read/list (Tier-1 core write/verify) --------------------
@@ -6562,7 +6602,14 @@ function _tokenizeEvents(eventsArr){
       else if(f==='source') o[sk]=idx(srcArr,srcIdx,v);
       else if(f==='taskId') o[sk]=idx(tidArr,tidIdx,v);
       else if(f==='taskTitle') o[sk]=idx(titleArr,titleIdx,v);
-      else if(f==='synthetic'||f==='repCounted'||f==='inferred'||f==='done') o[sk]=(v?1:0);
+      // 2026-09-19 (round 3, review item 7): an explicit null used to be
+      // squashed to 0 and read back as false, so "not known" became "no". It
+      // is now carried as JSON null. A -1 sentinel was the obvious fix and is
+      // the WRONG one: an older build's detokenizer is `e[f] = !!v`, and
+      // !!(-1) is TRUE, so every null would have flipped to yes on an older
+      // device. !!null is false, so an older build degrades to exactly the
+      // lossy-but-safe behaviour it has today instead of inventing a value.
+      else if(f==='synthetic'||f==='repCounted'||f==='inferred'||f==='done') o[sk]=(v==null)?null:(v?1:0);
       else o[sk]=v;
     }
     return o;
@@ -6579,7 +6626,34 @@ function _detokenizeEvents(env){
     for(const sk in o){
       const v=o[sk];
       if(sk==='uid'||sk==='dev'||sk==='id'){ e[sk]=v; continue; }
-      const f = RM[sk] || sk;
+      // 2026-09-19 (round 3, review item 5): this was `RM[sk] || sk`, which
+      // RENAMED an unknown code instead of rejecting it. A newer build adds a
+      // field code, this build does not know it, and `|| sk` kept the raw token
+      // as the field name -- so the record silently changed shape and imported
+      // as a half-readable ghost with no warning at all.
+      //
+      // `|| sk` was doing TWO jobs, which is why it looked harmless. A key in E
+      // is either a SHORT CODE (a value of _EXPORT_FIELD_MAP) or a LONG field
+      // name that the tokenizer passed through untouched, because
+      // _tokenizeEvents writes `o[f]=v` for any field the map does not cover
+      // (e.g. `winnerDev`). Only the first kind can be 'from a newer build'.
+      //
+      // The two namespaces are told apart by shape: EVERY value in
+      // _EXPORT_FIELD_MAP is 1-3 lowercase letters, and no long event field
+      // name is. So a key that LOOKS like a short code but is not in the map
+      // can only come from a build that knows a code this one does not.
+      // INVARIANT: keep every _EXPORT_FIELD_MAP value inside /^[a-z]{1,3}$/ and
+      // keep every long event field name outside it (AGENTS.md section 6).
+      let f = RM[sk];
+      if(f === undefined){
+        if(/^[a-z]{1,3}$/.test(sk)){
+          const err = new Error('Unknown export field code "' + sk + '"');
+          err.code = 'QUESTA_UNKNOWN_FIELD_CODE';
+          err.fieldCode = sk;
+          throw err;
+        }
+        f = sk;   // untokenized long field name: carried through as it always was
+      }
       // 2026-09-18: `v === -1` is the tokenizer's encoding of null (see idx() in
       // _tokenizeEvents). Restore null rather than reading past the dictionary,
       // which yielded undefined and silently dropped the key — breaking the
@@ -6588,7 +6662,9 @@ function _detokenizeEvents(env){
       else if(sk==='o') e.source = (v===-1) ? null : SRC[v];
       else if(sk==='ti') e.taskId = (v===-1) ? null : TID[v];
       else if(sk==='n') e.taskTitle = (v===-1) ? null : TT[v];
-      else if(sk==='sy'||sk==='rc'||sk==='in'||sk==='do') e[f] = !!v;
+      // 2026-09-19 (round 3, review item 7): null means null. `!!v` alone
+      // turned the tokenizer's null into false and lost the distinction.
+      else if(sk==='sy'||sk==='rc'||sk==='in'||sk==='do') e[f] = (v===null) ? null : !!v;
       else e[f]=v;
     }
     return e;
@@ -6907,10 +6983,15 @@ async function buildBackupFile(eventsArr, sectionKeys){
   // field), then inject it. Hashing the detokenized form keeps the hash stable
   // across re-exports regardless of dictionary ordering, and keeps old schema-1
   // backups valid (their hash was always on the detokenized form).
+  // 2026-09-19 (round 3, review item 6): record WHICH algorithm produced the
+  // hash. hashAlgo is written BEFORE the hash is computed, so it is inside the
+  // hashed bytes and importData can trust it. Older files carry no hashAlgo;
+  // importData infers those from the fallback digest's own prefix.
   let hash = null;
   try{
+    backup._backup.hashAlgo = hashAlgoName();
     const preJson = JSON.stringify(backup);
-    hash = await computeHash(preJson);
+    hash = await computeHashWith(preJson, backup._backup.hashAlgo);
     backup._backup.hash = hash;
   }catch(e){ /* hash optional; export proceeds without it */ }
   // Build the schema-2 tokenized envelope (tokenized form is export-only).
@@ -7669,7 +7750,15 @@ function importData(ev){
         delete data._backup.hash;
         const cleanStr = JSON.stringify(data);
         data._backup.hash = expectedHash;
-        computeHash(cleanStr).then(check => {
+        // 2026-09-19 (round 3, review item 6): verify with the algorithm the
+        // FILE used, not with the best one this context happens to offer. A
+        // backup written over plain HTTP was re-hashed with SHA-256 here and
+        // refused as corrupt. computeHashWith rejects when the named algorithm
+        // is unavailable, and the existing .catch() below then SKIPS the gate
+        // rather than condemning a good backup.
+        const hashAlgo = data._backup.hashAlgo
+          || (/^fallback-/.test(String(expectedHash)) ? 'fallback32' : 'sha256');
+        computeHashWith(cleanStr, hashAlgo).then(check => {
           if(check !== expectedHash){
             alertDialog('Import Error', 'This file appears to be corrupted or tampered with (hash mismatch). Import cancelled.');
             return;
@@ -7680,6 +7769,15 @@ function importData(ev){
         doImport();
       }
     }catch(e){
+      // 2026-09-19 (round 3, review item 5): an unrecognised export field code
+      // can only mean the file came from a NEWER build. Say so. The old
+      // `RM[sk] || sk` said nothing and imported a reshaped record instead.
+      if(e && e.code === 'QUESTA_UNKNOWN_FIELD_CODE'){
+        alertDialog('Import Error', 'This backup was made by a newer version of'
+          + ' Questa. It uses a field this build does not understand ("'
+          + e.fieldCode + '"). Update Questa, then import it again.');
+        return;
+      }
       // A CSV or Markdown export is text, not JSON, so it lands here as a
       // parse error. Name it, rather than saying "not valid", which reads as
       // "your file is broken".

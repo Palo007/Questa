@@ -346,7 +346,13 @@ async function roundTrip() {
       let h = 5381;
       for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
       return Promise.resolve(h.toString(16));
-    }
+    },
+    // 2026-09-19 (round-2 review item 6): buildBackupFile now records WHICH
+    // algorithm produced the hash and hashes with that NAMED algorithm, so the
+    // sandbox must supply both helpers. Both route to the stub digest above:
+    // this test gates the envelope and the round trip, not the cryptography.
+    hashAlgoName: function () { return 'sha256'; },
+    computeHashWith: function (str, algo) { return ctx.computeHash(str); }
   };
   ctx.globalThis = ctx;
   vm.createContext(ctx);

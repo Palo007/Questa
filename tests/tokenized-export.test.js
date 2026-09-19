@@ -268,21 +268,27 @@ function recomputeHash(data){
          recomputedT !== tampered._backup.hash);
 }
 
-// T8: KNOWN OPEN DEFECT -- round-2 review item 7. The boolean tokenizer collapses
-// an explicit null to false for `synthetic`, `repCounted`, `inferred` and `done`.
-// Nothing in the app writes an explicit null today, and the obvious fix (a -1
-// sentinel) reads back as TRUE on older builds, so the compatibility call has been
-// deferred deliberately. This test PINS the current behaviour: when item 7 is
-// fixed, T8 fails and forces whoever fixed it to update this note and the fixture
-// (which keeps explicit nulls out of those four fields for exactly this reason).
+// T8: FIXED 2026-09-19 -- round-2 review item 7. The boolean tokenizer used to
+// collapse an explicit null to false for `synthetic`, `repCounted`, `inferred`
+// and `done`, so "not known" silently became "no". This test used to PIN that
+// broken behaviour on purpose, because the obvious fix (a -1 sentinel) reads
+// back as TRUE on an older build, whose detokenizer is `e[f] = !!v`.
+// The shipped fix carries an explicit null as JSON null instead: !!null is
+// false, so an older build degrades to exactly the lossy-but-safe behaviour it
+// already had, and no compatibility break was needed. T8 now asserts the FIXED
+// behaviour. Deeper cover lives in tests/round3-export-compat.test.js (A7a-A7e).
 {
   const withNulls = [{ uid: 'n1', dev: 'devA', ts: 1720000000000, kind: 'tap',
                        taskTitle: 'x', synthetic: null, repCounted: null, inferred: null, done: null }];
   const tok = _tokenizeEvents(withNulls);
   const back = _detokenizeEvents({ E: tok.E, K: tok.K, SRC: tok.SRC, TID: tok.TID, TT: tok.TT })[0];
-  const collapsed = back.synthetic === false && back.repCounted === false
-                 && back.inferred === false && back.done === false;
-  assert('T8: [known, item 7] explicit boolean null still collapses to false', collapsed);
+  const kept = back.synthetic === null && back.repCounted === null
+            && back.inferred === null && back.done === null;
+  assert('T8: [item 7 FIXED] an explicit boolean null round-trips as null', kept);
+  // The old-build safety net, asserted rather than assumed: the on-wire value
+  // an older `!!v` detokenizer would see must still be falsy, never true.
+  assert('T8b: the wire value for null is falsy, so an older build reads false',
+         !tok.E[0].sy && !tok.E[0].rc && !tok.E[0].in && !tok.E[0].do);
 }
 
 if (failures) {

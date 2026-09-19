@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.19-2150";
+const APP_VERSION = "v2026.09.19-2330";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -4855,10 +4855,27 @@ function renderEventDetail(from,to){
     }
 
     feedContent.innerHTML=listHtml;
-  }).catch(()=>{
+  }).catch((e)=>{
+    // 2026-09-19 (round 3): this was a bare `catch(()=>{})`. It threw the cause
+    // away and then printed a message BLAMING IndexedDB, so an ordinary
+    // TypeError in the row-building code above looked exactly like private
+    // browsing. That is not hypothetical: tests/debug-pager.test.js rendered
+    // nothing for months and reported "Event log unavailable" while the real
+    // fault was a missing dependency, and there was no way to tell from the
+    // screen or from a diagnostics bundle. Record the cause.
+    //
+    // Diagnostics ring ONLY, deliberately not logEvent(): this runs inside the
+    // event-feed render, and writing an event from here would both feed the
+    // list being rendered and need a new entry in DIAGNOSTIC_KINDS to avoid
+    // showing up as ordinary user activity.
+    try{
+      if(typeof _qDiagPush==="function"){
+        _qDiagPush('eventFeedRenderFailed', { error: String((e && e.stack) || (e && e.message) || e).slice(0, 400) });
+      }
+    }catch(_){}
     const cur=document.getElementById('anEventDetail'); if(!cur) return;
     cur.innerHTML='<div class="k">From IndexedDB event log</div>'+
-      '<div class="anNote">Event log unavailable (IndexedDB may be disabled, e.g. private browsing). History-based charts above are unaffected.</div>';
+      '<div class="anNote">Event log unavailable. This is usually IndexedDB being blocked (private browsing), but it can also be a rendering fault \u2014 the reason is recorded in the diagnostics bundle. History-based charts above are unaffected.</div>';
   });
 }
 function anHeatmapHTML(from,to,inten,maxI){

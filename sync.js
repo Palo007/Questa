@@ -3756,6 +3756,7 @@ if(typeof window !== "undefined"){
     eventsDeleteDevice: syncEventsDeleteDevice,
     eventsSync: syncEventsSync,
     eventsForcePush: syncEventsForcePush, // T1: force-push override for shrink guard
+    eventsRepublishPush: syncEventsRepublishPush, // round-1 finding 8: full re-scan so opted-in imported records actually go out
     evtHelpers: { evtMonthKey, evtMonthRange, evtParseFileName, evtUploadable, evtOwnMonthRecords, evtIncomingFilter, evtIncomingSig, evtUidDisambiguate, evtMonthOlderThan, uidHash, uidsAreSuperset },
     _testOnly: { _conflictLogThrottleReset: function(){ _conflictLogThrottle.clear(); } }
   };
@@ -3780,6 +3781,28 @@ if(typeof window !== "undefined"){
 // Allows user to explicitly override the shrink guard and push a smaller month file
 async function syncEventsForcePush(){
   return syncEventsPush({ force: true, forceFullPush: true });
+}
+// ROUND-1 FINDING 8 (2026-09-19). app.js's republishImportedEvents() flagged the
+// records and stopped there: it set `republish: true`, toasted "Republished N
+// imported events", and triggered nothing. The records are historical, so they sit
+// BELOW `evtLastUploadTs` and an ordinary push — which selects `ts > since` — can
+// never see them. Before finding 20 that meant never; with finding 20 fixed the 24h
+// full re-push eventually carries them, so the user's opt-in took up to a day to do
+// anything, with a toast that read as if it had already happened.
+//
+// `forceFullPush` (effectiveSince = 0) is the whole fix: it re-scans from zero, and
+// the newly flagged records pass evtUploadable's `(!e.imported || e.republish)` arm.
+//
+// NOT `force: true`. That is syncEventsForcePush's shrink-guard override, and this
+// action only ever ADDS uploadable records, so the guard cannot legitimately fire.
+// Keeping it armed means a republish can still never overwrite a fuller remote file.
+//
+// The Web Lock is round-2 item 2's rule — "route every remote-mutating round through
+// this helper" — applied to a round that reaches Dropbox from a button press, so it
+// cannot run concurrently with another tab's ordinary sync. (syncEventsForcePush's
+// own call site above still does not take it; that is a separate, pre-existing gap.)
+async function syncEventsRepublishPush(){
+  return _withSyncLock(() => syncEventsPush({ forceFullPush: true }));
 }
 
 /* BEGIN_BOOT_GATE */

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.20-0015";
+const APP_VERSION = "v2026.09.20-0140";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -1218,7 +1218,7 @@ function republishImportedEvents(){
       if(!ok){ toast('Republish cancelled.'); return 0; }
       return idbOpen().then(db=>new Promise((resolve)=>{
         let updated=0, tx;
-        try{ tx = db.transaction(EVENTS_STORE,"readwrite"); }catch(e){ resolve(0); return; }
+        try{ tx = db.transaction(EVENTS_STORE,"readwrite"); }catch(e){ resolve({updated:0, ok:false}); return; }
         const cur = tx.objectStore(EVENTS_STORE).openCursor();
         cur.onsuccess = ()=>{ const c=cur.result;
           if(!c){ return; }
@@ -1230,12 +1230,47 @@ function republishImportedEvents(){
           }
           c.continue();
         };
-        tx.oncomplete = ()=>resolve(updated);
-        tx.onerror = ()=>resolve(updated);
-        tx.onabort = ()=>resolve(updated);
-      })).then(updated=>{
-        toast('Republished '+updated+' imported event'+(updated===1?'':'s')+'.');
-        return updated;
+        tx.oncomplete = ()=>resolve({updated:updated, ok:true});
+        // ROUND-1 FINDING 8 (2026-09-19), second half. All three handlers used to
+        // resolve the SAME `updated` count, so an aborted transaction toasted a
+        // success. An IndexedDB abort rolls the whole transaction back, so the
+        // records the cursor walked were NOT flagged — the honest count is 0, and
+        // the caller must not go on to push or claim anything happened. Same shape
+        // as finding 7 (evtInsertNew) in a lower-stakes place.
+        tx.onerror = ()=>resolve({updated:0, ok:false});
+        tx.onabort = ()=>resolve({updated:0, ok:false});
+      })).then(res=>{
+        if(!res.ok){
+          toast('Republish failed: nothing was changed.');
+          return 0;
+        }
+        const updated = res.updated;
+        const label = 'Republished '+updated+' imported event'+(updated===1?'':'s');
+        if(updated===0){ toast(label+'.'); return 0; }
+        // ROUND-1 FINDING 8, first half: flagging is not publishing. These records
+        // are historical, so they sit BELOW the sync watermark and no ordinary push
+        // selects them; syncEventsRepublishPush() re-scans from zero. Everything is
+        // `typeof`-guarded because sync.js is a separate script loaded AFTER app.js
+        // (and tests/no-republish-imported.test.js extracts this function on its
+        // own, with neither global defined) — an unguarded reference here is a
+        // ReferenceError in exactly the path the user just opted into.
+        const scfg = (typeof syncCfg==='function') ? (syncCfg()||{}) : {};
+        const canPush = !!scfg.enabled && typeof syncEventsRepublishPush==='function';
+        if(!canPush){
+          toast(label+'. They will go out when Dropbox sync is connected.');
+          return updated;
+        }
+        toast(label+'. Pushing to Dropbox…');
+        return Promise.resolve().then(()=>syncEventsRepublishPush()).then(()=>{
+          toast(label+' and pushed them to Dropbox.');
+          return updated;
+        }).catch(e=>{
+          // The flags are committed and durable, so the next ordinary round still
+          // carries them. Say that instead of implying the opt-in was lost.
+          if(typeof _qDiagPush==='function') _qDiagPush('republishPushFailed', { n: updated, err: (e && e.message) || String(e) });
+          toast(label+', but the push failed. They will go out on the next sync.');
+          return updated;
+        });
       });
     });
   }).catch(()=>0);

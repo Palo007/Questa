@@ -112,7 +112,7 @@ node tests/run.js     # or: npm test
 
 It executes every `tests/*.test.js` and `archive/tests/*-tests.js`, aggregates
 PASS/FAIL, and exits non-zero if any file fails. No framework, no dependencies.
-**Baseline as of 2026-09-19 (round-1 findings 5 and 10): 101 test files, all passing.** Never
+**Baseline as of 2026-09-19 (round-1 findings 5, 8 and 10): 102 test files, all passing.** Never
 commit or deploy with a red suite. The count only ever goes up.
 
 **Caveat on what a green count proves.** This used to say the runner judged only by

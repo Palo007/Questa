@@ -3508,10 +3508,22 @@ async function confirmEventsForcePush(){
       text += " " + _blocked + " month file" + (_blocked === 1 ? " is" : "s are") + " blocked right now.";
     }
   }catch(e){ /* advisory only, never block the dialog */ }
-  confirmDialog('Force Push Events?', text).then(ok=>{
+  // 2026-09-19: the call was bare \u2014 the returned promise was dropped, so a
+  // rejection was an unhandled rejection and the user was left on
+  // "Re-uploading events to Dropbox\u2026" forever whether it worked or not. This is
+  // the button the shrink-block toast tells people to press, so "nothing further
+  // happened" reads as success. Report both outcomes, and record a failure the
+  // same way syncEventsSync does so Settings can show it.
+  return confirmDialog('Force Push Events?', text).then(ok=>{
     if(!ok) return;
     if(typeof toast==="function") toast('Re-uploading events to Dropbox\u2026');
-    syncEventsForcePush();
+    return syncEventsForcePush().then(()=>{
+      if(typeof toast==="function") toast('Event history re-uploaded to Dropbox.');
+    }).catch(e=>{
+      const msg = (e && e.message) || String(e);
+      try{ syncCfgSave({ lastError: "event force push failed: " + msg }); }catch(_){}
+      if(typeof toast==="function") toast('Force push failed: ' + msg);
+    });
   });
 }
 // Connect + force push in a single action, for the "fresh device, make Dropbox hold
@@ -3779,8 +3791,15 @@ if(typeof window !== "undefined"){
 //
 // T1: Force-push override for event shrink guard
 // Allows user to explicitly override the shrink guard and push a smaller month file
+// 2026-09-19: this used to call syncEventsPush directly, with no Web Lock. Round-2
+// item 2 established the rule — "route every remote-mutating round through
+// _withSyncLock" — and closed syncForcePush/syncForcePull, but this sibling was
+// missed: a force push of the event log from tab A could run fully concurrently
+// with tab B's ordinary sync. The only callers are confirmEventsForcePush's dialog
+// and QuestaSync.eventsForcePush, neither of which runs inside a held lock, so
+// taking it here rather than at the call site covers both without nesting.
 async function syncEventsForcePush(){
-  return syncEventsPush({ force: true, forceFullPush: true });
+  return _withSyncLock(() => syncEventsPush({ force: true, forceFullPush: true }));
 }
 // ROUND-1 FINDING 8 (2026-09-19). app.js's republishImportedEvents() flagged the
 // records and stopped there: it set `republish: true`, toasted "Republished N
@@ -3799,8 +3818,8 @@ async function syncEventsForcePush(){
 //
 // The Web Lock is round-2 item 2's rule — "route every remote-mutating round through
 // this helper" — applied to a round that reaches Dropbox from a button press, so it
-// cannot run concurrently with another tab's ordinary sync. (syncEventsForcePush's
-// own call site above still does not take it; that is a separate, pre-existing gap.)
+// cannot run concurrently with another tab's ordinary sync. (syncEventsForcePush
+// was the same gap and now takes the lock too — see its own note.)
 async function syncEventsRepublishPush(){
   return _withSyncLock(() => syncEventsPush({ forceFullPush: true }));
 }

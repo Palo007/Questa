@@ -112,7 +112,7 @@ node tests/run.js     # or: npm test
 
 It executes every `tests/*.test.js` and `archive/tests/*-tests.js`, aggregates
 PASS/FAIL, and exits non-zero if any file fails. No framework, no dependencies.
-**Baseline as of 2026-09-19 (round-1 findings 5, 8, 10 and the prune coverage gap): 103 test files, all passing.** Never
+**Baseline as of 2026-09-19 (round-1 findings 5, 8, 10, both coverage gaps and the force-push lock): 105 test files, all passing.** Never
 commit or deploy with a red suite. The count only ever goes up.
 
 **Caveat on what a green count proves.** This used to say the runner judged only by
@@ -174,9 +174,20 @@ direct unit test of its return value, not just coverage of its caller.
 
 Fill these when you touch the area:
 
-- `tests/auto-backup-cycling.test.js` (slot modulo cycling / lazy self-heal —
-  still unwritten, tracked as P2 in
-  `.kilo/plans/1785344033093-dropbox-cycling-backups-review.md`).
+*(Nothing is currently listed here. Add an entry the moment you find a path you
+cannot cover in the same edit — an empty list is only true because the last two
+entries were closed on 2026-09-19, not because gaps stopped existing.)*
+
+`tests/auto-backup-cycling.test.js` (slot modulo cycling / lazy self-heal, the P2
+item in `.kilo/plans/1785344033093-dropbox-cycling-backups-review.md`) was listed
+here until 2026-09-19 and is now **written**: C1-C11 cover `bkVersion`
+normalisation, the self-heal's `(maxSlot + 1)` adoption and its wrap, the
+no-re-heal rule, the modulo advance, over-count eviction, and the just-written pin.
+Two of those are round-2 fixes that had no standing guard: **C1b** is item 50 (an
+absent `bkVersion` normalising to 1 made the self-heal branch dead) and **C11** is
+the clock-rewind case (a stale file sorting higher than the backup just written).
+Proven by mutation: normalising to 1 fails C1b, dropping the `% tier.count` fails
+C8b, removing the just-written pin fails C11b/C11c.
 
 The event-log pruning/age path was listed here until 2026-09-19 and is now
 covered: `tests/prune-events.test.js` (P0-P9) drives `pruneEvents` and

@@ -188,15 +188,20 @@ async function main(){
 
   // T2: uidsAreSuperset() fast path engages with ARRAY-shaped uids.
   //
-  // knownUids is a plain array (the persisted shape after the fix) that is
-  // NOT fully covered by the local uids -- so the uid-superset branch must
-  // return false. The hash-equality fallback branch, given ANY string
-  // knownHash, can never return true here either (uidHash() is async and
-  // its unawaited Promise is never === a string) -- so if the uid branch
-  // were entered, this is unambiguous. We flip it: make knownUids a
-  // TRUE subset (so the uid branch says true) while knownHash is deliberately
-  // wrong (so the fallback says false) -- the two branches disagree, and the
-  // returned boolean alone proves which one ran.
+  // knownUids is a plain array (the persisted shape after the fix) that IS a
+  // true subset of the local uids, so the uid-superset branch says true, while
+  // knownHash is deliberately wrong so the hash branch says false. The two
+  // branches disagree, and the returned boolean alone proves which one ran.
+  //
+  // UPDATED 2026-09-19 (round-1 finding 10): this note used to justify the
+  // disagreement with "the hash branch can never return true, because uidHash()
+  // is async and its unawaited Promise is never === a string". That was the
+  // finding-10 bug, and it is fixed -- the branch is live and is handed the
+  // caller's awaited hash. The disagreement now rests only on knownHash being a
+  // deliberately wrong value, which is all this test ever needed. The call below
+  // passes no 4th argument on purpose: that is the documented safe degrade
+  // (false), so it still cannot be the branch that produces the true.
+  // Full contract: tests/round3-uids-superset-hash.test.js.
   {
     const c = makeCtx();
     const recs = [{ uid: 'a' }, { uid: 'b' }, { uid: 'c' }];

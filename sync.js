@@ -1809,29 +1809,66 @@ function mergeDayArray(localArr, remoteArr){
   // either side of LOCAL midnight folded two distinct days into one bucket and lost
   // one. dayStampOf(0) is 0, the same key the old expression gave a missing date.
   const dayOf = ms => dayStampOf(ms || 0);
-  const buckets = new Map(); // dayKey -> merged entry
+  const buckets = new Map(); // dayKey -> the winning entry (a whole row, never a blend)
+
+  // ROUND-1 FINDING 5 (fixed 2026-09-19). This used to fold the two sides
+  // FIELD BY FIELD -- `Math.max` on every number, union-by-id on every array --
+  // and so returned a row that had never existed on either device. Two concrete
+  // losses, both reported and both reproduced:
+  //   * `lvl` was taken from one device and `xp` from the other, which produced
+  //     level/XP pairs past that level's threshold (device A levelled up and its
+  //     xp reset to 10; device B was still on the old level with xp 95; the merge
+  //     emitted lvl 6 WITH xp 95).
+  //   * a day on which the character LOST hp kept the pre-loss hp, because
+  //     max(50, 20) is 50. The damage simply vanished from the history.
+  // A charHistory row is ONE atomic observation of the character's vitals
+  // (`logCharSnapshot` writes date/hp/maxHp/xp/mp/gold/lvl in a single push), so
+  // the fields are correlated and must travel together. The rule is now: one
+  // whole row wins the day bucket, and no field is ever taken from the loser --
+  // not even a field the winner does not carry, because backfilling a correlated
+  // vital is the same bug in a smaller box. A partial row is a true observation;
+  // a completed one is a fabricated one.
+  //
+  // This also makes sync.js agree with the other two places these arrays merge,
+  // which were already atomic and were never part of the bug:
+  //   * `tools/join_exports.py` -- "charHistory: key=date, ts=date -> union,
+  //     de-dup by date", whole rows.
+  //   * `app.js` `_ioMergeLog` (the import/merge path) -- de-dups on the whole
+  //     row's JSON, whole rows.
+  //
+  // Winner order, and why progression comes before the clock:
+  //   1. higher `lvl`, then 2. higher `xp` -- but only when BOTH rows carry the
+  //      field as a number. Levels and XP only move forward, so this orders the
+  //      two rows by where the character actually was, and it cannot be fooled by
+  //      a device with a skewed clock. Ordering purely by `date` could roll the
+  //      character backwards on a fast clock, which is the failure this file has
+  //      already been bitten by several times.
+  //   3. later `date`. Reached when the two rows are at the same point of
+  //      progression, which is exactly the hp/mp/gold-only case -- and there the
+  //      later snapshot is the one that saw the day's damage or spending.
+  //   4. otherwise keep the incumbent, so the result does not depend on which
+  //      side was folded first.
+  // The array-union branch went with the blend. Its only live subject would have
+  // been `S.history`, which is dead work (see the call site) -- `charHistory`
+  // rows are flat numbers.
+  function rowWins(cand, cur){
+    const bothNum = k => typeof cand[k] === "number" && typeof cur[k] === "number";
+    if(bothNum("lvl") && cand.lvl !== cur.lvl) return cand.lvl > cur.lvl;
+    if(bothNum("xp")  && cand.xp  !== cur.xp ) return cand.xp  > cur.xp;
+    return (cand.date || 0) > (cur.date || 0);
+  }
 
   function fold(entry){
     // 2026-09-18 (round 2): a malformed row used to throw straight out of merge(),
     // into _syncNowAttempt's .catch, and every later round failed the same way with
     // no recovery from inside the app. syncApply already reasons about a
     // /state.json "hand-edited in the user's own Dropbox folder", and the tombstone
-    // union one block down guards its entries; this did not.
+    // union one block down guards its entries; this did not. A malformed row is
+    // skipped, so it can never displace a good one either.
     if(!entry || typeof entry !== "object") return;
     const key = dayOf(entry.date);
-    if(!buckets.has(key)){ buckets.set(key, Object.assign({}, entry)); return; }
     const cur = buckets.get(key);
-    Object.keys(entry).forEach(k => {
-      if(k === "date"){ cur.date = Math.max(cur.date || 0, entry.date || 0); return; }
-      const cv = cur[k], ev = entry[k];
-      if(typeof ev === "number" && typeof cv === "number"){ cur[k] = Math.max(cv, ev); }
-      else if(Array.isArray(ev) && Array.isArray(cv)){
-        const byId = new Map(cv.map(x => [x && x.id, x]));
-        ev.forEach(x => { if(x && x.id != null) byId.set(x.id, x); });
-        cur[k] = [...byId.values()];
-      } else if(cv === undefined){ cur[k] = ev; }
-      // else: leave cur[k] as-is (non-numeric, non-array scalar collision — keep local/base value already present)
-    });
+    if(cur === undefined || rowWins(entry, cur)) buckets.set(key, Object.assign({}, entry));
   }
   // ...and a non-array charHistory (a hand-edited or older /state.json) used to
   // throw "(remoteArr || []).forEach is not a function" out of the same path.
@@ -2895,7 +2932,9 @@ async function uidHash(recs){
   return "fallback-" + Math.abs(h).toString(16).padStart(8, "0");
 }
 // T1: uidsAreSuperset - check if local uids contain all known uids
-function uidsAreSuperset(localRecs, knownHash, knownUids){
+// `localHash` is the caller's ALREADY-AWAITED uidHash(localRecs) — see the note on
+// the hash branch below for why the caller computes it and this stays synchronous.
+function uidsAreSuperset(localRecs, knownHash, knownUids, localHash){
   const localUids = new Set((localRecs || []).map(e => e.uid).filter(Boolean));
   // If we have the known uids stored, use them directly.
   // F8 (2026-08-18): uids persist as an ARRAY, not a Set — a Set becomes {} through
@@ -2907,8 +2946,32 @@ function uidsAreSuperset(localRecs, knownHash, knownUids){
     }
     return true;
   }
-  // Otherwise compare hashes (less precise but works for exact match)
-  const localHash = uidHash(localRecs);
+  // Otherwise compare hashes (less precise but works for exact match).
+  //
+  // ROUND-1 FINDING 10 (fixed 2026-09-19). This line used to read
+  // `const localHash = uidHash(localRecs);` — with no `await`, against an `async`
+  // function. So it compared a PROMISE to a string and was false for every input
+  // that has ever existed. The branch erred safe (a false "not a superset" only
+  // BLOCKS a push), which is why it survived two review rounds, but the guard it
+  // was meant to be simply did not exist: a month whose stored entry predates F8
+  // and so carries no `uids` had nothing at all to prove its local set complete.
+  //
+  // The hash is passed IN rather than awaited here, on purpose:
+  //   * making this function `async` would return a Promise, and a caller that
+  //     forgot the `await` would get a TRUTHY value — `!isSuperset` false — which
+  //     UNBLOCKS a shrinking push. That is the direction that loses remote data.
+  //     A caller that forgets this ARGUMENT gets `undefined === knownHash`, i.e.
+  //     false, i.e. the old safe answer. The failure modes are not symmetric.
+  //   * syncEventsPush already awaits exactly this digest one line above the call,
+  //     for the diagnostic record, so computing it here was also duplicated work.
+  if(typeof localHash !== "string" || typeof knownHash !== "string") return false;
+  // uidHash() degrades to a 32-BIT string hash when crypto.subtle is absent (plain
+  // HTTP). Two different uid lists collide in 32 bits far too easily, and the only
+  // thing a TRUE here buys is permission to overwrite a fuller remote file. Refuse
+  // it: that leaves a crypto-less device exactly where it already was — blocked,
+  // safe — instead of betting the event log on 32 bits. Compare BOTH sides, since
+  // the two hashes are minted on different devices.
+  if(localHash.slice(0, 9) === "fallback-" || knownHash.slice(0, 9) === "fallback-") return false;
   return localHash === knownHash;
 }
 /* END_EVTSYNC_HELPERS */
@@ -3041,7 +3104,11 @@ async function syncEventsPush(opts){
       const localCount = recs.length;
       const knownCount = known.count;
       const localHash = await uidHash(recs);
-      const isSuperset = uidsAreSuperset(recs, known.hash, known.uids);
+      // The 4th argument is round-1 finding 10: uidsAreSuperset() used to compute
+      // this digest itself and forget to await it, so its hash branch was dead.
+      // It is handed the awaited value instead of being made async — see the
+      // comment at the function for why that direction is the safe one.
+      const isSuperset = uidsAreSuperset(recs, known.hash, known.uids, localHash);
       // Check if shrink is legitimate (age pruning)
       let isLegitimateShrink = false;
       if(localCount < knownCount){

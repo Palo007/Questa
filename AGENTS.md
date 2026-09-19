@@ -112,14 +112,16 @@ node tests/run.js     # or: npm test
 
 It executes every `tests/*.test.js` and `archive/tests/*-tests.js`, aggregates
 PASS/FAIL, and exits non-zero if any file fails. No framework, no dependencies.
-**Baseline as of 2026-09-19 (round-3 triage): 99 test files, all passing.** Never
+**Baseline as of 2026-09-19 (round-1 findings 5 and 10): 101 test files, all passing.** Never
 commit or deploy with a red suite. The count only ever goes up.
 
-**Caveat on what "83 passed" proves.** `tests/run.js` decides pass/fail purely from
-the child process's exit code. It does not check that a file made any assertion at
-all, so a file that only `console.log`s counts as a pass. `tests/debug-pager.test.js`
-is currently exactly that — 90 lines, zero assertions. A green count proves "no test
-file crashed", not "N behaviours were verified". Read the assertions, not the total.
+**Caveat on what a green count proves.** This used to say the runner judged only by
+exit code, so a file that only `console.log`ged counted as a pass — and named
+`tests/debug-pager.test.js` as exactly that. Both are **out of date as of
+2026-09-19**: `tests/run.js` now requires assertion evidence in stdout (`[PASS] ` for
+`tests/*.test.js`, a bare `PASS ` line for `archive/tests/*-tests.js`) and fails a
+file with neither, and `debug-pager` has 20 assertions. A green count still proves
+only that each file asserted *something*. Read the assertions, not the total.
 
 The count only ever goes **up**. It was 59 on 2026-08-14, 70 before the wave-2 ship
 on 2026-08-19, and 75 after it. `tests/run.js` auto-discovers by `readdirSync`, so a
@@ -173,15 +175,13 @@ direct unit test of its return value, not just coverage of its caller.
 Fill these when you touch the area:
 
 - the event-log pruning/age path — `pruneEvents` / `schedulePrune` have **zero**
-  references in any test file. It also has a known live bug: the hard-cap
-  `store.count()` runs before the age-delete cursor finishes, so `over` is
-  computed against the pre-prune total and the backstop deletes that many *more*
-  events, destroying in-window history.
+  references in any test file. (The hard-cap double-count listed here until
+  2026-09-19 is **fixed**: `pruneEvents` now counts from `tx.oncomplete`, after
+  the age pass, in a second transaction. The gap is the missing test, not a live
+  bug.)
 - `tests/auto-backup-cycling.test.js` (slot modulo cycling / lazy self-heal —
   still unwritten, tracked as P2 in
   `.kilo/plans/1785344033093-dropbox-cycling-backups-review.md`).
-- `tests/debug-pager.test.js` makes **zero assertions** — it only `console.log`s.
-  It contributes a "pass" to the suite total while verifying nothing.
 
 `mergeDayArray` and `runCron` were listed here until 2026-09-18 but both now have
 substantive direct coverage (`tests/daystamp.test.js` M1-M6,

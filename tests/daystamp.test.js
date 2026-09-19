@@ -78,15 +78,21 @@ function daily(id, opts){
   assertEq('M2d: remote-only hp field preserved', r2[0].hp, 10);
 })();
 
-// M3: same day, numeric fields -> max wins
+// M3: same day -> ONE WHOLE ROW wins, fields are not mixed.
+// CHANGED 2026-09-19 (round-1 finding 5). M3b used to assert `hp` took the max
+// (10) while M3c asserted `xp` took the max (12) -- i.e. it pinned exactly the
+// field-by-field blend that emitted rows no device ever held. The rule now is
+// atomic: higher `xp` (there is no `lvl` here) carries its OWN row, so the 12-xp
+// row wins and brings hp 7 with it. Full contract in
+// tests/round3-charhistory-atomic.test.js.
 (function(){
   var a = [{date:86400000, hp:10, xp:5}];
   var b = [{date:86400000, hp:7, xp:12}];
   var r = Q.mergeDayArray(a, b);
   assertEq('M3a: same day -> merged to single entry', r.length, 1);
-  assertEq('M3b: hp takes max (10)', r[0].hp, 10);
-  assertEq('M3c: xp takes max (12)', r[0].xp, 12);
-  assertEq('M3d: date takes max (same)', r[0].date, 86400000);
+  assertEq('M3b: the higher-xp row wins whole, so hp is ITS 7, not the max 10', r[0].hp, 7);
+  assertEq('M3c: xp is 12', r[0].xp, 12);
+  assertEq('M3d: date unchanged (both sides equal)', r[0].date, 86400000);
 })();
 
 // M4: different days -> union, sorted by date
@@ -100,29 +106,43 @@ function daily(id, opts){
   assertEq('M4d: second entry has hp=20', r[1].hp, 20);
 })();
 
-// M5: array fields (with id) -> merged by id, last-write wins
+// M5: array fields inside a day row are NOT unioned any more -- the whole row wins.
+// CHANGED 2026-09-19 (round-1 finding 5). This block used to assert a per-id union
+// of a `checklist` array inside a day row. That branch went with the field-by-field
+// blend it belonged to. The only array-shaped subject it could ever have had is
+// `S.history`, which app.js never populates (see the DEAD WORK note at the
+// mergeDayArray call site); `charHistory` rows are flat numbers. Here both rows
+// carry the same `date` and no `lvl`/`xp`, so the tiebreak is "keep the incumbent",
+// and the incumbent is the local row -- taken WHOLE.
 (function(){
   var a = [{date:86400000, checklist:[{id:'c1', text:'a', done:true}]}];
   var b = [{date:86400000, checklist:[{id:'c1', text:'b', done:false}, {id:'c2', text:'c', done:true}]}];
   var r = Q.mergeDayArray(a, b);
   assertEq('M5a: same day -> single entry', r.length, 1);
-  assertEq('M5b: checklist has 2 entries', r[0].checklist.length, 2);
-  // c1 from b wins (remote overwrites local for same id)
+  assertEq('M5b: the winning row keeps its OWN checklist, unmerged', r[0].checklist.length, 1);
   var c1 = r[0].checklist.find(function(x){ return x.id === 'c1'; });
-  assertEq('M5c: c1 text from remote wins', c1.text, 'b');
-  assertEq('M5d: c1 done from remote wins', c1.done, false);
-  // c2 is addition from remote
+  assertEq('M5c: c1 text is the winner own', c1.text, 'a');
+  assertEq('M5d: c1 done is the winner own', c1.done, true);
   var c2 = r[0].checklist.find(function(x){ return x.id === 'c2'; });
-  assert('M5e: c2 addition from remote preserved', c2 != null && c2.text === 'c');
+  assert('M5e: the loser c2 is NOT grafted onto the winner', c2 == null);
 })();
 
-// M6: same day, different numeric values -> max
+// M6: an exact tie on date with nothing to order by keeps the incumbent, whole.
+// CHANGED 2026-09-19 (round-1 finding 5). Used to assert gold took the max from one
+// row (5.0) and streak the max from the other (2) -- a row that existed nowhere.
+// Two rows with an identical millisecond `date` cannot arise from logCharSnapshot,
+// which stamps Date.now() per device; the rule exists so the result never depends
+// on which side was folded first.
 (function(){
   var a = [{date:86400000, gold:3.5, streak:2}];
   var b = [{date:86400000, gold:5.0, streak:1}];
   var r = Q.mergeDayArray(a, b);
-  assertEq('M6a: gold takes max (5.0)', r[0].gold, 5.0);
-  assertEq('M6b: streak takes max (2)', r[0].streak, 2);
+  assertEq('M6a: incumbent gold kept (3.5)', r[0].gold, 3.5);
+  assertEq('M6b: ...and ITS streak (2), not a mix', r[0].streak, 2);
+  // Order-independence: swapping the sides must not blend either.
+  var r2 = Q.mergeDayArray(b, a);
+  assertEq('M6c: swapped, gold is that incumbent own 5.0', r2[0].gold, 5.0);
+  assertEq('M6d: ...and ITS streak (1), still not a mix', r2[0].streak, 1);
 })();
 
 // M7: null/undefined inputs handled

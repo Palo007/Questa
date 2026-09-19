@@ -146,9 +146,18 @@ async function main(){
   // engages; known.uids is deliberately omitted below -- an empty-Set
   // fallback both survives the config's JSON round-trip (a real Set would
   // flatten to `{}` and break the `[...knownUids]` spread on HEAD) and
-  // forces uidsAreSuperset() down its hash-compare path, which always
-  // resolves false here since uidHash() is invoked unawaited there --
-  // keeping the shrink-guard branch live regardless of the F3 fix itself.
+  // forces uidsAreSuperset() down its hash-compare path, which resolves
+  // false here -- keeping the shrink-guard branch live regardless of the
+  // F3 fix itself.
+  //
+  // UPDATED 2026-09-19 (round-1 finding 10): this note used to explain the
+  // false as "uidHash() is invoked unawaited there", i.e. the hash branch was
+  // dead and could not return anything else. That branch is live now -- it is
+  // handed the caller's awaited hash -- so the false is earned: the literal
+  // `known-hash-does-not-match` below is not, and cannot be, a real digest of
+  // these records. The assertions are unchanged and the branch is still
+  // exercised for the same reason. New contract:
+  // tests/round3-uids-superset-hash.test.js.
   {
     const recs1 = [
       { uid: 'u-t1-remaining', dev: MY_DEV, ts: r.to, kind: 'tap' }

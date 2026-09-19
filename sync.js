@@ -46,6 +46,10 @@ const SYNC_DEBOUNCE_MS = 5000;
 const SYNC_CONFLICT_RETRY_LIMIT = 3;
 const SYNC_TRANSIENT_RETRY_DELAYS_MS = [1000, 5000, 25000]; // 429/5xx backoff
 const SYNC_CONFLICT_BACKOFF_MS = 30000; // 30s backoff after conflict retry exhaustion
+// 2026-09-19 (round 3, item 9): the longest Retry-After this file will actually
+// sleep on. Anything longer holds the questa-sync lock for more than a minute,
+// which blocks every other tab, so those abort with an honest message instead.
+const SYNC_RETRY_AFTER_MAX_MS = 60000;
 
 // ---- 2.2 Config read/patch --------------------------------------------------
 function syncCfgDefaults(){
@@ -77,10 +81,23 @@ function syncCfg(){
   }catch(e){ /* fall through to defaults */ }
   return syncCfgDefaults();
 }
-function syncCfgSave(patch){
+// 2026-09-19 (round 3, item 10): the write used to be swallowed and `next`
+// returned unconditionally, so no caller could tell a landed write from a lost
+// one. syncHandleRedirect then toasted "Dropbox connected" after a quota error
+// had dropped the refresh token on the floor. _syncCfgWrite reports the
+// outcome; syncCfgSave keeps the old return shape for the many callers whose
+// patch really is non-fatal (watermarks, lastError, lastSyncAt).
+function _syncCfgWrite(patch){
   const next = Object.assign(syncCfg(), patch);
-  try{ localStorage.setItem(SYNC_KEY, JSON.stringify(next)); }catch(e){ /* quota etc — non-fatal */ }
-  return next;
+  try{
+    localStorage.setItem(SYNC_KEY, JSON.stringify(next));
+  }catch(e){
+    return { cfg: next, ok: false, err: (e && e.message) || String(e) };
+  }
+  return { cfg: next, ok: true, err: null };
+}
+function syncCfgSave(patch){
+  return _syncCfgWrite(patch).cfg;
 }
 
 // ---- 2.3 Device id / event uid ---------------------------------------------
@@ -223,15 +240,30 @@ async function syncHandleRedirect(){
     // remote with THIS device's data. Read it, clear it, then branch on it.
     const pendingForcePush = localStorage.getItem("questa.sync.pendingForcePush") === "true";
     localStorage.removeItem("questa.sync.pendingForcePush");
-    syncCfgSave({
+    const _wrote = _syncCfgWrite({
       refreshToken: data.refresh_token,
       accessToken: data.access_token,
       accessExpiresAt: Date.now() + Math.max(0, (data.expires_in || 14400) - 60) * 1000,
       enabled: true,
       lastError: null
     });
+    // 2026-09-19 (round 3, item 10): these tokens are the whole point of the
+    // exchange and the authorization code behind them is already spent, so a
+    // lost write is fatal, not cosmetic. Read the key back too -- a storage
+    // layer that accepts setItem and then drops the value would otherwise sail
+    // straight through the try/catch and be toasted as a success.
+    let _tokensLanded = _wrote.ok;
+    if(_tokensLanded){
+      try{
+        const _back = JSON.parse(localStorage.getItem(SYNC_KEY) || "null");
+        _tokensLanded = !!(_back && _back.refreshToken === data.refresh_token);
+      }catch(e2){ _tokensLanded = false; }
+    }
     localStorage.removeItem(PKCE_KEY);
     history.replaceState(null, "", location.pathname);
+    if(!_tokensLanded){
+      throw new Error("could not save the Dropbox tokens (storage full?) — free some space and connect again");
+    }
     if(typeof toast === "function") toast("Dropbox connected");
     if(pendingForcePush){
       if(typeof toast === "function") toast("Performing initial force push\u2026");
@@ -295,10 +327,48 @@ function dbxArgHeader(obj){
   return JSON.stringify(obj).replace(/[-￿]/g, c => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
 }
 class ConflictError extends Error{ constructor(msg){ super(msg); this.name = "ConflictError"; } }
-class HttpError extends Error{ constructor(msg, status){ super(msg); this.name = "HttpError"; this.status = status; } }
+class HttpError extends Error{
+  constructor(msg, status, retryAfterMs){
+    super(msg);
+    this.name = "HttpError";
+    this.status = status;
+    // 2026-09-19 (round 3, item 9): 0 when the server sent no Retry-After.
+    this.retryAfterMs = Number(retryAfterMs) || 0;
+  }
+}
+// 2026-09-19 (round 3, item 9): Dropbox answers a 429 with Retry-After, and
+// this file used to ignore the header completely -- the fixed 1s/5s/25s ladder
+// burned all three retries inside 31s of a 300s throttle window, so the user
+// was told the sync had failed while the server was only asking them to wait.
+// RFC 9110 allows either delta-seconds or an HTTP-date, so accept both, treat
+// anything negative or unparseable as absent, and clamp to one day so a broken
+// header cannot arm an absurd timer.
+function _retryAfterMs(res){
+  let raw = null;
+  try{ raw = (res && res.headers && res.headers.get) ? res.headers.get("Retry-After") : null; }
+  catch(e){ return 0; }
+  if(raw == null) return 0;
+  const s = String(raw).trim();
+  if(s === "") return 0;
+  if(/^\d+$/.test(s)){
+    const secs = parseInt(s, 10);
+    if(!isFinite(secs) || secs < 0) return 0;
+    return Math.min(secs, 86400) * 1000;
+  }
+  const when = Date.parse(s);
+  if(isNaN(when)) return 0;
+  const delta = when - Date.now();
+  return delta > 0 ? Math.min(delta, 86400000) : 0;
+}
 
-async function dbxDownload(path, _retriedAuth){
-  const tok = await syncToken();
+async function dbxDownload(path, _retriedAuth, _freshTok){
+  // 2026-09-19 (round 3, item 11): every 401 retry in this file used to call
+  // syncToken(true) purely for its side effect, drop the token it returned, and
+  // then re-read the token back out of localStorage. When that write had been
+  // lost (item 10, or a second tab racing the same key) the retry re-sent the
+  // SAME dead token and a recoverable 401 became a permanent one. All six sites
+  // now carry the freshly minted token straight into the retry call.
+  const tok = _freshTok || await syncToken();
   const res = await fetch("https://content.dropboxapi.com/2/files/download", {
     method: "POST",
     headers: {
@@ -307,8 +377,7 @@ async function dbxDownload(path, _retriedAuth){
     }
   });
   if(res.status === 401 && !_retriedAuth){
-    await syncToken(true);
-    return dbxDownload(path, true);
+    return dbxDownload(path, true, await syncToken(true));
   }
   if(res.status === 409){
     // F6 (2026-07-11): only path/not_found means "nothing uploaded yet". Any
@@ -326,7 +395,7 @@ async function dbxDownload(path, _retriedAuth){
     // round of "check DevTools and paste what you see" back-and-forth.
     let detail = "";
     try{ detail = (await res.text()).slice(0, 200); }catch(e){}
-    throw new HttpError("download failed: " + res.status + (detail ? " " + detail : ""), res.status);
+    throw new HttpError("download failed: " + res.status + (detail ? " " + detail : ""), res.status, _retryAfterMs(res));
   }
 
   const metaHeader = res.headers.get("dropbox-api-result");
@@ -343,8 +412,8 @@ async function dbxDownload(path, _retriedAuth){
   return { state: wrapper.state, savedAt: wrapper.savedAt || 0, deviceId: wrapper.deviceId || null, rev: meta.rev || null };
 }
 
-async function dbxUpload(path, wrapperObj, rev, _retriedAuth){
-  const tok = await syncToken();
+async function dbxUpload(path, wrapperObj, rev, _retriedAuth, _freshTok){
+  const tok = _freshTok || await syncToken(); // item 11: see dbxDownload
   const res = await fetch("https://content.dropboxapi.com/2/files/upload", {
     method: "POST",
     headers: {
@@ -360,8 +429,7 @@ async function dbxUpload(path, wrapperObj, rev, _retriedAuth){
     body: JSON.stringify(wrapperObj)
   });
   if(res.status === 401 && !_retriedAuth){
-    await syncToken(true);
-    return dbxUpload(path, wrapperObj, rev, true);
+    return dbxUpload(path, wrapperObj, rev, true, await syncToken(true));
   }
   if(res.status === 409){
     // F6 parity (upload, 2026-07-12): inspect the 409 body to distinguish
@@ -392,7 +460,7 @@ async function dbxUpload(path, wrapperObj, rev, _retriedAuth){
   if(!res.ok){
     let detail = "";
     try{ detail = (await res.text()).slice(0, 200); }catch(e){}
-    throw new HttpError("upload failed: " + res.status + (detail ? " " + detail : ""), res.status);
+    throw new HttpError("upload failed: " + res.status + (detail ? " " + detail : ""), res.status, _retryAfterMs(res));
   }
   return await res.json();
 }
@@ -400,8 +468,8 @@ async function dbxUpload(path, wrapperObj, rev, _retriedAuth){
 // Delete a file/folder at path. 409 path/not_found is treated as success
 // (already gone); any other error surfaces. Pre-flight 401 refreshes the
 // token once. Used by the event-log purge on "Reset everything".
-async function dbxDelete(path, _retriedAuth){
-  const tok = await syncToken();
+async function dbxDelete(path, _retriedAuth, _freshTok){
+  const tok = _freshTok || await syncToken(); // item 11: see dbxDownload
   const res = await fetch("https://api.dropboxapi.com/2/files/delete_v2", {
     method: "POST",
     headers: {
@@ -411,8 +479,7 @@ async function dbxDelete(path, _retriedAuth){
     body: JSON.stringify({ path: path })
   });
   if(res.status === 401 && !_retriedAuth){
-    await syncToken(true);
-    return dbxDelete(path, true);
+    return dbxDelete(path, true, await syncToken(true));
   }
   if(res.status === 409){
     let summary = "";
@@ -422,9 +489,47 @@ async function dbxDelete(path, _retriedAuth){
   }
   if(!res.ok){
     let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
-    throw new HttpError("delete failed: " + res.status + (detail ? " " + detail : ""), res.status);
+    throw new HttpError("delete failed: " + res.status + (detail ? " " + detail : ""), res.status, _retryAfterMs(res));
   }
   return true;
+}
+
+// 2026-09-19 (round 3, item 12): disconnect used to be purely local. It wiped
+// the tokens out of this browser and left the refresh token valid at Dropbox
+// forever, so "Disconnect" never actually ended the app's access to the
+// account -- /2/auth/token/revoke appeared nowhere in the repo. Dropbox revokes
+// the whole grant behind whichever access token it is handed. Best effort by
+// design: the local wipe must never depend on the network, so every failure
+// here is swallowed and the user is disconnected either way.
+async function dbxRevokeGrant(cfg){
+  if(!cfg) return false;
+  let tok = cfg.accessToken || null;
+  const stillFresh = tok && cfg.accessExpiresAt && Date.now() < cfg.accessExpiresAt;
+  if(!stillFresh && cfg.refreshToken){
+    // Mint one from the CAPTURED refresh token. syncToken() cannot be used here
+    // because it reads the live config, which syncDisconnect has already reset.
+    try{
+      const res = await fetch("https://api.dropboxapi.com/oauth2/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: cfg.refreshToken,
+          client_id: cfg.appKey || DBX_APP_KEY
+        }).toString()
+      });
+      const data = await res.json().catch(() => ({}));
+      if(res.ok && data && data.access_token) tok = data.access_token;
+    }catch(e){ /* offline: fall through and try whatever token we still hold */ }
+  }
+  if(!tok) return false;
+  try{
+    const res = await fetch("https://api.dropboxapi.com/2/auth/token/revoke", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + tok }
+    });
+    return !!(res && res.ok);
+  }catch(e){ return false; }
 }
 
 function syncDisconnect(){
@@ -446,6 +551,10 @@ function syncDisconnect(){
   // leave it (and a stale pendingForcePush flag) in localStorage indefinitely.
   try{ localStorage.removeItem(PKCE_KEY); }catch(e){}
   try{ localStorage.removeItem("questa.sync.pendingForcePush"); }catch(e){}
+  // item 12: local state is already clean above, so the user is disconnected
+  // whether or not this reaches Dropbox. Returned so callers and tests CAN
+  // await the revoke; every existing caller ignores the return value.
+  return dbxRevokeGrant(cfg).catch(function(){ return false; });
 }
 
 // ============================================================================
@@ -2084,7 +2193,20 @@ async function _syncNowAttempt(transientRetryCount){
     await _pushWithConflictRetry(mergedJson, remote ? remote.rev : null, 0);
   }catch(e){
     if(e && e.status && (e.status === 429 || e.status >= 500) && transientRetryCount < SYNC_TRANSIENT_RETRY_DELAYS_MS.length){
-      await new Promise(r => setTimeout(r, SYNC_TRANSIENT_RETRY_DELAYS_MS[transientRetryCount]));
+      // 2026-09-19 (round 3, item 9): obey Retry-After when the server sends
+      // one. The bare ladder retried at 1s/5s/25s, so a 300s Dropbox throttle
+      // ate all three attempts inside 31s and surfaced as a plain failure. Wait
+      // the longer of the two. If the server asks for longer than we are
+      // willing to hold the questa-sync lock, stop now and say how long the
+      // wait is, rather than spending the remaining attempts on an answer we
+      // already know.
+      const askedMs = Number(e.retryAfterMs) || 0;
+      if(askedMs > SYNC_RETRY_AFTER_MAX_MS){
+        throw new HttpError("Dropbox is rate limiting this app — try again in "
+                            + Math.ceil(askedMs / 1000) + "s", e.status, askedMs);
+      }
+      const waitMs = Math.max(SYNC_TRANSIENT_RETRY_DELAYS_MS[transientRetryCount], askedMs);
+      await new Promise(r => setTimeout(r, waitMs));
       return _syncNowAttempt(transientRetryCount + 1);
     }
     throw e;
@@ -2290,8 +2412,8 @@ async function _syncForcePullAttempt(){
 // or manual export, so Settings' "Last export" reflects the most recent activity.
 const EXPORT_BACKUP_PATH = "/export-backup.json";
 
-async function dbxUploadText(path, text, _retriedAuth){
-  const tok = await syncToken();
+async function dbxUploadText(path, text, _retriedAuth, _freshTok){
+  const tok = _freshTok || await syncToken(); // item 11: see dbxDownload
   const res = await fetch("https://content.dropboxapi.com/2/files/upload", {
     method: "POST",
     headers: {
@@ -2307,13 +2429,12 @@ async function dbxUploadText(path, text, _retriedAuth){
     body: text
   });
   if(res.status === 401 && !_retriedAuth){
-    await syncToken(true);
-    return dbxUploadText(path, text, true);
+    return dbxUploadText(path, text, true, await syncToken(true));
   }
   if(!res.ok){
     let detail = "";
     try{ detail = (await res.text()).slice(0, 200); }catch(e){}
-    throw new HttpError("Dropbox backup upload failed: " + res.status + (detail ? " " + detail : ""), res.status);
+    throw new HttpError("Dropbox backup upload failed: " + res.status + (detail ? " " + detail : ""), res.status, _retryAfterMs(res));
   }
   return await res.json();
 }
@@ -2777,13 +2898,13 @@ function uidsAreSuperset(localRecs, knownHash, knownUids){
 // Raw download: like dbxDownload but returns {text, rev} with NO wrapper
 // validation (event files are bare arrays, not {schema,state} wrappers).
 // null on 409 (file/folder absent).
-async function dbxDownloadRaw(path, _retriedAuth){
-  const tok = await syncToken();
+async function dbxDownloadRaw(path, _retriedAuth, _freshTok){
+  const tok = _freshTok || await syncToken(); // item 11: see dbxDownload
   const res = await fetch("https://content.dropboxapi.com/2/files/download", {
     method: "POST",
     headers: { "Authorization": "Bearer " + tok, "Dropbox-API-Arg": dbxArgHeader({ path: path }) }
   });
-  if(res.status === 401 && !_retriedAuth){ await syncToken(true); return dbxDownloadRaw(path, true); }
+  if(res.status === 401 && !_retriedAuth){ return dbxDownloadRaw(path, true, await syncToken(true)); }
   if(res.status === 409){
     let summary = "";
     try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
@@ -2792,7 +2913,7 @@ async function dbxDownloadRaw(path, _retriedAuth){
   }
   if(!res.ok){
     let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
-    throw new HttpError("download failed: " + res.status + (detail ? " " + detail : ""), res.status);
+    throw new HttpError("download failed: " + res.status + (detail ? " " + detail : ""), res.status, _retryAfterMs(res));
   }
   const metaHeader = res.headers.get("dropbox-api-result");
   let meta = {}; try{ meta = metaHeader ? JSON.parse(metaHeader) : {}; }catch(e){}
@@ -2800,8 +2921,8 @@ async function dbxDownloadRaw(path, _retriedAuth){
 }
 
 // List files in a folder, following pagination. [] if the folder doesn't exist.
-async function dbxListFolder(path, _retriedAuth){
-  const tok = await syncToken();
+async function dbxListFolder(path, _retriedAuth, _freshTok){
+  const tok = _freshTok || await syncToken(); // item 11: see dbxDownload
   let entries = [];
   let url = "https://api.dropboxapi.com/2/files/list_folder";
   let body = { path: path, recursive: false, limit: 2000 };
@@ -2811,7 +2932,7 @@ async function dbxListFolder(path, _retriedAuth){
       headers: { "Authorization": "Bearer " + tok, "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
-    if(res.status === 401 && !_retriedAuth){ await syncToken(true); return dbxListFolder(path, true); }
+    if(res.status === 401 && !_retriedAuth){ return dbxListFolder(path, true, await syncToken(true)); }
     if(res.status === 409){
       let summary = "";
       try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
@@ -2820,7 +2941,7 @@ async function dbxListFolder(path, _retriedAuth){
     }
     if(!res.ok){
       let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
-      throw new HttpError("list failed: " + res.status + (detail ? " " + detail : ""), res.status);
+      throw new HttpError("list failed: " + res.status + (detail ? " " + detail : ""), res.status, _retryAfterMs(res));
     }
     const data = await res.json();
     entries = entries.concat((data.entries || []).filter(e => e[".tag"] === "file"));

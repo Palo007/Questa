@@ -112,7 +112,7 @@ node tests/run.js     # or: npm test
 
 It executes every `tests/*.test.js` and `archive/tests/*-tests.js`, aggregates
 PASS/FAIL, and exits non-zero if any file fails. No framework, no dependencies.
-**Baseline as of 2026-09-19 (round-1 findings 5, 8 and 10): 102 test files, all passing.** Never
+**Baseline as of 2026-09-19 (round-1 findings 5, 8, 10 and the prune coverage gap): 103 test files, all passing.** Never
 commit or deploy with a red suite. The count only ever goes up.
 
 **Caveat on what a green count proves.** This used to say the runner judged only by
@@ -174,14 +174,19 @@ direct unit test of its return value, not just coverage of its caller.
 
 Fill these when you touch the area:
 
-- the event-log pruning/age path — `pruneEvents` / `schedulePrune` have **zero**
-  references in any test file. (The hard-cap double-count listed here until
-  2026-09-19 is **fixed**: `pruneEvents` now counts from `tx.oncomplete`, after
-  the age pass, in a second transaction. The gap is the missing test, not a live
-  bug.)
 - `tests/auto-backup-cycling.test.js` (slot modulo cycling / lazy self-heal —
   still unwritten, tracked as P2 in
   `.kilo/plans/1785344033093-dropbox-cycling-backups-review.md`).
+
+The event-log pruning/age path was listed here until 2026-09-19 and is now
+covered: `tests/prune-events.test.js` (P0-P9) drives `pruneEvents` and
+`schedulePrune` directly. Its **P3 is the standing guard for round-1 finding 9** —
+the hard-cap `store.count()` used to run before the age-delete cursor finished, so
+`over` was computed against the pre-prune total and the backstop destroyed
+in-window history on top of the legitimate prune. That bug is fixed (the count is
+taken from `tx.oncomplete`, in a second transaction); P3 is what stops it coming
+back. Both were proven by mutation, not just asserted: reinstating the pre-prune
+count fails P3a/P3b, and flipping `upperBound(cutoff, true)` to `false` fails P2.
 
 `mergeDayArray` and `runCron` were listed here until 2026-09-18 but both now have
 substantive direct coverage (`tests/daystamp.test.js` M1-M6,

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.19-0742";
+const APP_VERSION = "v2026.09.19-0758";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -6918,24 +6918,215 @@ async function buildBackupFile(eventsArr, sectionKeys){
   };
   const finalJson = JSON.stringify(env, null, 2);
   const blob = new Blob([finalJson], {type:'application/json'});
-  const d=new Date(); const p=(n)=>String(n).padStart(2,'0');
-  const stamp=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
+  const stamp=_fileStamp();
   // A partial file is named differently on purpose: it is NOT a backup, and the
   // filename is the only thing the user sees in their downloads folder a year later.
   const filename = (isFull ? 'questa-backup-' : 'questa-partial-')+stamp+'.json';
   return {blob, filename, eventCount: evts.length, partial: !isFull, sections: keys};
 }
 
-function showExportChooser(blob, filename, eventCount) {
+// --- Plain-text exports (CSV / Markdown) -------------------------------------
+// A SIBLING of the backup path, never a replacement. These files are for OTHER
+// apps -- spreadsheets, Todoist, Asana, Obsidian, Notion. They are lossy and
+// cannot be imported back, which is why they are never hashed, never tokenized,
+// and never clear the "back up your data" reminder.
+//
+// Nothing here may touch _EXPORT_FIELD_MAP, the snapshot tokenizer or
+// computeHash: adding a field code makes new files unreadable by older builds,
+// and tools/join_exports.py depends on that map not moving.
+const PLAIN_TASK_SECTIONS = ['todos','dailies','habits'];
+const _PLAIN_DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+function ioHasTaskSection(keys){
+  return (keys||[]).some(function(k){ return PLAIN_TASK_SECTIONS.indexOf(k) !== -1; });
+}
+
+// Shared filename stamp: local time, YYYYMMDD-HHMM. Used by the backup builder
+// too, so a backup and a CSV written in the same minute carry the same stamp.
+function _fileStamp(d){
+  d = d || new Date();
+  const p = (n)=>String(n).padStart(2,'0');
+  return ''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
+}
+
+// RFC 4180 cell. EVERY cell is quoted: an unquoted cell that later gains a
+// comma, a quote or a newline is the classic silent column shift, and quoting
+// unconditionally costs only bytes. Inner quotes are doubled.
+function _csvCell(v){
+  if(v==null) return '""';
+  return '"' + String(v).replace(/"/g,'""') + '"';
+}
+
+// Tag ids -> human names. An importing app cannot resolve a Questa uid, so the
+// id form is useless outside this app; an unknown id is dropped rather than
+// leaked as a raw uid.
+function _tagNames(ids){
+  const all = (S && S.tags) || [];
+  return (ids||[]).map(function(id){
+    const t = all.find(function(x){ return x && x.id===id; });
+    return t ? t.name : null;
+  }).filter(Boolean);
+}
+
+// repeat[] is 7 booleans, index 0 = Sunday, and it is the ONLY recurrence
+// Questa stores. There is no due-date field anywhere in the model, so this
+// column is the closest honest answer to "when" -- which is also why there is
+// no iCalendar export: it would have nothing real to put in DTSTART.
+function _repeatText(t){
+  const r = (t && t.repeat) || [];
+  if(!Array.isArray(r) || r.length!==7) return '';
+  const on = [];
+  for(let i=0;i<7;i++) if(r[i]) on.push(_PLAIN_DAY_NAMES[i]);
+  if(on.length===0) return '';
+  if(on.length===7) return 'Every day';
+  return on.join(',');
+}
+
+function _reminderText(t){
+  return ((t && t.reminders) || []).map(function(r){
+    if(!r) return null;
+    if(r.kind==='once')   return (r.date||'') + (r.time ? (' ' + r.time) : '');
+    if(r.kind==='weekly') return 'weekly ' + ((r.days||[]).map(function(d){ return _PLAIN_DAY_NAMES[d]||d; }).join(',')) + (r.time ? (' ' + r.time) : '');
+    return 'daily' + (r.time ? (' ' + r.time) : '');
+  }).filter(Boolean).join('; ');
+}
+
+function _checklistText(t){
+  return ((t && t.checklist) || []).map(function(c){
+    if(!c) return null;
+    return (c.done ? '[x] ' : '[ ] ') + (c.text||'');
+  }).filter(Boolean).join(' | ');
+}
+
+// difficulty -> a 1..4 priority most importers understand (1 = highest).
+// 'log' is a habit-only no-score marker and has no priority meaning.
+function _priorityOf(t){
+  const d = (t && t.difficulty) || '';
+  if(d==='hard')    return '1';
+  if(d==='medium')  return '2';
+  if(d==='easy')    return '3';
+  if(d==='trivial') return '4';
+  return '';
+}
+
+function _listLabel(t){
+  const ty = (t && t.type) || '';
+  if(ty==='todo')  return 'To-dos';
+  if(ty==='daily') return 'Dailies';
+  if(ty==='habit') return 'Habits';
+  return ty;
+}
+
+function _isoOrEmpty(ms){
+  if(typeof ms!=='number' || !isFinite(ms) || ms<=0) return '';
+  try{ return new Date(ms).toISOString(); }catch(e){ return ''; }
+}
+
+const _CSV_HEADERS = ['title','notes','type','status','list','priority','tags',
+                      'repeat','reminder','checklist','streak','created','completed','id'];
+
+// `src` is the slice from sliceStateForExport(S, keys) -- the SAME input
+// buildBackupFile() consumes, which is what lets one section picker drive both
+// paths. That slice already concatenates the ticked task types into src.tasks.
+function buildTasksCsv(src){
+  const rows = [];
+  rows.push(_CSV_HEADERS.map(_csvCell).join(','));
+  ((src && src.tasks) || []).forEach(function(t){
+    if(!t) return;
+    rows.push([
+      t.title || '',
+      t.notes || '',
+      t.type || '',
+      t.done ? 'completed' : 'needs action',
+      _listLabel(t),
+      _priorityOf(t),
+      _tagNames(t.tags).join('; '),
+      _repeatText(t),
+      _reminderText(t),
+      _checklistText(t),
+      (typeof t.streak==='number' ? String(t.streak) : ''),
+      _isoOrEmpty(t.createdAt),
+      _isoOrEmpty(t.completedAt),
+      t.id || ''
+    ].map(_csvCell).join(','));
+  });
+  // CRLF row ends: what RFC 4180 asks for and what Excel is happiest with.
+  return rows.join('\r\n') + '\r\n';
+}
+
+// Markdown title text. Square brackets would break the "- [ ] " checkbox and a
+// backtick or pipe can break a title out of its line, so those are escaped and
+// embedded newlines are flattened.
+function _mdEsc(s){
+  return String(s==null?'':s).replace(/([\\`*_\[\]|])/g, '\\$1').replace(/\r?\n/g,' ');
+}
+
+function buildTasksMarkdown(src){
+  const out = [];
+  out.push('# Questa export - ' + new Date().toISOString().slice(0,10));
+  out.push('');
+  PLAIN_TASK_SECTIONS.forEach(function(key){
+    const ty = (key==='todos') ? 'todo' : (key==='dailies') ? 'daily' : 'habit';
+    const list = _tasksOfType((src && src.tasks) || [], ty);
+    if(!list.length) return;
+    const sec = (typeof ioSectionByKey==='function') ? ioSectionByKey(key) : null;
+    out.push('## ' + ((sec && sec.label) || key));
+    out.push('');
+    list.forEach(function(t){
+      const tags = _tagNames(t.tags).map(function(n){ return '`#' + n + '`'; }).join(' ');
+      const bits = [];
+      const rep = _repeatText(t); if(rep) bits.push(rep);
+      if(typeof t.streak==='number' && t.streak>0) bits.push('streak ' + t.streak);
+      const doneDay = t.done ? _isoOrEmpty(t.completedAt).slice(0,10) : '';
+      if(doneDay) bits.push('done ' + doneDay);
+      out.push('- [' + (t.done?'x':' ') + '] ' + _mdEsc(t.title||'(untitled)') +
+               (tags ? ('  ' + tags) : '') +
+               (bits.length ? ('  - ' + bits.join(' | ')) : ''));
+      (t.notes||'').split(/\r?\n/).forEach(function(line){
+        if(line.trim()) out.push('  - ' + _mdEsc(line));
+      });
+      ((t.checklist)||[]).forEach(function(c){
+        if(!c) return;
+        out.push('  - [' + (c.done?'x':' ') + '] ' + _mdEsc(c.text||''));
+      });
+    });
+    out.push('');
+  });
+  return out.join('\r\n') + '\r\n';
+}
+
+// fmt is 'csv' or 'md'. Returns the {blob, filename} shape buildBackupFile
+// returns, so showExportChooser() consumes it unchanged.
+function buildPlainExportFile(src, fmt){
+  const stamp = _fileStamp();
+  if(fmt==='csv'){
+    // The BOM is not decoration: without it Excel reads the file in the local
+    // ANSI code page and every accented task title comes out mangled.
+    const text = '\uFEFF' + buildTasksCsv(src);
+    return { blob: new Blob([text], {type:'text/csv;charset=utf-8'}),
+             filename: 'questa-tasks-'+stamp+'.csv' };
+  }
+  const md = buildTasksMarkdown(src);
+  return { blob: new Blob([md], {type:'text/markdown;charset=utf-8'}),
+           filename: 'questa-tasks-'+stamp+'.md' };
+}
+
+// opts (all optional): {isBackup, title, hint, logNote}. Defaults keep the
+// historic backup behaviour for every existing caller.
+function showExportChooser(blob, filename, eventCount, opts) {
+  opts = opts || {};
+  const isBackup = (opts.isBackup !== false);
   const sheet = document.getElementById('sheet');
-  const shareName = filename.replace(/\.json$/, '.txt');
+  const shareName = filename.replace(/\.(json|csv|md)$/, '.txt');
   const shareFile = new File([blob], shareName, {type: 'text/plain'});
   const canShareFiles = !!(navigator.canShare && navigator.canShare({files: [shareFile]}));
 
-  const dbxAvailable = (typeof syncCfg==="function" && typeof exportSaveDropbox==="function" && syncCfg().enabled);
+  // Dropbox uploads to the fixed backup path in sync.js, so it is offered for
+  // backups only -- a CSV must never land where a restore looks for a backup.
+  const dbxAvailable = (isBackup && typeof syncCfg==="function" && typeof exportSaveDropbox==="function" && syncCfg().enabled);
 
-  let h = '<h3>Export backup</h3>';
-  h += '<div class="small" style="margin-bottom:12px">Choose where to save your backup.</div>';
+  let h = '<h3>' + esc(opts.title || 'Export backup') + '</h3>';
+  h += '<div class="small" style="margin-bottom:12px">' + esc(opts.hint || 'Choose where to save your backup.') + '</div>';
   h += '<div class="settingsRow">';
   h += '<button class="btn ghost" id="exportShareBtn"' + (canShareFiles ? '' : ' disabled') + '>Share</button>';
   h += '<button class="btn ghost" id="exportSaveBtn">Save to this device</button>';
@@ -6951,10 +7142,10 @@ function showExportChooser(blob, filename, eventCount) {
   sheet.innerHTML = h;
 
   document.getElementById('exportShareBtn').onclick = () => {
-    if (canShareFiles) exportShare(blob, filename, eventCount);
+    if (canShareFiles) exportShare(blob, filename, eventCount, opts);
   };
   document.getElementById('exportSaveBtn').onclick = () => {
-    exportSaveDevice(blob, filename, eventCount);
+    exportSaveDevice(blob, filename, eventCount, opts);
   };
   if (dbxAvailable) {
     document.getElementById('exportDropboxBtn').onclick = () => {
@@ -6968,8 +7159,10 @@ function showExportChooser(blob, filename, eventCount) {
   document.getElementById('scrim').classList.add('show');
 }
 
-async function exportShare(blob, filename, eventCount) {
-  const shareName = filename.replace(/\.json$/, '.txt');
+async function exportShare(blob, filename, eventCount, opts) {
+  opts = opts || {};
+  const isBackup = (opts.isBackup !== false);
+  const shareName = filename.replace(/\.(json|csv|md)$/, '.txt');
   const shareFile = new File([blob], shareName, {type: 'text/plain'});
   let shared = false;
   try {
@@ -6984,16 +7177,23 @@ async function exportShare(blob, filename, eventCount) {
     }
   }
   if (shared) {
-    S.prefs.lastExportTs = Date.now();
-    save();
-    checkExportStaleness();
+    // A CSV or Markdown file is NOT a backup: it is lossy and cannot be
+    // imported. Stamping lastExportTs here would silence the "back up your
+    // data" nag on the strength of a file that can restore nothing.
+    if (isBackup) {
+      S.prefs.lastExportTs = Date.now();
+      save();
+      checkExportStaleness();
+    }
     toast('Exported' + (eventCount ? (' (' + eventCount + ' events)') : ''));
     closeSheet();
-    logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file via Share'});
+    logEvent({kind: 'export', taskTitle: 'Export Data', notes: (opts.logNote || 'Created backup file via Share')});
   }
 }
 
-function exportSaveDevice(blob, filename, eventCount) {
+function exportSaveDevice(blob, filename, eventCount, opts) {
+  opts = opts || {};
+  const isBackup = (opts.isBackup !== false);
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -7001,12 +7201,15 @@ function exportSaveDevice(blob, filename, eventCount) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 
-  S.prefs.lastExportTs = Date.now();
-  save();
-  checkExportStaleness();
+  // See exportShare: only a real backup may clear the staleness nag.
+  if (isBackup) {
+    S.prefs.lastExportTs = Date.now();
+    save();
+    checkExportStaleness();
+  }
   toast('Exported' + (eventCount ? (' (' + eventCount + ' events)') : ''));
   closeSheet();
-  logEvent({kind: 'export', taskTitle: 'Export Data', notes: 'Created backup file via Download'});
+  logEvent({kind: 'export', taskTitle: 'Export Data', notes: (opts.logNote || 'Created backup file via Download')});
 }
 
 // --- Section picker dialogs (export + import) --------------------------------
@@ -7057,7 +7260,7 @@ function showExportSectionPicker(){
     try{ counts[k] = sec.count(S)||0; }catch(e){ counts[k] = 0; }
   });
 
-  let h = '<h3>What do you want to back up?</h3>';
+  let h = '<h3>What do you want to export?</h3>';
   h += '<div class="small" style="margin-bottom:10px">Everything is ticked, which writes a normal full backup. Untick a box to leave it out.</div>';
   h += _ioRowsHTML(keys, counts, sel);
   h += '<div class="settingsRow" style="margin-top:10px">'+
@@ -7090,7 +7293,7 @@ function showExportSectionPicker(){
   document.getElementById('ioExpGo').onclick = function(){
     const picked = _ioSelected(sel, keys);
     if(!picked.length) return;
-    runExport(picked);
+    showExportFormatPicker(picked);
   };
   refresh();
   // Event count needs IndexedDB, so the row shows an ellipsis until it lands. A
@@ -7178,6 +7381,68 @@ function runExport(sectionKeys){
       alertDialog('Export Error', 'Could not create the backup file: ' + ((e && e.message) || String(e)));
     });
 }
+// --- Format step -------------------------------------------------------------
+// Sits between the section picker and the save chooser. Backup JSON is the
+// default and takes the byte-for-byte path that already existed; CSV and
+// Markdown are a separate, read-only branch that cannot be imported back.
+function showExportFormatPicker(keys){
+  const sheet = document.getElementById('sheet');
+  const hasTasks = ioHasTaskSection(keys);
+  let h = '<h3>What kind of file?</h3>';
+  h += '<div class="small" style="margin-bottom:12px">Backup restores Questa. The other two are for other apps.</div>';
+  h += '<div class="ioPick">';
+  h += '<div class="ioPickRow"><span class="ioPickMain"><strong>Backup (JSON)</strong>'+
+       '<span class="small">Restores Questa. Only Questa can read it.</span></span>'+
+       '<button class="btn ghost" id="expFmtJson">Choose</button></div>';
+  h += '<div class="ioPickRow"><span class="ioPickMain"><strong>Spreadsheet (CSV)</strong>'+
+       '<span class="small">Opens in Excel or Sheets. Most task apps import this.</span></span>'+
+       '<button class="btn ghost" id="expFmtCsv"'+(hasTasks?'':' disabled')+'>Choose</button></div>';
+  h += '<div class="ioPickRow"><span class="ioPickMain"><strong>Checklist (Markdown)</strong>'+
+       '<span class="small">Plain text checklist for Obsidian, Notion or GitHub.</span></span>'+
+       '<button class="btn ghost" id="expFmtMd"'+(hasTasks?'':' disabled')+'>Choose</button></div>';
+  h += '</div>';
+  if(!hasTasks){
+    h += '<div class="small" style="margin-top:8px">CSV and Markdown hold tasks only. Tick To-dos, Dailies or Habits to use them.</div>';
+  }
+  h += '<div class="settingsRow" style="margin-top:10px">'+
+       '<button class="btn ghost" id="expFmtBack">Back</button>'+
+       '<button class="btn ghost" id="expFmtCancel">Cancel</button>'+
+       '</div>';
+  sheet.innerHTML = h;
+  document.getElementById('expFmtJson').onclick = function(){ runExport(keys); };
+  if(hasTasks){
+    document.getElementById('expFmtCsv').onclick = function(){ runPlainExport(keys, 'csv'); };
+    document.getElementById('expFmtMd').onclick  = function(){ runPlainExport(keys, 'md'); };
+  }
+  document.getElementById('expFmtBack').onclick = function(){ showExportSectionPicker(); };
+  document.getElementById('expFmtCancel').onclick = function(){ closeSheet(); };
+  document.getElementById('scrim').classList.add('show');
+}
+
+function runPlainExport(sectionKeys, fmt){
+  const keys = (Array.isArray(sectionKeys) && sectionKeys.length) ? sectionKeys : ioAllSectionKeys();
+  // No IndexedDB read and no short-read guard here: a plain export never
+  // carries events, so there is nothing that could come back truncated. A
+  // failure still reaches the same diagnostic + dialog path runExport uses --
+  // an export that dies silently is the one failure this file cannot afford.
+  try{
+    const src = sliceStateForExport(S, keys);
+    const n = ((src && src.tasks) || []).length;
+    if(!n){ toast('Nothing to export'); return; }
+    const res = buildPlainExportFile(src, fmt);
+    const label = (fmt==='csv') ? 'CSV' : 'Markdown';
+    showExportChooser(res.blob, res.filename, 0, {
+      isBackup: false,
+      title: 'Export ' + label,
+      hint: 'For other apps. This file cannot be imported back into Questa.',
+      logNote: 'Created ' + label + ' export'
+    });
+  }catch(e){
+    try{ if(typeof _qDiagPush === "function") _qDiagPush('exportFailed', { error: (e && e.message) || String(e), fmt: fmt }); }catch(_){}
+    alertDialog('Export Error', 'Could not create the ' + String(fmt).toUpperCase() + ' file: ' + ((e && e.message) || String(e)));
+  }
+}
+
 // --- Granular import ---------------------------------------------------------
 // Applies ONLY the ticked sections of `data`, in the chosen mode. A section the
 // user left unticked is never read and never written -- that is the promise the
@@ -7406,7 +7671,18 @@ function importData(ev){
       } else {
         doImport();
       }
-    }catch(e){ alertDialog('Error', 'That file does not look like a valid Questa backup.'); } };
+    }catch(e){
+      // A CSV or Markdown export is text, not JSON, so it lands here as a
+      // parse error. Name it, rather than saying "not valid", which reads as
+      // "your file is broken".
+      let head = '';
+      try{ head = String(rd.result||'').replace(/^\uFEFF/,'').replace(/^\s+/,'').charAt(0); }catch(_){}
+      if(head && head !== '{'){
+        alertDialog('Error', 'That looks like a CSV or Markdown export. Those are for other apps and cannot be imported. Only a backup .json file can be imported.');
+      } else {
+        alertDialog('Error', 'That file does not look like a valid Questa backup.');
+      }
+    } };
   rd.readAsText(f); ev.target.value='';
 }
 // --- Snapshot restore picker & logic ----------------------------------------

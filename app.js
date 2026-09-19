@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.19-0030";
+const APP_VERSION = "v2026.09.19-0742";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -117,7 +117,7 @@ function freshState(){
     history:[], charHistory:[],
     monthlyBackups: [],
     deletions: [],
-    prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false, autoBackupEnabled:{fourHour:false,daily:false,weekly:false,monthly:false}, hideConflictDecisions:false, hideSyncDiag:true }
+    prefs:{ width:480, notesLines:3, lastTab:'habits', haptics:true, cardThick:0, saveBtnTop:false, autoBackupEnabled:{fourHour:false,daily:false,weekly:false,monthly:false}, hideConflictDecisions:false, hideSyncDiag:true, showStreaks:true }
   };
 }
 // F7 (2026-08-18): the SINGLE future-skew tolerance for the whole app. sync.js's
@@ -2795,7 +2795,11 @@ function rail(t){
     items.push('<span class="railItem bell" title="Reminder set" style="color:var(--accent);border-color:transparent;background:transparent;padding:0 2px;font-size:11px">🔔</span>');
   }
   if(t.type==='daily'){
-    items.push('<span class="railItem streak" title="Day streak">🔥 '+(t.streak||0)+'</span>');
+    // Display-only gate (prefs.showStreaks, default on). Streaks keep being
+    // counted, reset and synced while hidden — this only omits the badge.
+    if(S.prefs.showStreaks !== false){
+      items.push('<span class="railItem streak" title="Day streak">🔥 '+(t.streak||0)+'</span>');
+    }
     if(!t.done && !isDailyDueToday(t)){
       const nd=nextDueWeekday(t);
       if(nd) items.push('<span class="railItem notdue" title="Not due yet">⏳ '+nd+'</span>');
@@ -6179,6 +6183,7 @@ function setNotesLines(n){ S.prefs.notesLines=n; save(); closeOpt(); openSetting
 function setHaptics(n){ S.prefs.haptics=!!n; save(); closeOpt(); openSettings(); }
 function setHideSyncDiag(n){ S.prefs.hideSyncDiag=!!n; save(); closeOpt(); openSettings(); render(); }
 function setHideConflictDecisions(n){ S.prefs.hideConflictDecisions=!!n; save(); closeOpt(); openSettings(); render(); }
+function setShowStreaks(n){ S.prefs.showStreaks=!!n; save(); closeOpt(); openSettings(); render(); }
 function setCardThick(px){ let n=parseInt(px,10); if(!isFinite(n)) n=0; n=Math.min(60,Math.max(0,n)); S.prefs.cardThick=n; applyCardThick(); save(); closeOpt(); openSettings(); }
 function setSaveBtnTop(n){ S.prefs.saveBtnTop=!!n; save(); closeOpt(); if(EDIT) drawSheet(); else if(REDIT) openReward(REDIT.id); openSettings(); }
 function setExportIntervalDays(){ /* retained as defensive no-op; no live callers after autoBackup migration */ }
@@ -6268,7 +6273,8 @@ const CATS = {
     settings: [
       { key: 'width', type: 'multi', label: 'Interface width', desc: 'Caps the width on a monitor and keeps it centered.' },
       { key: 'notes', type: 'multi', label: 'Note lines', desc: 'Lines of a task\'s notes shown in the list preview.' },
-      { key: 'cardThick', type: 'slider', label: 'Card thickness', desc: 'Minimum height of each card.', min: 0, max: 60, step: 1, unit: 'px', defLabel: 'Default' }
+      { key: 'cardThick', type: 'slider', label: 'Card thickness', desc: 'Minimum height of each card.', min: 0, max: 60, step: 1, unit: 'px', defLabel: 'Default' },
+      { key: 'showStreaks', type: 'toggle', label: 'Streak badges', desc: 'Show the \u{1F525} streak count on daily cards. Streaks keep counting either way.' }
     ]
   },
   interaction: {
@@ -6299,6 +6305,7 @@ function openCat(catKey){
       let val;
       if(s.key === 'pause') val = !!S.prefs.paused;
       else if(s.key === 'haptics') val = (S.prefs.haptics !== false);
+      else if(s.key === 'showStreaks') val = (S.prefs.showStreaks !== false);
       else val = !!S.prefs[s.key];
       h += '<div class="catSetting">'+
         '<div class="catSettingMain">'+
@@ -6353,6 +6360,7 @@ function setCatToggle(key, val){
   else if(key === 'hideSyncDiag') setHideSyncDiag(val?1:0);
   else if(key === 'hideConflictDecisions') setHideConflictDecisions(val?1:0);
   else if(key === 'pause') setPause(val?1:0);
+  else if(key === 'showStreaks') setShowStreaks(val?1:0);
 }
 
 // Render the foreground menu for a given setting key over a dim backdrop.

@@ -44,6 +44,10 @@ Rules (mirror of the app state schema — keep in sync with AGENTS.md):
       of hideSyncDiag. Handled generically by prefs dict merge.
     prefs.hideSyncDiag : boolean (default true). Toggles visibility of lifecycle/
       storagePersist/diagnostic events in Activity Feed. Handled generically.
+    prefs.showStreaks : boolean (default true). Added 2026-09-19. Display-only
+      gate for the streak badge on daily cards; task.streak values are untouched
+      and keep accruing while hidden. Sync-excluded (not in syncSubset()).
+      Handled generically by the prefs dict merge — no special rule.
   habiticaHistory       : present-in-any              -> kept
   monthlyBackups        : union of strings
   top meta __seq/__savedAt/__hlcLast/version : max across inputs

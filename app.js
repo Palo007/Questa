@@ -2340,6 +2340,143 @@ function uncompleteTodo(t){
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
   save(); render();
 }
+/* BEGIN_QUICKLOG_HELPERS */
+function parseQuickParams(search){
+  try{
+    var q='';
+    if(typeof search==='string'){ q=search; }
+    else if(typeof location!=='undefined' && location && typeof location.search==='string'){ q=location.search; }
+    var sp=null;
+    try{ sp=new URLSearchParams(q.charAt(0)==='?'?q.slice(1):q); }catch(e){ return null; }
+    if(sp.get('code')) return null;
+    var quick=sp.get('quick');
+    var dirRaw=(sp.get('dir')||'').toLowerCase();
+    var dir=(dirRaw==='-1'||dirRaw==='down'||dirRaw==='-')?-1:1;
+    var tabRaw=sp.get('tab');
+    if(quick!==null && quick!==undefined && String(quick)!==''){
+      if(String(quick).toLowerCase()==='today') return {kind:'sheet', id:null, dir:1, tab:null};
+      return {kind:'habit', id:String(quick), dir:dir, tab:null};
+    }
+    if(tabRaw!==null && tabRaw!==undefined && String(tabRaw)!==''){
+      var tab=String(tabRaw);
+      var ok=false;
+      try{ ok=(typeof TABS!=='undefined' && TABS && typeof TABS.indexOf==='function') ? TABS.indexOf(tab)!==-1 : false; }catch(e){ ok=false; }
+      if(!ok) return null;
+      return {kind:'tab', id:null, dir:1, tab:tab};
+    }
+    return null;
+  }catch(e){ return null; }
+}
+function buildQuickUrl(base, id, dir){
+  var b=String(base||'');
+  if(!id || String(id).toLowerCase()==='today') return b+'?quick=today';
+  return b+'?quick='+encodeURIComponent(String(id))+'&dir='+((dir||0)<0?-1:1);
+}
+function quickLogTargetOk(t, dir){
+  if(!t || t.type!=='habit') return false;
+  if(dir!==1 && dir!==-1) return false;
+  return true;
+}
+var QUICKLOG_DEDUPE_MS=3000;
+function _quickDedupeKey(id, dir){ return 'quicklog:'+String(id)+':'+String(dir); }
+function quickLogDedupe(id, dir, nowMs){
+  try{
+    var store=null;
+    try{ store=(typeof sessionStorage!=='undefined')?sessionStorage:null; }catch(e){ store=null; }
+    if(!store || typeof store.getItem!=='function') return false;
+    var k=_quickDedupeKey(id, dir);
+    var prev=0;
+    try{ prev=parseInt(store.getItem(k)||'0',10)||0; }catch(e){ prev=0; }
+    var t=(typeof nowMs==='number'&&nowMs>0)?nowMs:0;
+    if(!t){ try{ t=(typeof now==='function')?now():Date.now(); }catch(e){ try{ t=Date.now(); }catch(e2){ t=0; } } }
+    if(prev>0 && t>0 && (t-prev)<QUICKLOG_DEDUPE_MS) return true;
+    try{ store.setItem(k, String(t)); }catch(e){}
+    return false;
+  }catch(e){ return false; }
+}
+function quickLogClearDedupe(id, dir){
+  try{
+    var store=null;
+    try{ store=(typeof sessionStorage!=='undefined')?sessionStorage:null; }catch(e){ store=null; }
+    if(!store || typeof store.removeItem!=='function') return;
+    store.removeItem(_quickDedupeKey(id, dir));
+  }catch(e){}
+}
+var _pendingQuickLog=null;
+function _drainPendingQuickLog(){
+  var p=null;
+  try{
+    if(!_pendingQuickLog) return null;
+    p=_pendingQuickLog; _pendingQuickLog=null;
+  }catch(e){ return null; }
+  try{ applyQuickIntent(p, {fromDrain:true}); }catch(e){}
+  return p;
+}
+function toastAction(msg, label, fn){
+  try{
+    var w=(typeof document!=='undefined')?document.getElementById('toast'):null;
+    if(!w || typeof toast!=='function'){ try{ toast(msg); }catch(e){} return null; }
+    var e=document.createElement('div');
+    e.className='toastMsg';
+    var span=document.createElement('span'); span.textContent=msg; e.appendChild(span);
+    var fired=false;
+    var b=document.createElement('button');
+    b.type='button'; b.textContent=label||'Undo';
+    b.onclick=function(){ if(fired) return; fired=true; try{ e.remove(); }catch(x){} try{ fn(); }catch(x){} };
+    e.appendChild(b); w.appendChild(e);
+    setTimeout(function(){ try{ e.remove(); }catch(x){} fired=true; }, 4500);
+    return e;
+  }catch(e2){ try{ toast(msg); }catch(e3){} return null; }
+}
+function quickCleanUrl(){
+  try{
+    if(typeof history!=='undefined' && history && typeof history.replaceState==='function'){
+      history.replaceState(null,'','./');
+    }
+  }catch(e){}
+}
+function applyQuickIntent(intent, opts){
+  try{
+    if(!intent || !intent.kind) return null;
+    if(intent.kind==='tab'){
+      TAB=intent.tab;
+      try{ if(typeof render==='function') render(); }catch(e){}
+      try{ quickCleanUrl(); }catch(e){}
+      return intent;
+    }
+    if(intent.kind==='sheet'){
+      try{ if(typeof drawQuickSheet==='function') drawQuickSheet(); }catch(e){}
+      try{ quickCleanUrl(); }catch(e){}
+      return intent;
+    }
+    if(intent.kind==='habit'){
+      var id=intent.id, dir=(intent.dir===-1)?-1:1;
+      var t=null;
+      try{ t=(typeof S!=='undefined' && S && S.tasks)?S.tasks.find(function(x){ return x&&x.id===id; }):null; }catch(e){ t=null; }
+      if(!quickLogTargetOk(t, dir)) return null;
+      var gated=false;
+      try{ gated=(typeof bootGateBlocksInput==='function')?!!bootGateBlocksInput():false; }catch(e){ gated=false; }
+      if(gated){ _pendingQuickLog={kind:'habit', id:id, dir:dir, tab:null}; return _pendingQuickLog; }
+      var nowMs=0;
+      try{ nowMs=(opts&&typeof opts.nowMs==='number'&&opts.nowMs>0)?opts.nowMs:((typeof now==='function')?now():Date.now()); }catch(e){ nowMs=0; }
+      if(quickLogDedupe(id, dir, nowMs)) return null;
+      try{ TAB='habits'; }catch(e){}
+      try{ scoreHabit(id, dir, null); }catch(e){ return null; }
+      try{ quickCleanUrl(); }catch(e){}
+      try{
+        if(typeof toastAction==='function'){
+          toastAction((dir>0?'+1 · ':'−1 · ')+(t.title||'habit'), 'Undo', function(){
+            try{ scoreHabit(id,-1,null); }catch(e){}
+            try{ quickLogClearDedupe(id, dir); }catch(e){}
+          });
+        }
+      }catch(e){}
+      return {kind:'habit', id:id, dir:dir, tab:null};
+    }
+    return null;
+  }catch(e){ return null; }
+}
+/* END_QUICKLOG_HELPERS */
 function scoreHabit(id, dir, ev){
   if(bootGateBlocksInput()){ toast('Syncing…'); return; } // D3 todo 11: MUST stay the first statement
   if(_suppressHabitClick===id){ _suppressHabitClick=null; return; }  // ignore the click fired right after a long-press

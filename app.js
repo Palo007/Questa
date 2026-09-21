@@ -2852,6 +2852,7 @@ function _runDayRollover(){
   _dayRolloverDone = true;
   _bootRolloverPending = false; // release the inert-card gate (todo 11) before painting
   startDay();
+  try{ if(typeof _drainPendingQuickLog==='function') _drainPendingQuickLog(); }catch(e){} // android-quick-habit-log todo 1: apply a deep-link log stashed while the gate was closed
 }
 // The callback sync.js invokes when the first round settles. Top-level declaration so it
 // is both a global sync.js can find and extractable for tests. Name is fixed by the plan.
@@ -8519,6 +8520,7 @@ if(LOAD_FAILED){
   }, 600);
 }
 bootStartDay(); // D3 todo 13: gates only the day-rollover decision, never the paint
+try{ if(typeof location!=='undefined' && location && typeof location.search==='string' && typeof parseQuickParams==='function' && typeof applyQuickIntent==='function'){ var _ql=parseQuickParams(location.search); if(_ql) applyQuickIntent(_ql); } }catch(e){} // android-quick-habit-log todo 1: kick off a deep-link quick log at boot (stashes while the rollover gate is closed)
 updateHeaderHeightVar();
 if('serviceWorker' in navigator){
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })

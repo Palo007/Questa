@@ -356,3 +356,34 @@ wastes the budget you need for the actual work.
 Running under **opencode** against the NVIDIA-hosted model? Proxy setup, rate-limit
 handling, and `opencode.json` gotchas are in **`docs/OPENCODE-NVIDIA.md`**. That is
 local tooling, not project rules — ignore it otherwise.
+
+---
+
+## 11. OmO Protocol (oh-my-openagent, ported to Android Studio) — ALWAYS ACTIVE
+
+This applies to every task in every workspace AUTOMATICALLY.
+
+### Directory contract — <workspace>/.cline/
+
+| Path | Purpose |
+|---|---|
+| .cline/boulder.json | Work registry (schema v2). Update on every work start / todo dispatch / status change |
+| .cline/drafts/<work-id>.md | Pre-plan research draft: intent, topology, review receipts, approval gate. NEVER the source of truth |
+| .cline/plans/<work-id>.md | THE source of truth: TL;DR, Scope IN / OUT (Must-NOT-Have), todos "- [ ] N." plus final "- [ ] F<n>." verifiers, each todo with Acceptance + References (file:line) + Commit |
+| .cline/plans/<work-id>.review-ledger.md | Review-cycle table + LOCKED decisions D1..Dn (create at the 2nd review cycle) |
+| .cline/notepads/<work-id>/{learnings,issues,decisions,problems}.md | APPEND-ONLY per-work memory; lessons learned live here |
+| .cline/evidence/ | Proof-only outputs (command transcripts, JSON). Never product data. Name: task-<label>-<work-id>.txt |
+| .cline/prompts/ | Reusable prompts (next-review-prompt.md) |
+| .cline/run-continuation/ | Per-session resume manifests <session-id>.json |
+| .cline/start-work/ledger.jsonl | One JSON line per work start |
+
+### Lifecycle (enforce silently, in order)
+
+1. SCAFFOLD — first non-trivial task in a workspace: create the full skeleton incl. boulder.json, silently.
+2. DRAFT — named/multi-step work: invoke `omo-research` for recon, then load the `omo-plan` skill and write the draft.
+3. REVIEW — adversarial pass over the draft: invoke `omo-critic-review` and `omo-gap-analysis`.
+4. PLAN — `omo-plan` formalizes; write the plan with executable todos only.
+5. REGISTER — boulder.json work entry (status "active") and set active_work_id.
+6. EXECUTE — per todo: implement (single small todos: `omo-quick-execution`) -> save proof to `.cline/evidence/` -> tick "- [x]".
+7. FINISH — final compliance audit (`omo-compliance-audit` or `omo-finish-work`).
+

@@ -75,3 +75,7 @@ __pycache__/
 *.7z
 *.zip
 docs/OPENCODE-NVIDIA.md
+
+# OmO-for-Cline runtime artifacts (plans/drafts/notepads/evidence)
+.cline/
+

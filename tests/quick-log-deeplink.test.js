@@ -158,6 +158,32 @@ function reset(clear) {
   assert('T3 url cleanup counted', cleaned === 1);
 }
 
+// Undo (todo 2): the wired Undo callback scores the inverse and clears the dedupe
+// record (D11); the ~4.5 s timer removes the node and leaves the callback inert.
+{
+  reset(true);
+  const timers = [];
+  const origST = sb.setTimeout;
+  sb.setTimeout = function (f) { timers.push(f); return timers.length; };
+  const r = applyQuickIntent(parseQuickParams('?quick=h1&dir=1'));
+  assert('U1 apply builds the undo toast', !!r && calls.length === 1);
+  const cont = doc._st['toast'];
+  const msg = cont.kids[cont.kids.length - 1];
+  const btn = msg.kids.find(function (k) { return k.tag === 'button'; });
+  btn.onclick();
+  assert('U2 undo scores the inverse once', calls.length === 2 && calls[1].id === 'h1' && calls[1].dir === -1);
+  assert('U3 undo clears the dedupe record', quickLogDedupe('h1', 1, Date.now() + 1) === false);
+  assert('U4 undo removes the toast node', msg.par === null && cont.kids.indexOf(msg) === -1);
+  const fired = [];
+  const el2 = toastAction('again', 'Undo', function () { fired.push(1); });
+  assert('U5 timer scheduled for the toast', timers.length === 2);
+  timers[1]();
+  assert('U6 timeout removes the node', el2.par === null && cont.kids.indexOf(el2) === -1);
+  el2.kids[1].onclick();
+  assert('U7 callback inert after the timeout', fired.length === 0);
+  sb.setTimeout = origST;
+}
+
 if (fails > 0) { console.error(fails + ' assertion(s) failed'); process.exit(1); }
 console.log('All tests passed!');
 process.exit(0);

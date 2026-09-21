@@ -23,10 +23,10 @@ let mockGlobals = {
 const contextEval = new Function('globals', 
   "const dayStamp = globals.dayStamp;\n" +
   helperCode + "\n" +
-  "return { normalizeTaskReminders, isReminderDue, getReminderNotificationPayload };"
+  "return { normalizeTaskReminders, isReminderDue, isReminderMissed, getReminderNotificationPayload };"
 );
 
-const { normalizeTaskReminders, isReminderDue, getReminderNotificationPayload } = contextEval(mockGlobals);
+const { normalizeTaskReminders, isReminderDue, isReminderMissed, getReminderNotificationPayload } = contextEval(mockGlobals);
 
 // Now write the assertions
 let failures = 0;
@@ -117,6 +117,69 @@ function assert(desc, cond) {
   // Should still be due if date changes
   const tomorrow = new Date(2026, 6, 10, 9, 0);
   assert("reminder due on next day", isReminderDue(t, t.reminders[0], tomorrow) === true);
+}
+
+// --- Missed reminders: a PWA cannot fire while closed, so a passed slot is
+// --- reported late, once, on the next open of the same day.
+{
+  const mkDaily = () => ({
+    id: 'tm1', type: 'daily', title: 'Stretch',
+    repeat: [true,true,true,true,true,true,true],
+    reminders: [{ id: 'rm1', enabled: true, kind: 'daily', time: '09:00',
+                  days: [true,true,true,true,true,true,true], lastFiredKey: '' }]
+  });
+
+  const t = mkDaily();
+  const r = t.reminders[0];
+
+  const before  = new Date(2026, 6, 9, 8, 0);   // 08:00, slot not reached
+  const exact   = new Date(2026, 6, 9, 9, 0);   // 09:00, the slot itself
+  const after   = new Date(2026, 6, 9, 11, 0);  // 11:00, slot passed unfired
+
+  assert("M1 not missed before the slot", isReminderMissed(t, r, before) === false);
+  assert("M2 not missed at the exact slot (that is 'due')", isReminderMissed(t, r, exact) === false);
+  assert("M3 due at the exact slot", isReminderDue(t, r, exact) === true);
+  assert("M4 missed once the slot has passed", isReminderMissed(t, r, after) === true);
+  assert("M5 a missed slot is not also 'due'", isReminderDue(t, r, after) === false);
+
+  // Firing it clears the missed state for that day only.
+  r.lastFiredKey = '20260709-09:00';
+  assert("M6 not missed after it fired", isReminderMissed(t, r, after) === false);
+  const nextDay = new Date(2026, 6, 10, 11, 0);
+  assert("M7 missed again the next day", isReminderMissed(t, r, nextDay) === true);
+
+  // A completed to-do must stay quiet.
+  const todo = { id: 'tm2', type: 'todo', title: 'Pay bill', done: true,
+    reminders: [{ id: 'rm2', enabled: true, kind: 'once', time: '09:00',
+                  date: '2026-07-09', lastFiredKey: '' }] };
+  assert("M8 done to-do is never missed", isReminderMissed(todo, todo.reminders[0], after) === false);
+  todo.done = false;
+  assert("M9 open to-do dated today is missed", isReminderMissed(todo, todo.reminders[0], after) === true);
+
+  // A stale one-off from an earlier day must not fire late.
+  todo.reminders[0].date = '2026-07-08';
+  assert("M10 one-off from a previous day is not missed", isReminderMissed(todo, todo.reminders[0], after) === false);
+
+  // A weekly reminder switched off for today stays quiet.
+  const weekly = { id: 'tm3', type: 'habit', title: 'Gym',
+    reminders: [{ id: 'rm3', enabled: true, kind: 'weekly', time: '09:00',
+                  days: [false,false,false,false,true,false,false], lastFiredKey: '' }] };
+  // 2026-07-09 is a Thursday (day 4), so day 4 true = active today.
+  assert("M11 weekly active today is missed", isReminderMissed(weekly, weekly.reminders[0], after) === true);
+  weekly.reminders[0].days = [false,false,false,false,false,false,false];
+  assert("M12 weekly inactive today is not missed", isReminderMissed(weekly, weekly.reminders[0], after) === false);
+
+  // A disabled reminder never fires.
+  const off = mkDaily();
+  off.reminders[0].enabled = false;
+  assert("M13 disabled reminder is not missed", isReminderMissed(off, off.reminders[0], after) === false);
+
+  // The payload says it is late, and the old 2-arg call is unchanged.
+  const late = getReminderNotificationPayload(t, r, true);
+  const onTime = getReminderNotificationPayload(t, r);
+  assert("M14 late payload is marked", late.body.indexOf('Missed at 09:00') === 0);
+  assert("M15 on-time payload is unmarked", onTime.body.indexOf('Missed at') === -1);
+  assert("M16 late payload keeps the same tag", late.tag === onTime.tag);
 }
 
 if (failures > 0) {

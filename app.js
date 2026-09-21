@@ -2050,15 +2050,18 @@ function normalizeTaskReminders(t) {
   }
 }
 
-function isReminderDue(t, r, now) {
+function reminderFireKey(r, now) {
+  return `${now.getFullYear()}${String(now.getMonth()+1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${r.time}`;
+}
+
+// Shared day/date gate for isReminderDue and isReminderMissed: is this reminder
+// supposed to run at all on the calendar day that `now` falls in, and has it not
+// already fired for that day's slot?
+function reminderAppliesToday(t, r, now) {
   if (!r.enabled) return false;
   if (t.type === 'todo' && t.done) return false;
-  
-  const currentHour = String(now.getHours()).padStart(2, '0');
-  const currentMin = String(now.getMinutes()).padStart(2, '0');
-  const currentTimeStr = `${currentHour}:${currentMin}`;
-  if (r.time !== currentTimeStr) return false;
-  
+  if (!r.time) return false;
+
   if (r.kind === 'once') {
     const currentYear = now.getFullYear();
     const currentMonth = String(now.getMonth() + 1).padStart(2, '0');
@@ -2073,14 +2076,33 @@ function isReminderDue(t, r, now) {
       if (r.days && !r.days[currentDay]) return false;
     }
   }
-  
-  const fireKey = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${r.time}`;
-  if (r.lastFiredKey === fireKey) return false;
-  
-  return true;
+
+  return r.lastFiredKey !== reminderFireKey(r, now);
 }
 
-function getReminderNotificationPayload(t, r) {
+function isReminderDue(t, r, now) {
+  if (!reminderAppliesToday(t, r, now)) return false;
+
+  const currentHour = String(now.getHours()).padStart(2, '0');
+  const currentMin = String(now.getMinutes()).padStart(2, '0');
+  const currentTimeStr = `${currentHour}:${currentMin}`;
+  return r.time === currentTimeStr;
+}
+
+// A PWA cannot fire a local notification while the page is closed: the 60s
+// scheduler dies with the tab and Notification Triggers never shipped. So a slot
+// that passed while Questa was shut is reported late, exactly once, on next open
+// rather than being dropped in silence.
+function isReminderMissed(t, r, now) {
+  if (!reminderAppliesToday(t, r, now)) return false;
+
+  const currentHour = String(now.getHours()).padStart(2, '0');
+  const currentMin = String(now.getMinutes()).padStart(2, '0');
+  const currentTimeStr = `${currentHour}:${currentMin}`;
+  return r.time < currentTimeStr;
+}
+
+function getReminderNotificationPayload(t, r, missed) {
   let title = t.title || 'Questa Reminder';
   let body = '';
   if (t.type === 'habit') {
@@ -2089,6 +2111,9 @@ function getReminderNotificationPayload(t, r) {
     body = t.notes ? `Daily reminder: ${t.notes}` : 'Check off your daily task!';
   } else {
     body = t.notes ? `To-Do due: ${t.notes}` : 'Complete your to-do!';
+  }
+  if (missed) {
+    body = 'Missed at ' + r.time + ' - ' + body;
   }
   return {
     title: title,
@@ -2114,23 +2139,25 @@ function checkReminders() {
   S.tasks.forEach(t => {
     if (!t.reminders) return;
     t.reminders.forEach(r => {
-      if (isReminderDue(t, r, now)) {
-        const payload = getReminderNotificationPayload(t, r);
-        if (navigator.serviceWorker && navigator.serviceWorker.controller) {
-          navigator.serviceWorker.controller.postMessage({
-            type: 'SHOW_NOTIFICATION',
-            title: payload.title,
-            body: payload.body,
-            tag: payload.tag
-          });
-        } else {
-          new Notification(payload.title, { body: payload.body, tag: payload.tag });
-        }
-        
-        const fireKey = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}-${r.time}`;
-        r.lastFiredKey = fireKey;
-        tasksChanged = true;
+      const due = isReminderDue(t, r, now);
+      // A slot that passed while the app was closed still fires, once, marked late.
+      const missed = !due && isReminderMissed(t, r, now);
+      if (!due && !missed) return;
+
+      const payload = getReminderNotificationPayload(t, r, missed);
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({
+          type: 'SHOW_NOTIFICATION',
+          title: payload.title,
+          body: payload.body,
+          tag: payload.tag
+        });
+      } else {
+        new Notification(payload.title, { body: payload.body, tag: payload.tag });
       }
+
+      r.lastFiredKey = reminderFireKey(r, now);
+      tasksChanged = true;
     });
   });
   
@@ -5839,13 +5866,22 @@ function saveTask(){
   EDIT.checklist=(EDIT.checklist||[]).filter(c=>c && (c.text||'').trim());
   if (EDIT._reminderEnabled) {
     const kind = EDIT.type === 'todo' ? 'once' : (EDIT.type === 'daily' ? 'daily' : 'weekly');
+    const _prevRem = (EDIT.reminders && EDIT.reminders[0]) || null;
     const r = {
-      id: EDIT.reminders && EDIT.reminders[0] ? EDIT.reminders[0].id : uid(),
+      id: _prevRem ? _prevRem.id : uid(),
       enabled: true,
       kind: kind,
       time: EDIT._tempReminderTime || '09:00',
-      lastFiredKey: EDIT.reminders && EDIT.reminders[0] ? EDIT.reminders[0].lastFiredKey : ""
+      lastFiredKey: _prevRem ? _prevRem.lastFiredKey : ""
     };
+    // A reminder that is brand new, or that just moved to a different time of day,
+    // must not instantly fire as "missed" for a slot that passed before it existed.
+    // Burn today's key for that slot so the first real fire is tomorrow's.
+    if (!_prevRem || _prevRem.time !== r.time) {
+      const _now = new Date();
+      const _nowStr = String(_now.getHours()).padStart(2,'0') + ':' + String(_now.getMinutes()).padStart(2,'0');
+      r.lastFiredKey = (r.time < _nowStr) ? reminderFireKey(r, _now) : "";
+    }
     if (kind === 'once') {
       r.date = EDIT._tempReminderDate || new Date().getFullYear() + '-' + String(new Date().getMonth()+1).padStart(2,'0') + '-' + String(new Date().getDate()).padStart(2,'0');
     } else if (kind === 'weekly') {
@@ -6664,7 +6700,7 @@ function openOpt(key){
     const ne=S.prefs.notificationsEnabled;
     const perm=typeof Notification!=='undefined'?Notification.permission:'default';
     h+='<h4>Notifications</h4>';
-    h+='<p class="optHint">Browser-based persistent local reminders for habits, dailies, and to-dos. On Android, requires Chrome/Firefox to be installed as a PWA.</p>';
+    h+='<p class="optHint">Local reminders for habits, dailies, and to-dos. These fire only while Questa is open — a web app cannot wake itself once you close it. Any reminder whose time passed while Questa was shut is shown, marked <b>Missed</b>, the next time you open it that same day.</p>';
     h+='<div class="optChoices">';
     h+='<button type="button" class="'+(ne?'on':'')+'" onclick="setNotificationsPref(true)">On</button>';
     h+='<button type="button" class="'+(ne?'':'on')+'" onclick="setNotificationsPref(false)">Off</button>';

@@ -39,6 +39,7 @@ const doc = makeDoc();
 doc.__add('toast', makeEl('div'));
 doc.__add('sheet', makeEl('div'));
 doc.__add('scrim', makeEl('div'));
+doc.__add('optMenu', makeEl('div'));
 const sessionStorage = makeSS();
 const calls = [], renders = [], sheets = [];
 let cleaned = 0, closed = 0;
@@ -227,6 +228,58 @@ function reset(clear) {
   assert('S11 no habits -> empty message, zero rows', html2.indexOf('Nothing left to log') !== -1
     && html2.split('quickRow').length - 1 === 0);
   S.tasks = saved;
+}
+
+// Settings panel (todo 5): the openOpt 'quicklog' branch, extracted from the real
+// app.js and rendered in a vm with an element-store document; every emitted link
+// round-trips through parseQuickParams; the curVal case is asserted separately.
+{
+  function extractBranch(src, anchorRe) {
+    const m = src.match(anchorRe);
+    if (!m) throw new Error('anchor not found');
+    const start = m.index + m[0].length;
+    let depth = 1, i = start;
+    while (depth > 0 && i < src.length) { const c = src[i]; if (c === '{') depth++; else if (c === '}') depth--; i++; }
+    return src.slice(start, i - 1);
+  }
+  const escFn = function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
+  const nasty = { id: 'h5', type: 'habit', title: "O'B<b>X & \\" };
+  const saved = S.tasks;
+  S.tasks = saved.concat([nasty]);
+  const sb2 = { S, document: doc, esc: escFn, buildQuickUrl, parseQuickParams,
+    location: { origin: 'https://q.example', pathname: '/opti/' } };
+  vm.createContext(sb2);
+  const branch = extractBranch(appSrc, /\} else if\(key==='quicklog'\)\{/);
+  vm.runInContext('function openOpt(key){ var h="";\n' + branch + '\ndocument.getElementById("optMenu").innerHTML=h; }', sb2);
+  sb2.openOpt('quicklog');
+  const html = doc._st['optMenu'].innerHTML;
+  assert('L1 one row per habit (5)', html.split('quickLinkRow').length - 1 === 5);
+  const urls = [];
+  html.replace(/quickCopyLink\('([^']+)'\)/g, function (_, u) { urls.push(u.replace(/&amp;/g, '&')); });
+  assert('L2 two copy links per habit (10)', urls.length === 10);
+  const parsed = urls.map(function (u) { return parseQuickParams(u.slice(u.indexOf('?'))); });
+  assert('L3 every emitted link round-trips to {habit,id,dir}',
+    parsed.length === 10 && parsed.every(function (p) { return p && p.kind === 'habit'; }) &&
+    ['h1', 'h2', 'h3', 'h4', 'h5'].every(function (id) {
+      return parsed.some(function (p) { return p.id === id && p.dir === 1; }) &&
+             parsed.some(function (p) { return p.id === id && p.dir === -1; });
+    }));
+  assert('L4 nasty title escaped, raw absent', html.indexOf(escFn(nasty.title)) !== -1 && html.indexOf("O'B<b>X") === -1);
+  assert('L5 setup note present', html.indexOf('URL-shortcut widget') !== -1);
+  const shares = html.match(/quickShareLink\('([^']*)','([^']+)'\)/g) || [];
+  assert('L6 share button per habit, targeted by id', shares.length === 5 &&
+    shares.every(function (s) { return ['h1', 'h2', 'h3', 'h4', 'h5'].some(function (id) { return s.indexOf("'" + id + "'") !== -1; }); }));
+  S.tasks = [];
+  sb2.openOpt('quicklog');
+  const html2 = doc._st['optMenu'].innerHTML;
+  assert('L7 no habits -> hint, zero rows', html2.indexOf('No habits yet') !== -1 && html2.split('quickLinkRow').length - 1 === 0);
+  S.tasks = saved;
+  // The Settings row's value must not render blank (the curVal case).
+  const curBranch = extractBranch(appSrc, /\} else if\(s\.key === 'quicklog'\)\{/);
+  const sb3 = {};
+  vm.createContext(sb3);
+  vm.runInContext('function _curVal(s){ var curVal="";\n' + curBranch + '\nreturn curVal; }', sb3);
+  assert('L8 settings row value not empty', sb3._curVal({ key: 'quicklog' }) === 'Links');
 }
 
 if (fails > 0) { console.error(fails + ' assertion(s) failed'); process.exit(1); }

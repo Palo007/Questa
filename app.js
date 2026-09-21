@@ -2435,6 +2435,31 @@ function quickCleanUrl(){
     }
   }catch(e){}
 }
+function quickCopyLink(url){
+  try{
+    if(typeof navigator!=='undefined'&&navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(url).then(function(){ toast('Copied'); }).catch(function(){ quickFallbackCopy(url); });
+    } else { quickFallbackCopy(url); }
+  }catch(e){ try{ quickFallbackCopy(url); }catch(e2){} }
+}
+function quickFallbackCopy(t){
+  try{
+    var ta=document.createElement('textarea');
+    ta.value=t; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); toast('Copied'); }catch(e){ toast('Copy failed'); }
+    document.body.removeChild(ta);
+  }catch(e){ try{ toast('Copy failed'); }catch(e2){} }
+}
+function quickShareLink(url, id){
+  try{
+    var t=(typeof S!=='undefined'&&S&&S.tasks)?S.tasks.find(function(x){ return x&&x.id===id; }):null;
+    var title=(t&&t.title)?('Questa · '+t.title):'Questa quick log';
+    if(typeof navigator!=='undefined'&&navigator.share){
+      navigator.share({ title: title, url: url }).catch(function(){ quickCopyLink(url); });
+    } else { quickCopyLink(url); }
+  }catch(e){ quickCopyLink(url); }
+}
 function drawQuickSheet(){
   try{
     var sheet=(typeof document!=='undefined')?document.getElementById('sheet'):null;
@@ -6761,7 +6786,8 @@ const CATS = {
     settings: [
       { key: 'haptics', type: 'toggle', label: 'Haptics', desc: 'Vibration on taps and completions.' },
       { key: 'saveBtnTop', type: 'toggle', label: 'Save button position', desc: 'Top = centered next to title; Bottom = at foot of sheet.' },
-      { key: 'notifications', type: 'multi', label: 'Notifications', desc: 'Browser-based notification permission and status.' }
+      { key: 'notifications', type: 'multi', label: 'Notifications', desc: 'Browser-based notification permission and status.' },
+      { key: 'quicklog', type: 'multi', label: 'Home-screen quick log', desc: 'Copy a per-habit link for a one-tap home-screen log button.' }
     ]
   },
   activityFeed: {
@@ -6804,6 +6830,8 @@ function openCat(catKey){
         curVal = nl===0?'Off':(nl+' line'+(nl===1?'':'s'));
       } else if(s.key === 'notifications'){
         curVal = S.prefs.notificationsEnabled?'On':'Off';
+      } else if(s.key === 'quicklog'){
+        curVal = 'Links';
       }
       h += '<div class="catSetting" onclick="openOpt(\''+s.key+'\')">'+
         '<div class="catSettingMain">'+
@@ -6876,6 +6904,22 @@ function openOpt(key){
     } else {
       h+='<button type="button" class="btn ghost" style="margin-top:10px;width:100%" onclick="testNotification()">Send Test Notification</button>';
     }
+  } else if(key==='quicklog'){
+    var _qlBase=(typeof location!=='undefined'&&location)?(location.origin+location.pathname):'./';
+    h+='<h4>Home-screen quick log</h4>';
+    h+='<p class="optHint">Android does not let a web app create its own home-screen buttons — the button comes from your launcher: a URL-shortcut widget or a shortcut-maker app. Chrome\'s own <b>Add to Home screen</b> may create a browser shortcut instead of an app shortcut, so test which one you get.</p>';
+    h+='<p class="optHint"><b>1.</b> Copy the link for the habit and direction (＋1 logs up, −1 logs down). <b>2.</b> On your home screen, add a URL-shortcut widget (or use a shortcut-maker app) and paste the link as its target. <b>3.</b> Name the button after the habit — tapping it opens Questa and logs the habit at once.</p>';
+    var _qlHabits=(S&&S.tasks)?S.tasks.filter(function(t){ return t&&t.type==='habit'; }):[];
+    if(!_qlHabits.length) h+='<p class="optHint">No habits yet — add one first.</p>';
+    h+=_qlHabits.map(function(t){
+      var _up=t.up!==false, _down=t.down!==false;
+      return '<div class="quickLinkRow" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.08)">'
+        +'<div class="ttl" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(t.title||'Untitled')+'</div>'
+        +(_up?'<button type="button" class="btn ghost" style="flex:none;padding:4px 10px;font-size:12px" onclick="quickCopyLink(\''+esc(buildQuickUrl(_qlBase,t.id,1))+'\')">Copy ＋1</button>':'')
+        +(_down?'<button type="button" class="btn ghost" style="flex:none;padding:4px 10px;font-size:12px" onclick="quickCopyLink(\''+esc(buildQuickUrl(_qlBase,t.id,-1))+'\')">Copy −1</button>':'')
+        +'<button type="button" class="btn ghost" style="flex:none;padding:4px 10px;font-size:12px" onclick="quickShareLink(\''+esc(buildQuickUrl(_qlBase,t.id,1))+'\',\''+t.id+'\')">Share</button>'
+        +'</div>';
+    }).join('');
   } else if(key==='drag'){
     const ddv=(S.prefs.dragDelay==null?DRAG_DELAY_DEFAULT:Math.min(300,Math.max(100,S.prefs.dragDelay)));
     h+='<h4>Card drag delay</h4>';

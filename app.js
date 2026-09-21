@@ -2435,6 +2435,33 @@ function quickCleanUrl(){
     }
   }catch(e){}
 }
+function drawQuickSheet(){
+  try{
+    var sheet=(typeof document!=='undefined')?document.getElementById('sheet'):null;
+    if(!sheet) return;
+    var habits=(typeof S!=='undefined'&&S&&S.tasks)?S.tasks.filter(function(t){ return t&&t.type==='habit'; }):[];
+    // verbatim viewHabits 'all' predicate: every habit except a Log habit already tapped this reset period
+    var isLog=function(t){ return t.difficulty==='log'; };
+    var logged=function(t){ return ((t.cUp||0)+(t.cDown||0))>0; };
+    var left=habits.filter(function(t){ return !isLog(t)||!logged(t); });
+    var h='<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px">';
+    h+='<h3 style="margin:0;font-size:16px;font-weight:700">Quick log</h3>';
+    h+='<button type="button" class="btn primary" onclick="closeSheet()" style="flex:none;width:auto;padding:0 16px;height:32px;font-size:13px">Done</button>';
+    h+='</div>';
+    if(!left.length) h+='<div class="empty">Nothing left to log.</div>';
+    h+=left.map(function(t){
+      var up=t.up!==false, down=t.down!==false;
+      return '<div class="task habit quickRow" data-id="'+t.id+'">'
+        +(up?'<div class="check hbtn up" onclick="scoreHabit(\''+t.id+'\',1,event);drawQuickSheet()">+</div>':'<div class="check hbtn off">+</div>')
+        +'<div class="ttl">'+esc(t.title||'Untitled')+'</div>'
+        +(down?'<div class="check hbtn down" onclick="scoreHabit(\''+t.id+'\',-1,event);drawQuickSheet()">−</div>':'<div class="check hbtn off">−</div>')
+        +'</div>';
+    }).join('');
+    sheet.innerHTML=h;
+    var scrim=(typeof document!=='undefined')?document.getElementById('scrim'):null;
+    if(scrim&&scrim.classList&&scrim.classList.add) scrim.classList.add('show');
+  }catch(e){ try{ if(typeof toast==='function') toast('Could not open quick log'); }catch(e2){} }
+}
 function applyQuickIntent(intent, opts){
   try{
     if(!intent || !intent.kind) return null;

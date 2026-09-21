@@ -13,9 +13,15 @@ function makeSS() {
   return { getItem(k) { return (k in s) ? s[k] : null; }, setItem(k, v) { s[k] = String(v); }, removeItem(k) { delete s[k]; }, _s: s };
 }
 function makeEl(tag) {
-  return { tag: tag, cls: '', txt: '', typ: '', kids: [], par: null, oc: null,
+  const el = { tag: tag, cls: '', txt: '', typ: '', kids: [], par: null, oc: null, _c: [],
     appendChild(c) { c.par = this; this.kids.push(c); return c; },
     remove() { if (this.par) { const i = this.par.kids.indexOf(this); if (i >= 0) this.par.kids.splice(i, 1); this.par = null; } } };
+  el.classList = {
+    add(c) { if (el._c.indexOf(c) < 0) el._c.push(c); },
+    remove(c) { const i = el._c.indexOf(c); if (i >= 0) el._c.splice(i, 1); },
+    contains(c) { return el._c.indexOf(c) >= 0; }
+  };
+  return el;
 }
 function makeDoc() {
   const st = {};
@@ -25,29 +31,36 @@ const TABS = ['habits', 'dailies', 'todos', 'analytics', 'rewards'];
 const S = { prefs: { lastTab: 'dailies' }, tasks: [
   { id: 'h1', type: 'habit', title: 'Run', difficulty: 'easy' },
   { id: 'd1', type: 'daily', title: 'Brush' },
-  { id: 't1', type: 'todo', title: 'Mail' } ] };
+  { id: 't1', type: 'todo', title: 'Mail' },
+  { id: 'h2', type: 'habit', title: 'Cigs', difficulty: 'log', cUp: 1 },   // Log habit already logged -> excluded from the sheet
+  { id: 'h3', type: 'habit', title: 'Meditate', difficulty: 'log' },       // Log habit not yet logged -> listed
+  { id: 'h4', type: 'habit', title: 'Read' } ] };                          // plain habit -> listed
 const doc = makeDoc();
 doc.__add('toast', makeEl('div'));
+doc.__add('sheet', makeEl('div'));
+doc.__add('scrim', makeEl('div'));
 const sessionStorage = makeSS();
 const calls = [], renders = [], sheets = [];
-let cleaned = 0;
+let cleaned = 0, closed = 0;
 const sb = { TABS, S, document: doc, sessionStorage, TAB: 'dailies',
   scoreHabit(id, dir, ev) { calls.push({ id, dir }); },
-  render() { renders.push(1); }, drawQuickSheet() { sheets.push(1); },
+  render() { renders.push(1); },
   toast(m) { sb.__t = m; }, bootGateBlocksInput() { return sb.__g === true; },
+  esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); },
+  closeSheet() { closed++; },
   history: { replaceState() { cleaned++; } },
   URLSearchParams, Date, String, Object, Array, parseInt, encodeURIComponent,
   setTimeout() { return 0; }, __g: false, __t: null };
 sb.globalThis = sb;
 vm.createContext(sb);
-const api = vm.runInContext(helperCode + '\n;({parseQuickParams,buildQuickUrl,quickLogTargetOk,quickLogDedupe,quickLogClearDedupe,applyQuickIntent,toastAction,quickCleanUrl,_drainPendingQuickLog,QUICKLOG_DEDUPE_MS});', sb);
+const api = vm.runInContext(helperCode + '\n;({parseQuickParams,buildQuickUrl,quickLogTargetOk,quickLogDedupe,quickLogClearDedupe,applyQuickIntent,toastAction,quickCleanUrl,_drainPendingQuickLog,drawQuickSheet,QUICKLOG_DEDUPE_MS});', sb);
 const { parseQuickParams, buildQuickUrl, quickLogTargetOk, quickLogDedupe,
   quickLogClearDedupe, applyQuickIntent, toastAction, quickCleanUrl,
-  _drainPendingQuickLog, QUICKLOG_DEDUPE_MS } = api;
+  _drainPendingQuickLog, drawQuickSheet, QUICKLOG_DEDUPE_MS } = api;
 let fails = 0;
 function assert(d, c) { if (c) console.log('[PASS] ' + d); else { console.error('[FAIL] ' + d); fails++; } }
 function reset(clear) {
-  calls.length = 0; renders.length = 0; sheets.length = 0; cleaned = 0;
+  calls.length = 0; renders.length = 0; sheets.length = 0; cleaned = 0; closed = 0;
   sb.__g = false; sb.__t = null; sb.TAB = 'dailies';
   _drainPendingQuickLog();
   if (clear) for (const k of Object.keys(sessionStorage._s)) delete sessionStorage._s[k];
@@ -89,7 +102,8 @@ function reset(clear) {
   const it = parseQuickParams('?quick=today');
   assert('Q5a today parses to sheet intent', !!it && it.kind === 'sheet');
   const r = applyQuickIntent(it);
-  assert('Q5b sheet intent draws the sheet', r !== null && sheets.length === 1 && calls.length === 0 && cleaned === 1);
+  assert('Q5b sheet intent draws the sheet and shows the scrim', r !== null && calls.length === 0 && cleaned === 1
+    && doc._st['scrim'].classList.contains('show'));
 }
 // Q6: buildQuickUrl round-trips through parseQuickParams.
 {
@@ -182,6 +196,37 @@ function reset(clear) {
   el2.kids[1].onclick();
   assert('U7 callback inert after the timeout', fired.length === 0);
   sb.setTimeout = origST;
+}
+
+// Sheet (todo 3): drawQuickSheet lists habits still to log via the verbatim
+// viewHabits 'all' predicate; logged Log habits and non-habits are excluded;
+// rows log through scoreHabit and re-draw the sheet in place.
+{
+  reset(true);
+  drawQuickSheet();
+  const html = doc._st['sheet'].innerHTML;
+  assert('S1 three habits left -> three row markers', html.split('quickRow').length - 1 === 3);
+  assert('S2 Run listed once', (html.match(/Run/g) || []).length === 1);
+  assert('S3 Meditate listed once', (html.match(/Meditate/g) || []).length === 1);
+  assert('S4 Read listed once', (html.match(/Read/g) || []).length === 1);
+  assert('S5 logged Log habit excluded', html.indexOf('Cigs') === -1);
+  assert('S6 daily excluded', html.indexOf('Brush') === -1);
+  assert('S7 todo excluded', html.indexOf('Mail') === -1);
+  assert('S8 scrim shown', doc._st['scrim'].classList.contains('show'));
+  assert('S9 rows log through scoreHabit and re-draw', html.indexOf("scoreHabit('h1',1,event);drawQuickSheet()") !== -1
+    && html.indexOf("scoreHabit('h1',-1,event);drawQuickSheet()") !== -1);
+  assert('S10 Done button closes the sheet', html.indexOf('onclick="closeSheet()"') !== -1);
+}
+// Sheet empty state: no habits left -> empty message, zero rows.
+{
+  const saved = S.tasks;
+  S.tasks = saved.filter(function (t) { return t.type !== 'habit'; });
+  reset(true);
+  drawQuickSheet();
+  const html2 = doc._st['sheet'].innerHTML;
+  assert('S11 no habits -> empty message, zero rows', html2.indexOf('Nothing left to log') !== -1
+    && html2.split('quickRow').length - 1 === 0);
+  S.tasks = saved;
 }
 
 if (fails > 0) { console.error(fails + ' assertion(s) failed'); process.exit(1); }

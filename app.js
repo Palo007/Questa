@@ -6009,6 +6009,9 @@ function drawSheet(){
         '<button onclick="adjustCount(-1,-1)">−</button>'+
         '<button onclick="adjustCount(1,-1)">+</button></div></div>'+
       '<div class="small" style="margin-top:6px">Adjusting the + count also adds/removes its XP &amp; gold.</div>';
+    h+='<div style="display:flex;align-items:center;gap:8px;margin-top:8px">'+
+      '<input type="checkbox" id="eQuickLog" ' + (t.quickLog?'checked':'') + ' onclick="EDIT.quickLog=this.checked;drawSheet()" style="width:auto;margin:0;cursor:pointer">'+
+      '<label for="eQuickLog" style="margin:0;cursor:pointer;font-weight:normal">Quick log — show this habit in the home-screen Quick log sheet &amp; link panel</label></div>';
   }
   if(t.type==='daily'){
     // 2026-09-18 (round 2): `t.repeat[i]` threw on a daily with no repeat array, and

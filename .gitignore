@@ -30,6 +30,16 @@
 !/sw.js
 !/README.md
 !/sync.js
+# === Digital Asset Links (Android TWA trust file) ===
+# Serves at https://palo007.github.io/Questa/.well-known/assetlinks.json.
+# NOTE (2026-09-22): Android's App Links verifier reads the DOMAIN root
+# (https://palo007.github.io/.well-known/assetlinks.json), which a project
+# repo cannot serve. This copy is an EXPERIMENT requested by the user; the
+# canonical home is the Palo007.github.io user-site repo. Kept because the
+# experiment is cheap and harmless, and must be whitelisted or the
+# whitelist gitignore silently drops it from every commit.
+!/.well-known/
+
 # === Documentation ===
 # Living docs live in docs/ and ARE version-controlled. Leaving them untracked is
 # what let the three join-daily-reset fixtures get silently overwritten in July

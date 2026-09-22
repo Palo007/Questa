@@ -46,6 +46,7 @@ Two are read by name and must stay in step with `app.js`:
   that stops a conflict retry re-adding a peer's taps. The counter twin of
   `char.abs`. Same deal as `cResetOn`: nothing to compute, but it must ride along
   intact. A row that loses its `cAbs` reverts to double-counting on the next 409.
+- **`quickLog`** (2026-09-22) — boolean UI curation flag on habit rows; rides along with the newest row like every unlisted field; no join_exports.py rule needed (tasks merge by id/updatedAt, equal-ts field-merge is generic).
 
 ## Usage
 

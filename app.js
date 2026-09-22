@@ -2460,6 +2460,11 @@ function quickShareLink(url, id){
     } else { quickCopyLink(url); }
   }catch(e){ quickCopyLink(url); }
 }
+function quickLogHabits(tasks){
+  var list=(tasks&&tasks.filter)?tasks:[];
+  var flagged=list.filter(function(t){ return t&&t.quickLog; });
+  return flagged.length?flagged:list;
+}
 function drawQuickSheet(){
   try{
     var sheet=(typeof document!=='undefined')?document.getElementById('sheet'):null;
@@ -2468,7 +2473,7 @@ function drawQuickSheet(){
     // verbatim viewHabits 'all' predicate: every habit except a Log habit already tapped this reset period
     var isLog=function(t){ return t.difficulty==='log'; };
     var logged=function(t){ return ((t.cUp||0)+(t.cDown||0))>0; };
-    var left=habits.filter(function(t){ return !isLog(t)||!logged(t); });
+    var left=quickLogHabits(habits).filter(function(t){ return !isLog(t)||!logged(t); });
     var h='<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px">';
     h+='<h3 style="margin:0;font-size:16px;font-weight:700">Quick log</h3>';
     h+='<button type="button" class="btn primary" onclick="closeSheet()" style="flex:none;width:auto;padding:0 16px;height:32px;font-size:13px">Done</button>';
@@ -6913,8 +6918,11 @@ function openOpt(key){
     h+='<p class="optHint">Android does not let a web app create its own home-screen buttons — the button comes from your launcher: a URL-shortcut widget or a shortcut-maker app. Chrome\'s own <b>Add to Home screen</b> may create a browser shortcut instead of an app shortcut, so test which one you get.</p>';
     h+='<p class="optHint"><b>1.</b> Copy the link for the habit and direction (＋1 logs up, −1 logs down). <b>2.</b> On your home screen, add a URL-shortcut widget (or use a shortcut-maker app) and paste the link as its target. <b>3.</b> Name the button after the habit — tapping it opens Questa and logs the habit at once.</p>';
     var _qlHabits=(S&&S.tasks)?S.tasks.filter(function(t){ return t&&t.type==='habit'; }):[];
+    var _qlShown=(typeof quickLogHabits==='function')?quickLogHabits(_qlHabits):_qlHabits;
+    var _qlAnyFlag=_qlHabits.some(function(t){ return t&&t.quickLog; });
     if(!_qlHabits.length) h+='<p class="optHint">No habits yet — add one first.</p>';
-    h+=_qlHabits.map(function(t){
+    if(_qlHabits.length) h+='<p class="optHint" style="font-size:11px;opacity:.65;margin:4px 0 0">'+(_qlAnyFlag?('Showing '+_qlShown.length+' quick-log habit'+(_qlShown.length===1?'':'s')+' — untick Quick log in a habit\'s edit sheet to change.'):'Tip: tick Quick log in a habit\'s edit sheet to curate this list.')+'</p>';
+    h+=_qlShown.map(function(t){
       var _up=t.up!==false, _down=t.down!==false;
       return '<div class="quickLinkRow" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.08)">'
         +'<div class="ttl" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(t.title||'Untitled')+'</div>'

@@ -54,10 +54,10 @@ const sb = { TABS, S, document: doc, sessionStorage, TAB: 'dailies',
   setTimeout() { return 0; }, __g: false, __t: null };
 sb.globalThis = sb;
 vm.createContext(sb);
-const api = vm.runInContext(helperCode + '\n;({parseQuickParams,buildQuickUrl,quickLogTargetOk,quickLogDedupe,quickLogClearDedupe,applyQuickIntent,toastAction,quickCleanUrl,_drainPendingQuickLog,drawQuickSheet,QUICKLOG_DEDUPE_MS});', sb);
+const api = vm.runInContext(helperCode + '\n;({parseQuickParams,buildQuickUrl,quickLogTargetOk,quickLogDedupe,quickLogClearDedupe,applyQuickIntent,toastAction,quickCleanUrl,_drainPendingQuickLog,drawQuickSheet,quickLogHabits,QUICKLOG_DEDUPE_MS});', sb);
 const { parseQuickParams, buildQuickUrl, quickLogTargetOk, quickLogDedupe,
   quickLogClearDedupe, applyQuickIntent, toastAction, quickCleanUrl,
-  _drainPendingQuickLog, drawQuickSheet, QUICKLOG_DEDUPE_MS } = api;
+  _drainPendingQuickLog, drawQuickSheet, quickLogHabits, QUICKLOG_DEDUPE_MS } = api;
 let fails = 0;
 function assert(d, c) { if (c) console.log('[PASS] ' + d); else { console.error('[FAIL] ' + d); fails++; } }
 function reset(clear) {
@@ -246,7 +246,7 @@ function reset(clear) {
   const nasty = { id: 'h5', type: 'habit', title: "O'B<b>X & \\" };
   const saved = S.tasks;
   S.tasks = saved.concat([nasty]);
-  const sb2 = { S, document: doc, esc: escFn, buildQuickUrl, parseQuickParams,
+  const sb2 = { S, document: doc, esc: escFn, buildQuickUrl, parseQuickParams, quickLogHabits,
     location: { origin: 'https://q.example', pathname: '/opti/' } };
   vm.createContext(sb2);
   const branch = extractBranch(appSrc, /\} else if\(key==='quicklog'\)\{/);

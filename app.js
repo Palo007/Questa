@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.22-1635";
+const APP_VERSION = "v2026.09.23-1321";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -5924,6 +5924,11 @@ function openEdit(id,type){
   // locally reads to mergeChecklist as a local deletion, so it is deleted fleet-wide.
   // With this baseline, saveTask writes back only the fields the sheet changed.
   EDIT_BASE = JSON.parse(JSON.stringify(t));
+  // 2026-09-23: Enter in this sheet saves & closes (onSheetKeydown below).
+  // Wired here, not inside drawSheet(), because the test harnesses run
+  // drawSheet() in a bare Function factory that lacks that identifier --
+  // while #sheet.onkeydown survives drawSheet's innerHTML swaps.
+  document.getElementById('sheet').onkeydown = onSheetKeydown;
   const hasRem = EDIT.reminders && EDIT.reminders[0] && EDIT.reminders[0].enabled;
   EDIT._reminderEnabled = hasRem;
   if (hasRem) {
@@ -5937,6 +5942,17 @@ function openEdit(id,type){
   }
   drawSheet();
   document.getElementById('scrim').classList.add('show');
+  // 2026-09-23 (edit-title-autofocus): land focus + full selection on Title so a
+  // freshly opened sheet is typable at once -- the first keystroke replaces the
+  // old title, and a tap still drops the caret for a partial edit. Deliberately
+  // synchronous and after the scrim gets .show: iOS only raises the keyboard for
+  // focus() inside the opening gesture's stack (never for setTimeout/rAF), and a
+  // focus before .show would target a display:none subtree and be dropped.
+  const titleInput = document.getElementById('eTitle');
+  if (titleInput) {
+    titleInput.focus();
+    if (typeof titleInput.select === 'function') titleInput.select();
+  }
 }
 function drawReminderEditor(t) {
   const dayLabels = ['S','M','T','W','T','F','S'];
@@ -5983,6 +5999,48 @@ function drawReminderEditor(t) {
   return h;
 }
 
+
+// 2026-09-23 (edit-sheet-keyboard): "+ Add subtask" routes through here so
+// focus lands on the row just added. drawSheet() rebuilds #sheet with
+// innerHTML, which destroys focus -- previously the new input needed a tap
+// before typing could start.
+function addSubtask(){
+  if(!EDIT) return;
+  if(!Array.isArray(EDIT.checklist)) EDIT.checklist = [];
+  EDIT.checklist.push({id:uid(), text:'', done:false});
+  drawSheet();
+  const rows = document.querySelectorAll('#eCheck .ci input[type="text"]');
+  const last = rows[rows.length - 1];
+  if(last){
+    last.focus();
+    if(typeof last.scrollIntoView === 'function') last.scrollIntoView({block:'nearest'});
+  }
+}
+// 2026-09-23 (edit-sheet-keyboard): Enter in the task edit sheet saves &
+// closes -- saveTask() ends in closeSheet(); save(); render(). Wiring notes:
+//   - textarea: plain Enter still types a newline (Notes); Ctrl/Cmd+Enter saves.
+//   - buttons: left to native Enter->click, so Save / Cancel / Delete /
+//     "+ Add subtask" each keep their own meaning.
+//   - #eTagInput: its inline handler runs first at the target and calls
+//     preventDefault(); the defaultPrevented check honours that, so Enter
+//     there still only adds a tag.
+//   - isComposing: IME commit keystrokes must never save.
+//   - EDIT + #eTitle guard: #sheet is shared with rewards, settings and
+//     pickers; a stale listener must not saveTask() over their content.
+function onSheetKeydown(e){
+  if(!e || e.key !== 'Enter' || e.isComposing || e.defaultPrevented) return;
+  if(!EDIT || !document.getElementById('eTitle')) return;
+  const t = e.target;
+  if(!t) return;
+  const tag = (t.tagName || '').toLowerCase();
+  if(tag === 'textarea'){
+    if(e.ctrlKey || e.metaKey){ e.preventDefault(); saveTask(); }
+    return;
+  }
+  if(tag !== 'input') return;
+  e.preventDefault();
+  saveTask();
+}
 function drawSheet(){
   const t=EDIT; const dayLabels=['S','M','T','W','T','F','S'];
   const sheet=document.getElementById('sheet');
@@ -6041,7 +6099,7 @@ function drawSheet(){
         '<div class="box '+(c.done?'on':'')+'" onclick="EDIT.checklist['+i+'].done=!EDIT.checklist['+i+'].done;drawSheet()">'+(c.done?'✔':'')+'</div>'+
         '<input type="text" value="'+esc(c.text)+'" oninput="EDIT.checklist['+i+'].text=this.value">'+
         '<button class="del" onclick="EDIT.checklist.splice('+i+',1);drawSheet()">✕</button></div>').join('')+
-      '<button class="btn ghost" style="padding:8px" onclick="EDIT.checklist.push({id:uid(),text:\'\',done:false});drawSheet()">+ Add subtask</button></div>';
+      '<button class="btn ghost" style="padding:8px" onclick="addSubtask()">+ Add subtask</button></div>';
   }
   h+=drawReminderEditor(t);
   h+='<label>Notes / comments</label><textarea id="eNotes" oninput="EDIT.notes=this.value" placeholder="Notes, thoughts, log...">'+esc(t.notes)+'</textarea>';

@@ -50,6 +50,7 @@ const code = [
   extractFunction(appSrc, /^function _hlcHeal\(\)\{/, '_hlcHeal'),
   extractFunction(appSrc, /^function now\(\)\{/, 'now'),
   extractFunction(appSrc, /^function dayStamp\(d\)\{/, 'dayStamp'),
+  extractFunction(appSrc, /^function localDayDateAtOffset\(baseMs, dayOffset\)\{/, 'localDayDateAtOffset'),
   extractFunction(appSrc, /^function clamp\(v,a,b\)\{/, 'clamp'),
   extractFunction(appSrc, /^function xpToLevel\(lvl\)\{/, 'xpToLevel'),
   extractFunction(appSrc, /^function valueDelta\(value\)\{/, 'valueDelta'),
@@ -72,7 +73,7 @@ const code = [
   extractFunction(appSrc, /^function unlogToday\(t\)\{/, 'unlogToday'),
   extractFunction(appSrc, /^function uncompleteDaily\(t\)\{/, 'uncompleteDaily'),
   extractFunction(appSrc, /^function missedYesterdayDailies\(\)\{/, 'missedYesterdayDailies'),
-  'return { runCron, uncompleteDaily, missedYesterdayDailies, dayStamp, periodBoundaryCrossed };'
+  'return { runCron, uncompleteDaily, missedYesterdayDailies, dayStamp, periodBoundaryCrossed, isDailyDueOn };'
 ].join('\n');
 
 // Fixed noon so the local calendar day is unambiguous in every timezone.
@@ -267,6 +268,168 @@ console.log('--- R3: uncompleteDaily must freeze the streak while paused ---');
   fakeNow = BASE;
   api.uncompleteDaily(t);
   assertEq('R3d un-ticking while NOT paused still decrements the streak', t.streak, 2);
+}
+
+// ===========================================================================
+// T4 (morning-rollover todo 4) -- remaining local-day boundaries.
+// All cases use the fixed BASE/FakeDate fixture above; nothing here reads the
+// machine's current weekday. Product code is unchanged (characterization).
+// ===========================================================================
+console.log('--- T4: forward-once, same-day, rewind, pause-coverage, retention, due-equivalence ---');
+
+{
+  // Forward rollover resets exactly ONCE: a second runCron on the new day is a
+  // same-day no-op (no extra damage, no extra history point).
+  const done = daily('f1', { done:true, streak:4 });
+  const miss = daily('f2', { done:false, streak:6 });
+  const S = freshState({ tasks:[done, miss], lastCron: DAY_X });
+  const api = build(S);
+  fakeNow = BASE + 86400000;
+  api.runCron();
+  const hpAfterFirst = S.char.hp;
+  const missHistAfterFirst = miss.history.length;
+  assert('T4a forward run charged exactly one boundary of damage', hpAfterFirst < 50);
+  api.runCron(); // same-day re-entry: must be a no-op
+  assertEq('T4b forward resets once: second run adds no HP damage', S.char.hp, hpAfterFirst);
+  assertEq('T4c forward resets once: second run adds no history point', miss.history.length, missHistAfterFirst);
+  assertEq('T4d forward resets once: lastCron stays on the new day', S.lastCron, DAY_Xp1);
+  assertEq('T4e forward resets once: completed daily stays reset', done.done, false);
+}
+
+{
+  // Same-day re-entry preserves completions, checklist ticks, and history.
+  const t = daily('f3', { done:true, streak:3, checklist:[{id:'c1',text:'a',done:true}], history:[{date:BASE,value:1,completed:true}] });
+  const S = freshState({ tasks:[t], lastCron: DAY_X });
+  const api = build(S);
+  fakeNow = BASE;
+  api.runCron();
+  assertEq('T4f same-day re-entry preserves done', t.done, true);
+  assertEq('T4g same-day re-entry preserves the checklist tick', t.checklist[0].done, true);
+  assertEq('T4h same-day re-entry preserves history length', t.history.length, 1);
+  assertEq('T4i same-day re-entry leaves lastCron alone', S.lastCron, DAY_X);
+}
+
+{
+  // Clock rewind preserves completions AND history (no miss point stamped).
+  const t = daily('f4', { done:true, streak:12, history:[{date:BASE,value:1,completed:true}] });
+  const S = freshState({ tasks:[t], lastCron: DAY_X });
+  const api = build(S);
+  fakeNow = BASE - 86400000;
+  api.runCron();
+  assertEq('T4j rewind preserves done', t.done, true);
+  assertEq('T4k rewind preserves the streak', t.streak, 12);
+  assertEq('T4l rewind stamps no history point', t.history.length, 1);
+  assertEq('T4m rewind leaves lastCron alone', S.lastCron, DAY_X);
+}
+
+{
+  // Paused-day COVERAGE while not paused: yesterdayStamp is in pausedDays, so
+  // the boundary still advances and resets done flags, but no miss damage is
+  // charged, the streak is kept, and missedOn is not stamped.
+  const miss = daily('f5', { done:false, streak:6 });
+  const done = daily('f6', { done:true, streak:4 });
+  const S = freshState({ tasks:[miss, done], lastCron: DAY_X, prefs:{ paused:false, pausedDays:[DAY_X] } });
+  const api = build(S);
+  fakeNow = BASE + 86400000; // today X+1, yesterday X is pause-covered
+  api.runCron();
+  assertEq('T4n pause coverage suppresses miss damage', S.char.hp, 50);
+  assertEq('T4o pause coverage keeps the missed daily streak', miss.streak, 6);
+  assert('T4p pause coverage stamps no missedOn', miss.missedOn === undefined);
+  assertEq('T4q pause coverage still resets done flags', done.done, false);
+  assertEq('T4r pause coverage still advances lastCron', S.lastCron, DAY_Xp1);
+}
+
+{
+  // The modal gate mirrors the same coverage: yesterday pause-covered means no
+  // yester-check is offered even though the day boundary is still uncrossed.
+  const t = daily('f7', { done:false });
+  const S = freshState({ tasks:[t], lastCron: DAY_X, prefs:{ paused:false, pausedDays:[DAY_X] } });
+  const api = build(S);
+  fakeNow = BASE + 86400000;
+  assertEq('T4s pause coverage offers no yester-check', api.missedYesterdayDailies().length, 0);
+}
+
+{
+  // Seven-entry pausedDays retention (documented compatibility limit): the
+  // array is bounded to the NEWEST seven entries; older stamps fall off.
+  // Fixed YYYYMMDD ints -- no dependence on the machine date.
+  const seeded = [20260801,20260802,20260803,20260804,20260805,20260806,20260807,20260808];
+  const S = freshState({ tasks:[], lastCron: DAY_Xm1, prefs:{ paused:true, pausedDays:seeded.slice() } });
+  const api = build(S);
+  fakeNow = BASE; // today X (20260918) > lastCron, so the paused branch records it
+  api.runCron();
+  assertEq('T4t retention keeps exactly seven entries', S.prefs.pausedDays.length, 7);
+  assert('T4u retention evicts the oldest stamp', S.prefs.pausedDays.indexOf(20260801) < 0);
+  assert('T4v retention keeps the newest seven only (oldest survivor is 20260803)',
+    S.prefs.pausedDays[0] === 20260803);
+  assert('T4w retention records today as the newest entry',
+    S.prefs.pausedDays[S.prefs.pausedDays.length - 1] === DAY_X);
+}
+
+{
+  // Under the bound the list is stable: six seeded + today fill exactly seven.
+  const seeded = [20260801,20260802,20260803,20260804,20260805,20260806];
+  const S = freshState({ tasks:[], lastCron: DAY_Xm1, prefs:{ paused:true, pausedDays:seeded.slice() } });
+  const api = build(S);
+  fakeNow = BASE;
+  api.runCron();
+  assertEq('T4x under-bound list grows to exactly seven', S.prefs.pausedDays.length, 7);
+  assert('T4y under-bound list keeps the oldest seed', S.prefs.pausedDays.indexOf(20260801) >= 0);
+}
+
+{
+  // Due-weekday equivalence: the modal's yesterday expression
+  //   (!t.repeat || t.repeat[(dow+6)%7])
+  // must agree with isDailyDueOn(t, yesterdayDow) for every weekday, using
+  // fixed FakeDate days only. Toggling the repeat entry FOR yesterday flips
+  // the answer -- the assertion catches divergence instead of masking it.
+  const S = freshState({ tasks:[] });
+  const api = build(S);
+  const shapes = function(yDow){
+    const allTrue = [1,1,1,1,1,1,1];
+    const allFalse = [0,0,0,0,0,0,0];
+    const onlyY = [0,0,0,0,0,0,0]; onlyY[yDow] = 1;
+    const notY = [1,1,1,1,1,1,1]; notY[yDow] = 0;
+    return [
+      ['legacy-undefined', undefined],
+      ['all-due', allTrue],
+      ['none-due', allFalse],
+      ['only-yesterday', onlyY],
+      ['all-but-yesterday', notY]
+    ];
+  };
+  for (let i = 0; i < 7; i++){
+    fakeNow = BASE + i * 86400000;
+    const dow = new FakeDate().getDay();
+    const yDow = (dow + 6) % 7;
+    shapes(yDow).forEach(function(pair){
+      const name = pair[0], repeat = pair[1];
+      const t = { repeat: repeat };
+      const modalExpr = !t.repeat || !!t.repeat[yDow];
+      assertEq('T4z due-equivalence ' + name + ' on fixed day +' + i + 'd',
+        modalExpr, api.isDailyDueOn(t, yDow));
+    });
+  }
+}
+
+{
+  // End-to-end: missedYesterdayDailies offers exactly the undone dailies that
+  // were due yesterday (fixed FakeDate day; lastCron one stamp behind today).
+  const S = freshState({ tasks:[], lastCron: 0, prefs:{ paused:false, pausedDays:[] } });
+  const api = build(S);
+  fakeNow = BASE + 3 * 86400000;
+  const todayStamp = ds(fakeNow);
+  S.lastCron = todayStamp - 1; // numerically behind today: boundary uncrossed
+  const yDow = (new FakeDate().getDay() + 6) % 7;
+  const dueUndone = daily('f8', { done:false, repeat:[1,1,1,1,1,1,1] });
+  const notDueUndone = daily('f9', { done:false, repeat:[1,1,1,1,1,1,1] });
+  notDueUndone.repeat[yDow] = 0; // toggled for yesterday: NOT due yesterday
+  const dueDone = daily('f10', { done:true, repeat:[1,1,1,1,1,1,1] });
+  S.tasks = [dueUndone, notDueUndone, dueDone];
+  const missed = api.missedYesterdayDailies();
+  assertEq('T4aa yester-check offers the due-and-unticked daily', missed.indexOf(dueUndone) >= 0, true);
+  assertEq('T4ab yester-check skips the daily toggled off for yesterday', missed.indexOf(notDueUndone) >= 0, false);
+  assertEq('T4ac yester-check skips the already-ticked daily', missed.indexOf(dueDone) >= 0, false);
 }
 
 // ===========================================================================

@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.23-1321";
+const APP_VERSION = "v2026.09.24-1448";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -2009,6 +2009,14 @@ const uid = ()=> Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 // missedOn and lastCron store these LOCAL YYYYMMDD ints. Cross-device TZ diffs
 // are cosmetic mismatches only, not data loss — see tests/daystamp.test.js.
 function dayStamp(d){ return d.getFullYear()*10000 + (d.getMonth()+1)*100 + d.getDate(); }
+// localDayDateAtOffset(baseMs, dayOffset): pure LOCAL-calendar day arithmetic.
+// Returns the ms timestamp of local noon `dayOffset` days from the calendar day
+// containing baseMs. Noon-anchored so a 23h/25h DST transition day cannot shift
+// the result onto the wrong calendar date (raw baseMs minus 24h can).
+function localDayDateAtOffset(baseMs, dayOffset){
+  const b = new Date(baseMs);
+  return new Date(b.getFullYear(), b.getMonth(), b.getDate() + dayOffset, 12, 0, 0, 0).getTime();
+}
 // isoWeekKey(ts): ISO-8601 week key — year*100 + ISO week number (Mon-start).
 // Week 1 contains the first Thursday of the year (ISO 8601 definition).
 function isoWeekKey(ts){
@@ -2714,9 +2722,10 @@ function missedYesterdayDailies(){
   // runCron; (b) the live paused flag, which runCron early-returns on before any
   // damage, while pausedDays only records days cron has already processed.
   if(S.prefs && S.prefs.paused) return [];
-  if(dayStamp(new Date()) <= S.lastCron) return []; // already crossed today
-  const _yStamp=dayStamp(new Date(Date.now()-86400000)); if((S.prefs.pausedDays||[]).includes(_yStamp)) return [];
-  const dow = new Date().getDay();
+  const _now = new Date(); // single clock snapshot for this operation
+  if(dayStamp(_now) <= S.lastCron) return []; // already crossed today
+  const _yStamp=dayStamp(new Date(localDayDateAtOffset(_now.getTime(), -1))); if((S.prefs.pausedDays||[]).includes(_yStamp)) return [];
+  const dow = _now.getDay();
   return S.tasks.filter(t=>{
     if(t.type!=='daily') return false;
     const scheduledYesterday = !t.repeat || t.repeat[(dow+6)%7];
@@ -2742,13 +2751,15 @@ function creditYesterday(t){
   const _realizedDelta = t.value - _valueBefore;
   t.done = true;
   t.updatedAt = now();
-  t.doneAt = Date.now() - 86400000; // F3: backdated to match the history point below (yMs) — this IS yesterday's completion
-  t.doneDay = dayStamp(new Date(Date.now() - 86400000)); // 2026-09-18: frozen local day, see completeTask
+  const _nowMs = new Date().getTime(); // single clock snapshot for this operation
+  const _yMs = localDayDateAtOffset(_nowMs, -1); // LOCAL calendar yesterday at noon
+  t.doneAt = _yMs; // F3: backdated to match the history point below (yMs) — this IS yesterday's completion
+  t.doneDay = dayStamp(new Date(_yMs)); // 2026-09-18: frozen local day, see completeTask
   delete t.missedOn;
   t._gr = { xp:r.xp, gold:r.gold, mp:r.mp, delta:_realizedDelta };
   if(!S.prefs.paused) t.streak = (t.streak||0) + 1;
   const cl=(t.checklist||[]);
-  const yMs = Date.now() - 86400000; // backdate the point to yesterday
+  const yMs = _yMs; // backdate the point to yesterday
   t.history = t.history || [];
   const snap = cl.length ? {checklist:cl.map(c=>({text:c.text,done:true}))} : {};
   t.history.push(Object.assign({date:yMs,value:t.value,completed:true,isDue:true,
@@ -2979,7 +2990,8 @@ function _resetDailies(){
   });
 }
 function runCron(){
-  const today = dayStamp(new Date());
+  const _now = new Date(); // single clock snapshot for this operation
+  const today = dayStamp(_now);
   // 2026-09-18: ORDERING test, not equality. dayStamp ints sort, and a device's
   // local calendar day can move BACKWARDS (westward travel across a date line, a
   // user correcting a wrong clock, a pre-NTP boot clock that read ahead). With
@@ -3005,14 +3017,14 @@ function runCron(){
     // on their own boundary; the old early-return skipped the loop below and let
     // them accumulate for the whole pause window.
     S.tasks.forEach(t=>{
-      if(t.type==='habit' && periodBoundaryCrossed(t.resetFreq||'daily', _prevCron, new Date())){ t.cUp=0; t.cDown=0; t.cResetOn=today; }
+      if(t.type==='habit' && periodBoundaryCrossed(t.resetFreq||'daily', _prevCron, _now)){ t.cUp=0; t.cDown=0; t.cResetOn=today; }
     });
     _resetDailies();
     save();
     return;
   }
-  const dow = new Date().getDay();
-  const yesterdayStamp = dayStamp(new Date(Date.now() - 86400000)); // F3: device-local calendar day before today, for t.missedOn
+  const dow = _now.getDay();
+  const yesterdayStamp = dayStamp(new Date(localDayDateAtOffset(_now.getTime(), -1))); // F3: device-local calendar day before today, for t.missedOn
   const _cov=(S.prefs.pausedDays||[]).includes(yesterdayStamp);
   let totalDmg = 0;
   S.tasks.forEach(t=>{
@@ -3024,7 +3036,7 @@ function runCron(){
     // the reset side's whole post-reset count was discarded. A frozen day stamp
     // makes the reset observable per side. Still no updatedAt bump: cron is a
     // deterministic day-boundary transform, not a user edit.
-    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, new Date())){ t.cUp=0; t.cDown=0; t.cResetOn=today; } return; } // F3 (2026-07-11): cron no longer bumps updatedAt — see .omo/plans/2026-07-11-cron-merge-recency.md §3.1.4
+    if(t.type==='habit'){ if(periodBoundaryCrossed(t.resetFreq||'daily', S.lastCron, _now)){ t.cUp=0; t.cDown=0; t.cResetOn=today; } return; } // F3 (2026-07-11): cron no longer bumps updatedAt — see .omo/plans/2026-07-11-cron-merge-recency.md §3.1.4
     if(t.type!=='daily') return;
     const scheduledYesterday = isDailyDueOn(t, (dow+6)%7);  // intentional YESTERDAY test — do NOT use isDailyDueToday
     if(scheduledYesterday && !t.done && !_cov){
@@ -3035,7 +3047,7 @@ function runCron(){
       t.missedOn = yesterdayStamp; // F3 (2026-07-11): recency channel for cron-aware merge — cleared on completion/credit
       // 2026-09-18 (round 2): stamp the miss on YESTERDAY, the day it belongs to —
       // the same day t.missedOn records one line above. See logHistory's atMs note.
-      logHistory(t,{value:t.value,completed:false,isDue:true,repeat:(t.repeat||[]).slice()}, Date.now()-86400000);
+      logHistory(t,{value:t.value,completed:false,isDue:true,repeat:(t.repeat||[]).slice()}, localDayDateAtOffset(_now.getTime(), -1));
       const cl=(t.checklist||[]);
       logEvent({kind:'miss', taskType:'daily', taskId:t.id, taskTitle:t.title,
                 dmg: dmg,
@@ -8673,6 +8685,44 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     checkReminders();
   }
+});
+
+// 2026-09-24: day-change reload. The day rollover (and so the morning screen) runs
+// ONCE per page load -- _runDayRollover() is once-only by design, see its comment.
+// A TWA kept in memory overnight never reloads, so coming back to it after midnight
+// showed yesterday's board with no morning screen until the user swiped the app away.
+// Instead of re-entering startDay() in a live page (that re-entry is exactly the
+// double-run damage class the boot gate removed), reload the page: the same thing a
+// swipe-away + reopen does, but automatic. `>` not `!==`, matching runCron's rewind
+// hardening: a clock that moved BACKWARDS is not a new day. An open sheet defers the
+// reload so unsaved typing in an edit sheet is never thrown away; the next
+// foregrounding (or the refresh button) retries.
+var _loadDayStamp = dayStamp(new Date());
+function shouldReloadForNewDay(loadStamp, nowStamp, sheetOpen){
+  return nowStamp > loadStamp && !sheetOpen;
+}
+// Save, then reload. The header refresh button (reason 'button') also asks the
+// service worker to check for a new build first, capped at 3 s so a hung network
+// never blocks the reload. The shell is network-first, so the reload itself fetches
+// the newest app.js/index.html whenever the network is up.
+function reloadApp(reason){
+  if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'reload:'+reason});
+  try{ saveScroll(); save(); }catch(e){}
+  var done = false;
+  var go = function(){ if(done) return; done = true; try{ location.reload(); }catch(e){} };
+  try{
+    if(reason==='button' && typeof navigator!=='undefined' && navigator.serviceWorker && navigator.serviceWorker.getRegistration){
+      setTimeout(go, 3000);
+      navigator.serviceWorker.getRegistration().then(function(r){ return r && r.update(); }).then(go, go);
+      return;
+    }
+  }catch(e){}
+  go();
+}
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState !== 'visible') return;
+  var scrim = document.getElementById('scrim');
+  if(shouldReloadForNewDay(_loadDayStamp, dayStamp(new Date()), !!(scrim && scrim.classList.contains('show')))) reloadApp('newDay');
 });
 
 // One-time cleanup (2026-07-11, lifecycle-spam fix): purge any 'lifecycle'

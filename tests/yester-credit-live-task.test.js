@@ -36,6 +36,7 @@ const completionRewardFn = extractFunction(appSrc, /^function completionReward\(
 const gainXpFn = extractFunction(appSrc, /^function gainXp\(xp\)\{/, 'gainXp');
 const isDailyDueOnFn = extractFunction(appSrc, /^function isDailyDueOn\(t, dow\)\{/, 'isDailyDueOn');
 const dayStampFn = extractFunction(appSrc, /^function dayStamp\(d\)\{/, 'dayStamp');
+const localDayFn = extractFunction(appSrc, /^function localDayDateAtOffset\(baseMs, dayOffset\)\{/, 'localDayDateAtOffset');
 // K2 (2026-09-11): now() heals a future-poisoned HLC before stamping, so the slice
 // needs _hlcHeal and the tolerance constant it reads. Lockstep with app.js (§4).
 const nowFn = extractFunction(appSrc, /^function now\(\)\{/, 'now');
@@ -62,6 +63,7 @@ const code = [
   gainXpFn,
   isDailyDueOnFn,
   dayStampFn,
+  localDayFn,
   hlcTolLine,
   hlcHealFn,
   nowFn,
@@ -338,6 +340,138 @@ function creditedCountFromToast() {
   assert('T8d creditYesterday() returns false for a daily not due yesterday',
     creditYesterday(notDue) === false);
   assert('T8e ...and credited nothing', notDue.done === false && notDue.streak === 3);
+}
+
+// =========================================================================
+// T9-T10. ADDED 2026-09-24 (morning-rollover todo 2): pin commit ordering and
+// the sync boundary.
+//
+// commitYesterCheck() must persist BEFORE finalizing: `save()` runs before
+// `runCron()` (app.js commit tail), because a sync round landing mid-modal
+// merges lastCron up to today and runCron()'s first statement
+// (`if(today <= S.lastCron) return;`, no save) would otherwise leave every
+// credit (XP, gold, MP, value, streak, done, doneDay, history) in memory only.
+//
+// Asserted on the SERIALIZED snapshot save() persisted (observable state),
+// not on helper call counts (AGENTS.md S4): the stub captures
+// JSON.parse(JSON.stringify(...)) of live S at save time, and the ordering
+// is pinned via a shared events log (save index < runCron index).
+// =========================================================================
+function localDayStamp(d) { return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); }
+
+// Install order-recording stubs for save()/runCron(). They resolve as vm
+// globals (bare `save` / `runCron` references in commitYesterCheck), so
+// assigning them on the sandbox object takes effect for all commits below.
+// T1-T8 above already ran with the original noop/undefined pair.
+const commitOrder = [];
+let savedSnapshot = null;
+let saveCalls = 0;
+let runCronCalls = 0;
+sandbox.save = function () {
+  saveCalls++;
+  commitOrder.push('save');
+  // Serialized snapshot of LIVE state at save time -- this is the boundary
+  // the persistence-loss bug crosses (what was recorded, not that save ran).
+  savedSnapshot = JSON.parse(JSON.stringify({ tasks: S.tasks, char: S.char, lastCron: S.lastCron }));
+};
+sandbox.runCron = function () {
+  runCronCalls++;
+  commitOrder.push('runCron');
+};
+function resetCommitProbes() {
+  commitOrder.length = 0;
+  savedSnapshot = null;
+  saveCalls = 0;
+  runCronCalls = 0;
+  toasts.length = 0;
+}
+
+// ---- T9 (happy): one ticked daily -> save snapshot holds the full credit,
+// save precedes runCron, toast tells the truth ----
+{
+  resetCommitProbes();
+  S.prefs = { paused: false };
+  S.lastCron = 0;
+  S.char = freshChar();
+  const t = freshDaily('d-save-1');
+  S.tasks = [t];
+
+  const missed = missedYesterdayDailies();
+  assert('T9 setup: daily detected as missed', missed.length === 1);
+  openYesterCheck(missed);
+  toggleYesterTick('d-save-1');
+  const hpBefore = S.char.hp;
+  commitYesterCheck();
+
+  const yDay = localDayStamp(new Date(Date.now() - 86400000));
+  assert('T9 ordering: save() ran before runCron()',
+    saveCalls === 1 && runCronCalls === 1 &&
+    commitOrder.length === 2 && commitOrder[0] === 'save' && commitOrder[1] === 'runCron');
+  assert('T9 snapshot: a snapshot was persisted', !!savedSnapshot);
+  const snapT = savedSnapshot && savedSnapshot.tasks.filter(function (x) { return x.id === 'd-save-1'; })[0];
+  assert('T9 snapshot: credited daily present with done=true', !!snapT && snapT.done === true);
+  assert('T9 snapshot: streak incremented', !!snapT && snapT.streak === 4);
+  assert('T9 snapshot: doneDay frozen to yesterday', !!snapT && snapT.doneDay === yDay);
+  assert('T9 snapshot: backdated completed history point present',
+    !!snapT && Array.isArray(snapT.history) && snapT.history.some(function (h) { return h.completed === true; }));
+  // medium difficulty at value 0: d=1, m=1.5 -> xp=round(10.5)=11, gold=1.8, mp=2.
+  assert('T9 snapshot: XP persisted', !!savedSnapshot && savedSnapshot.char.xp === 11);
+  assert('T9 snapshot: gold persisted', !!savedSnapshot && savedSnapshot.char.gold === 1.8);
+  assert('T9 snapshot: MP persisted', !!savedSnapshot && savedSnapshot.char.mp === 2);
+  assert('T9 live: credit also landed on live S.tasks', t.done === true && t.streak === 4);
+  assert('T9 live: no miss damage from the commit path', S.char.hp === hpBefore && t.missedOn === undefined);
+  assert('T9 toast: truthful count of 1', creditedCountFromToast() === 1);
+}
+
+// ---- T10 (failure/shape): sync advances lastCron to today AND removes one
+// selected id mid-modal. Survivor credit must still be persisted once (save
+// still precedes the runCron no-op), the removed id skipped, no double
+// damage, toast counts the actual credit. ----
+{
+  resetCommitProbes();
+  S.prefs = { paused: false };
+  S.lastCron = 0;
+  S.char = freshChar();
+  const t1 = freshDaily('d-save-2a');
+  const t2 = freshDaily('d-save-2b');
+  S.tasks = [t1, t2];
+
+  const missed = missedYesterdayDailies();
+  assert('T10 setup: both dailies detected as missed', missed.length === 2);
+  openYesterCheck(missed);
+  toggleYesterTick('d-save-2a');
+  toggleYesterTick('d-save-2b');
+  // Sync round lands mid-modal, sync.js-shaped: deep-copied identities
+  // (JSON.parse(JSON.stringify(...))), one selected id gone, lastCron merged
+  // up to today -- so the stubbed runCron below (like the real one's
+  // `if(today <= S.lastCron) return;` guard) must be a no-op for damage.
+  const todayStamp = localDayStamp(new Date());
+  const survivorCopy = JSON.parse(JSON.stringify(t1));
+  S.tasks = [survivorCopy];
+  S.lastCron = todayStamp;
+  const hpBefore = S.char.hp;
+  commitYesterCheck();
+
+  const live = S.tasks.filter(function (x) { return x.id === 'd-save-2a'; })[0];
+  const snapT = savedSnapshot && savedSnapshot.tasks.filter(function (x) { return x.id === 'd-save-2a'; })[0];
+  assert('T10 ordering: save() still ran before runCron() even with lastCron==today',
+    saveCalls === 1 && runCronCalls === 1 &&
+    commitOrder.length === 2 && commitOrder[0] === 'save' && commitOrder[1] === 'runCron');
+  assert('T10 survivor: credited on live S.tasks', !!live && live.done === true && live.streak === 4);
+  assert('T10 survivor: credit persisted in the save snapshot (not memory-only)',
+    !!snapT && snapT.done === true && snapT.streak === 4);
+  assert('T10 survivor: snapshot carries doneDay + completed history',
+    !!snapT && typeof snapT.doneDay === 'number' &&
+    Array.isArray(snapT.history) && snapT.history.some(function (h) { return h.completed === true; }));
+  assert('T10 survivor: snapshot carries the XP/gold/MP rewards',
+    !!savedSnapshot && savedSnapshot.char.xp > 0 &&
+    savedSnapshot.char.gold > 0 && savedSnapshot.char.mp > 0);
+  assert('T10 removed: vanished selection skipped, never re-created',
+    S.tasks.filter(function (x) { return x.id === 'd-save-2b'; }).length === 0 &&
+    (!savedSnapshot || savedSnapshot.tasks.filter(function (x) { return x.id === 'd-save-2b'; }).length === 0));
+  assert('T10 no double damage: HP untouched, no miss stamp, streak kept',
+    S.char.hp === hpBefore && !!live && live.missedOn === undefined && live.streak === 4);
+  assert('T10 toast: counts 1 actual credit, not 2 ticks', creditedCountFromToast() === 1);
 }
 
 // Summary

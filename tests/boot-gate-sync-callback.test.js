@@ -94,6 +94,7 @@ function makeAppSide() {
     extractFunction(appSrc, /^function shouldDeferDayRollover\(/, 'shouldDeferDayRollover'),
     extractLine(appSrc, /^function isDailyDueOn\(/, 'isDailyDueOn'),
     extractLine(appSrc, /^function isDailyDueToday\(/, 'isDailyDueToday'),
+    extractFunction(appSrc, /^function localDayDateAtOffset\(baseMs, dayOffset\)\{/, 'localDayDateAtOffset'),
     extractFunction(appSrc, /^function missedYesterdayDailies\(\)\{/, 'missedYesterdayDailies'),
     extractFunction(appSrc, /^function _resetDailies\(\)\{/, '_resetDailies'),
     extractFunction(appSrc, /^function runCron\(\)\{/, 'runCron'),

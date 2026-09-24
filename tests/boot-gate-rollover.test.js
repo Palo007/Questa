@@ -66,6 +66,7 @@ const P = {
   missed:        grab(() => extractFunction(appSrc, /^function missedYesterdayDailies\(\)\{/, 'missedYesterdayDailies'), 'missedYesterdayDailies'),
   dueOn:         grab(() => extractLine(appSrc, /^function isDailyDueOn\(/, 'isDailyDueOn'), 'isDailyDueOn'),
   dueToday:      grab(() => extractLine(appSrc, /^function isDailyDueToday\(/, 'isDailyDueToday'), 'isDailyDueToday'),
+  localDay:      grab(() => extractFunction(appSrc, /^function localDayDateAtOffset\(baseMs, dayOffset\)\{/, 'localDayDateAtOffset'), 'localDayDateAtOffset'),
 };
 
 if (Object.keys(P).some(k => P[k] === null)) {
@@ -138,7 +139,7 @@ function boot(opts) {
   let code = [
     P.pendingDecl, P.timeoutConst, P.bootState, P.blocksInput, P.banner,
     P.cfgForBoot, P.shouldDefer, P.dueOn, P.dueToday,
-    P.missed, P.resetDailies, P.runCron, P.startDay,
+    P.localDay, P.missed, P.resetDailies, P.runCron, P.startDay,
     P.runner, P.firstRound, P.bootStartDay,
   ].join('\n');
   if (opts.cfgThrows) {
@@ -250,7 +251,7 @@ function boot(opts) {
   };
   sb.window = sb; sb.globalThis = sb;
   vm.createContext(sb);
-  vm.runInContext([P.dueOn, P.dueToday, P.missed, P.resetDailies,
+  vm.runInContext([P.dueOn, P.dueToday, P.localDay, P.missed, P.resetDailies,
     'this._missedAfterReset=function(){ _resetDailies(); return missedYesterdayDailies().length; };',
     'this._missedBeforeReset=function(){ return missedYesterdayDailies().length; };'].join('\n'), sb);
   assert('C4h direction proof: missed list is 0 with direction C\'s ordering (read first)',

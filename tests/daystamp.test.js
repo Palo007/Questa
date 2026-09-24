@@ -331,6 +331,73 @@ function daily(id, opts){
 })();
 
 // =========================================================================
+// D1-D6 (morning-rollover todo 4) -- frozen-day boundary characterization at
+// the merge layer. Fixed local-noon dates only: no Date.now(), no machine
+// weekday. Complements tests/cron-day-rewind.test.js T4a-T4ac, which pin the
+// same boundaries against the live runCron.
+// =========================================================================
+function localNoon(y, m, d){ return new Date(y, m - 1, d, 12, 0, 0).getTime(); }
+
+// D-forward: a completion frozen to an earlier day resets once the merged
+// timeline moves past it; the frozen doneDay (not a re-derived doneAt) decides.
+(function(){
+  var t = daily('d10', { done:true, doneDay: 20260711, doneAt: localNoon(2026,7,11), updatedAt:500 });
+  var r = Q.normalizeDailyResets([t], 20260712);
+  assertEq('D-forward: done daily with frozen doneDay < lastCron resets', r[0].done, false);
+})();
+
+// D-sameday: a completion frozen to the current merged day is kept.
+(function(){
+  var t = daily('d11', { done:true, doneDay: 20260712, doneAt: localNoon(2026,7,12), updatedAt:500 });
+  var r = Q.normalizeDailyResets([t], 20260712);
+  assertEq('D-sameday: done daily with frozen doneDay == lastCron is kept', r[0].done, true);
+})();
+
+// D-rewind: the merged lastCron is a max -- a behind-side rewind never moves
+// the merged timeline backwards.
+(function(){
+  var base = subset([daily('d12', { done:false, doneAt:0, missedOn:0, updatedAt:500 })]);
+  var local = subset([daily('d12', { done:false, doneAt:0, missedOn:0, updatedAt:500 })]);
+  local.lastCron = 20260712;
+  var remote = subset([daily('d12', { done:false, doneAt:0, missedOn:0, updatedAt:500 })]);
+  remote.lastCron = 20260710; // behind: a rewound clock on that side
+  var m = Q.merge(base, local, remote, localNoon(2026,7,12), localNoon(2026,7,12));
+  assertEq('D-rewind: merged lastCron stays at the max (20260712)', m.lastCron, 20260712);
+})();
+
+// D-pause: the frozen completion day survives even when doneAt re-derives to
+// an older day -- the pause/miss path must compare frozen days, not raw ms.
+(function(){
+  var frozen = daily('d13', { done:true, doneDay: 20260712, doneAt: localNoon(2026,7,10), missedOn:0, updatedAt:500 });
+  assertEq('D-pause: dailyEventDay prefers the frozen doneDay over doneAt', Q.dailyEventDay(frozen), 20260712);
+  var missedLater = daily('d14', { done:false, doneAt:0, missedOn:20260713, updatedAt:500 });
+  assertEq('D-pause: dailyEventDay takes the max of done/missed days', Q.dailyEventDay(missedLater), 20260713);
+})();
+
+// D-retention: the seven-entry pausedDays bound is a documented compatibility
+// limit owned by app.js runCron (pinned behaviorally by cron-day-rewind T4t).
+// Characterization here: the bound exists in source as slice(-7) and is not
+// silently expanded.
+(function(){
+  var appSrc = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
+  var line = appSrc.split('\n').find(function(l){ return l.indexOf('pausedDays') >= 0 && l.indexOf('slice(-') >= 0; });
+  assert('D-retention: pausedDays retention line exists in app.js', !!line);
+  assert('D-retention: newest-seven bound is slice(-7), not expanded', !!line && line.indexOf('slice(-7)') >= 0);
+})();
+
+// D-equivalence: frozen-day ordering agrees between resolveDailyConflict and
+// normalizeDailyResets -- a completion frozen to yesterday beats a miss
+// stamped to the day before, and the kept record is still current.
+(function(){
+  var l = daily('d15', { done:true, doneDay: 20260711, doneAt: localNoon(2026,7,11), missedOn:0, updatedAt:500 });
+  var r = daily('d15', { done:false, doneAt:0, missedOn:20260710, updatedAt:500 });
+  var w = Q.resolveDailyConflict(l, r);
+  assertEq('D-equivalence: frozen completion day beats the older miss', w.done, true);
+  var kept = Q.normalizeDailyResets([w], 20260711);
+  assertEq('D-equivalence: the winning completion is still current at its own day', kept[0].done, true);
+})();
+
+// =========================================================================
 // runCron gap documentation (C12 pattern from convergence.test.js)
 // =========================================================================
 // runCron (app.js:1403) depends on DOM: document.getElementById for toast,

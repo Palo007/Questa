@@ -74,6 +74,7 @@ const setPauseFn = extractFunction(appSrc, /^function setPause\(n\)\{/, 'setPaus
 const ensureUiPrefsFn = extractFunction(appSrc, /^function ensureUiPrefs\(\)\{/, 'ensureUiPrefs');
 const saveFn = extractFunction(appSrc, /^function save\(\)\{/, 'save');
 const dayStampFn = extractFunction(appSrc, /^function dayStamp\(d\)\{/, 'dayStamp');
+const localDayFn = extractFunction(appSrc, /^function localDayDateAtOffset\(baseMs, dayOffset\)\{/, 'localDayDateAtOffset');
 const clampFn = extractFunction(appSrc, /^function clamp\(v,a,b\)\{/, 'clamp');
 const valueDeltaFn = extractFunction(appSrc, /^function valueDelta\(value\)\{/, 'valueDelta');
 const missDamageFn = extractFunction(appSrc, /^function missDamage\(task\)\{/, 'missDamage');
@@ -110,6 +111,7 @@ const code = [
   ensureUiPrefsFn,
   saveFn,
   dayStampFn,
+  localDayFn,
   clampFn,
   valueDeltaFn,
   missDamageFn,

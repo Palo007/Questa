@@ -494,6 +494,185 @@ async function dbxDelete(path, _retriedAuth, _freshTok){
   return true;
 }
 
+// android-inbox-step1 (D2): atomic move. true = this device moved it; false = the
+// source was already gone (another device won the claim, or our own earlier move
+// succeeded and only its response was lost -- the crash-recovery listing of our
+// claimed dir picks that case up). Any other failure throws.
+async function dbxMove(from, to, autorename, _retriedAuth, _freshTok){
+  const tok = _freshTok || await syncToken(); // item 11: see dbxDownload
+  const res = await fetch("https://api.dropboxapi.com/2/files/move_v2", {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + tok, "Content-Type": "application/json" },
+    body: JSON.stringify({ from_path: from, to_path: to, autorename: !!autorename })
+  });
+  if(res.status === 401 && !_retriedAuth){
+    return dbxMove(from, to, autorename, true, await syncToken(true));
+  }
+  if(res.status === 409){
+    let summary = "";
+    try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
+    if(summary.indexOf("from_lookup/not_found") !== -1) return false;
+    throw new HttpError("move failed: 409 " + summary.slice(0, 200), 409);
+  }
+  if(!res.ok){
+    let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
+    throw new HttpError("move failed: " + res.status + (detail ? " " + detail : ""), res.status, _retryAfterMs(res));
+  }
+  return true;
+}
+
+// ---- Android inbox (android-inbox-step1, Phase 1A) --------------------------
+// The Android shell cannot reach this page's storage, so a headless phone log is
+// one small immutable file /inbox/<uuid>.json. Any Questa device consumes it:
+//   claim   -- move_v2 into /inbox-claimed/<deviceId>/ (only one device can win)
+//   apply   -- applyInboxLog (app.js) as a normal tap, event uid "inbox-<id>"
+//   finish  -- delete the claimed file ONLY after the state upload holding it succeeded
+// Idempotency lives in the events store (evtHasUid), never in S: no new S fields
+// and no export codes (D6, export token hash trap). A claimed file that is not
+// finished is simply re-processed next round; the uid check turns that into a
+// finish-only pass, so a retry or a crash can never double count.
+const INBOX_DIR = "/inbox";
+const INBOX_CLAIMED_ROOT = "/inbox-claimed";
+const INBOX_REJECTED_DIR = "/inbox-rejected";
+const INBOX_META_PATH = "/inbox-meta/habits.json";
+const INBOX_MIN_INTERVAL_MS = 60000; // two list_folder calls at most once/min, like the events pull
+var _inboxLastRunAt = 0;
+var _inboxAppliedIds = new Set(); // this session: covers the gap before logEvent's IDB write commits
+
+function _inboxDiag(kind, data){
+  if(typeof _qDiagPush === "function"){ try{ _qDiagPush(kind, data || {}); }catch(e){} }
+}
+
+function inboxParseRecord(text, fileName){
+  let o = null;
+  try{ o = JSON.parse(text); }catch(e){ return null; }
+  if(!o || typeof o !== "object" || o.v !== 1) return null;
+  if(typeof o.id !== "string" || !/^[A-Za-z0-9-]{8,64}$/.test(o.id)) return null;
+  if(fileName !== o.id + ".json") return null;
+  if(o.kind !== "habit") return null;
+  if(typeof o.habitId !== "string" || !o.habitId) return null;
+  if(o.dir !== 1 && o.dir !== -1) return null;
+  if(typeof o.ts !== "number" || !isFinite(o.ts) || o.ts <= 0) return null;
+  return { v: 1, id: o.id, kind: "habit", habitId: o.habitId, dir: o.dir, ts: o.ts,
+           tzOffsetMin: (typeof o.tzOffsetMin === "number" && isFinite(o.tzOffsetMin)) ? o.tzOffsetMin : null,
+           src: (typeof o.src === "string" && o.src) ? o.src.slice(0, 40) : "android-shortcut" };
+}
+
+async function _inboxReject(item, reason){
+  try{
+    await dbxMove(item.path, INBOX_REJECTED_DIR + "/" + item.name, true);
+    _inboxDiag("inboxRejected", { name: item.name, reason: reason });
+  }catch(e){
+    _inboxDiag("inboxRejectFailed", { name: item.name, reason: reason, error: (e && e.message) || String(e) });
+  }
+}
+
+// Returns the claimed paths that are safe to delete once this round's upload
+// succeeds. Runs after the pull and BEFORE syncSubset(), so every apply is part of
+// `local` and rides in this round's upload. `remoteState` is only read, to tell
+// "habit not merged here yet" (defer) from "habit does not exist" (reject).
+async function syncInboxConsume(remoteState){
+  if(typeof applyInboxLog !== "function" || typeof evtHasUid !== "function") return [];
+  // During the first sync after boot the day rollover (cron) has not run yet; a
+  // counter bumped now would be reset by it. startDay's save() schedules the next
+  // sync ~5 s after the gate opens, and that round takes the inbox.
+  if(typeof bootGateBlocksInput === "function" && bootGateBlocksInput()){
+    _inboxDiag("inboxSkip", { reason: "bootGate" });
+    return [];
+  }
+  const nowMs = Date.now();
+  if(nowMs - _inboxLastRunAt < INBOX_MIN_INTERVAL_MS) return [];
+  _inboxLastRunAt = nowMs;
+
+  const claimedDir = INBOX_CLAIMED_ROOT + "/" + syncDeviceId();
+  const isJson = function(e){ return e && typeof e.name === "string" && /\.json$/i.test(e.name); };
+  // 1. crash recovery: anything this device claimed but never finished
+  const work = (await dbxListFolder(claimedDir)).filter(isJson)
+    .map(function(e){ return { name: e.name, path: claimedDir + "/" + e.name }; });
+  const seen = new Set(work.map(function(w){ return w.name; }));
+  // 2. claim new files
+  const incoming = (await dbxListFolder(INBOX_DIR)).filter(isJson);
+  for(const e of incoming){
+    if(seen.has(e.name)) continue;
+    const to = claimedDir + "/" + e.name;
+    let won = false;
+    try{ won = await dbxMove(INBOX_DIR + "/" + e.name, to, false); }
+    catch(err){ _inboxDiag("inboxClaimFailed", { name: e.name, error: (err && err.message) || String(err) }); continue; }
+    if(!won){ _inboxDiag("inboxClaimLost", { name: e.name }); continue; }
+    work.push({ name: e.name, path: to }); seen.add(e.name);
+  }
+  if(!work.length) return [];
+
+  const remoteHabits = new Set(((remoteState && remoteState.tasks) || [])
+    .filter(function(t){ return t && t.type === "habit"; }).map(function(t){ return t.id; }));
+  const done = [];
+  // 3. process, one file at a time
+  for(const w of work){
+    let raw = null;
+    try{ raw = await dbxDownloadRaw(w.path); }
+    catch(err){ _inboxDiag("inboxReadFailed", { name: w.name, error: (err && err.message) || String(err) }); continue; }
+    if(!raw) continue; // vanished between list and download
+    const rec = inboxParseRecord(raw.text, w.name);
+    if(!rec){ await _inboxReject(w, "badRecord"); continue; }
+    let dup = _inboxAppliedIds.has(rec.id);
+    if(!dup){
+      // A failed lookup is NOT "absent": keep the claim and try again next round.
+      try{ dup = await evtHasUid("inbox-" + rec.id); }
+      catch(err){ _inboxDiag("inboxDefer", { name: w.name, reason: "uidCheckFailed" }); continue; }
+    }
+    if(dup){ done.push(w.path); _inboxDiag("inboxDup", { name: w.name }); continue; }
+    const tasks = (typeof S !== "undefined" && S && Array.isArray(S.tasks)) ? S.tasks : [];
+    if(!tasks.some(function(t){ return t && t.id === rec.habitId; })){
+      if(remoteHabits.has(rec.habitId)){ _inboxDiag("inboxDefer", { name: w.name, reason: "habitNotMergedYet" }); continue; }
+      await _inboxReject(w, "unknownHabit");
+      continue;
+    }
+    let res = "error";
+    try{ res = applyInboxLog(rec, Date.now()); }catch(err){ res = "error"; }
+    if(res === "applied" || res === "eventOnly"){
+      _inboxAppliedIds.add(rec.id);
+      // The event carries the real tap ts, which can sit below this device's event
+      // upload watermark; evtUploadable would then skip it until the 24 h full
+      // re-push. Lowering the watermark only makes the next push rebuild that
+      // month's own file -- the same thing the full re-push does. Never raised here.
+      const c = syncCfg();
+      if((Number(c.evtLastUploadTs) || 0) > rec.ts - 1) syncCfgSave({ evtLastUploadTs: rec.ts - 1 });
+      done.push(w.path);
+      _inboxDiag("inboxApplied", { name: w.name, result: res });
+    } else if(res === "unknown"){
+      await _inboxReject(w, "unknownHabit");
+    } else {
+      _inboxDiag("inboxDefer", { name: w.name, reason: res });
+    }
+  }
+  return done;
+}
+
+async function syncInboxFinish(paths){
+  for(const p of (paths || [])){
+    try{ await dbxDelete(p); _inboxDiag("inboxFinished", { path: p }); }
+    catch(e){ _inboxDiag("inboxFinishFailed", { path: p, error: (e && e.message) || String(e) }); }
+  }
+}
+
+// D5: the habit list the Android shell reads for its shortcuts. The phone never
+// parses /state.json (tokenized schema 2). Uploaded only when the list changed.
+function _inboxHash(s){
+  let h = 0x811c9dc5;
+  for(let i = 0; i < s.length; i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(16) + ":" + s.length;
+}
+async function syncInboxWriteMeta(){
+  if(typeof S === "undefined" || !S || !Array.isArray(S.tasks)) return false;
+  const habits = S.tasks.filter(function(t){ return t && t.type === "habit" && t.id; })
+    .map(function(t){ return { id: String(t.id), title: String(t.title || ""), quickLog: !!t.quickLog }; });
+  const hash = _inboxHash(JSON.stringify(habits));
+  if(syncCfg().inboxMetaHash === hash) return false;
+  await dbxUploadText(INBOX_META_PATH, JSON.stringify({ v: 1, updatedAt: Date.now(), habits: habits }));
+  syncCfgSave({ inboxMetaHash: hash });
+  return true;
+}
+
 // 2026-09-19 (round 3, item 12): disconnect used to be purely local. It wiped
 // the tokens out of this browser and left the refresh token valid at Dropbox
 // forever, so "Disconnect" never actually ended the app's access to the
@@ -2156,6 +2335,9 @@ function syncNow(){
         // connectivity problem hit both.
         if(!syncCfg().lastError && typeof syncMaybeAutoExport==="function") syncMaybeAutoExport();
         if(!syncCfg().lastError && typeof syncEventsSync==="function") syncEventsSync();
+        if(!syncCfg().lastError){
+          syncInboxWriteMeta().catch(function(e){ _inboxDiag("inboxMetaFailed", { error: (e && e.message) || String(e) }); });
+        }
         if(typeof syncRefreshSettingsUI==="function") syncRefreshSettingsUI();
         if(_syncRerunQueued){
           _syncRerunQueued = false;
@@ -2202,6 +2384,12 @@ async function _syncNowAttempt(transientRetryCount){
   try{
     const remote = await dbxDownload(STATE_PATH);
     if(remote && remote.state && typeof ratchetHlc==='function'){ ratchetHlc(_maxOrderingTs(remote.state)); }
+    // android-inbox-step1: apply phone logs NOW -- after the ratchet, before
+    // localSavedAt and syncSubset() are read -- so they are part of `local` and ride
+    // in this round's upload. The claimed files are deleted only after that upload.
+    let _inboxDone = [];
+    try{ _inboxDone = await syncInboxConsume(remote && remote.state); }
+    catch(e){ _inboxDone = []; _inboxDiag("inboxConsumeFailed", { error: (e && e.message) || String(e) }); }
     const _baseResult = await syncBaseGet();
     let base = _baseResult ? _baseResult.base : null;
     const _storedRev = _baseResult ? _baseResult.lastRev : null;
@@ -2242,10 +2430,13 @@ async function _syncNowAttempt(transientRetryCount){
       const baseOk = await syncBasePut(mergedJson, _noopRev);
       syncCfgSave({ lastSyncAt: Date.now(), lastRev: _noopRev,
                     lastError: baseOk ? null : "base snapshot write failed — sync degraded" });
+      // Remote already equals what we hold, so every consumed log is in it.
+      await syncInboxFinish(_inboxDone);
       return;
     }
 
-    await _pushWithConflictRetry(mergedJson, remote ? remote.rev : null, 0);
+    const _pushed = await _pushWithConflictRetry(mergedJson, remote ? remote.rev : null, 0);
+    if(_pushed) await syncInboxFinish(_inboxDone);
   }catch(e){
     if(e && e.status && (e.status === 429 || e.status >= 500) && transientRetryCount < SYNC_TRANSIENT_RETRY_DELAYS_MS.length){
       // 2026-09-19 (round 3, item 9): obey Retry-After when the server sends
@@ -2279,6 +2470,7 @@ async function _pushWithConflictRetry(mergedJson, knownRev, attempt){
     const baseOk = await syncBasePut(mergedJson, up.rev || null);
     syncCfgSave({ lastRev: up.rev || null, lastSyncAt: Date.now(),
                   lastError: baseOk ? null : "base snapshot write failed — sync degraded" });
+    return true; // android-inbox-step1: the caller finishes inbox claims only on true
   }catch(e){
     if(e instanceof ConflictError && attempt < SYNC_CONFLICT_RETRY_LIMIT){
       const fresh = await dbxDownload(STATE_PATH);
@@ -2307,7 +2499,7 @@ async function _pushWithConflictRetry(mergedJson, knownRev, attempt){
       // Schedule a delayed retry so applied-but-unpushed state is bounded
       // in time instead of silent until next user action / visibility event.
       setTimeout(function(){ syncNow(); }, SYNC_CONFLICT_BACKOFF_MS);
-      return;
+      return false;
     }
     throw e;
   }

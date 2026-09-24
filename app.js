@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.24-1448";
+const APP_VERSION = "v2026.09.24-1515";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -1029,6 +1029,20 @@ function logEvent(ev){
     }catch(e){ _logEventDiag('logEventSync', {kind:rec.kind, taskId:rec.taskId, msg:String((e&&e.message)||e)}); }
   }
   idbOpen().then(db=>attempt(db, false)).catch(()=>{ /* IDB unavailable (e.g. private mode) — silently skip logging */ });
+}
+// android-inbox-step1 (D3): does the events store already hold a record with this
+// uid? The inbox consumer (sync.js syncInboxConsume) asks this before applying a
+// phone log, so a retry or a crash-recovery pass never credits the same tap twice.
+// REJECTS on any IDB failure on purpose: "unknown" must never read as "absent",
+// because absent means "apply it", and a wrong apply is a double count.
+function evtHasUid(uid){
+  return idbOpen().then(db=>new Promise((resolve, reject)=>{
+    try{
+      const req = db.transaction(EVENTS_STORE, "readonly").objectStore(EVENTS_STORE).index("uid").count(uid);
+      req.onsuccess = ()=>resolve((req.result||0) > 0);
+      req.onerror = ()=>reject(req.error || new Error("evtHasUid failed"));
+    }catch(e){ reject(e); }
+  }));
 }
 /* BEGIN_EVENTS_HELPERS */
 // Async read API: resolve to events in [from,to] (ms, inclusive) optionally
@@ -2541,11 +2555,48 @@ function applyQuickIntent(intent, opts){
     return null;
   }catch(e){ return null; }
 }
+// android-inbox-step1 (D3/D4): apply one phone log from the Dropbox inbox. Called by
+// sync.js syncInboxConsume after the pull and BEFORE syncSubset(), so the change
+// rides in this round's upload exactly like a tap made just before sync. The caller
+// has already ruled out duplicates (evtHasUid) and the boot gate; both are checked
+// again here because a wrong apply is a double count.
+// D4: only a tap from TODAY (local calendar) moves counters/XP. Habits have no
+// "yesterday" path (creditYesterday is dailies-only), so an older tap is recorded
+// as a history event only -- never credited to today.
+// Returns 'applied' | 'eventOnly' | 'unknown' | 'gated' | 'error'.
+function applyInboxLog(rec, nowMs){
+  try{
+    if(!rec) return 'unknown';
+    var tNow=(typeof nowMs==='number'&&nowMs>0)?nowMs:Date.now();
+    var dir=(rec.dir===-1)?-1:(rec.dir===1?1:0);
+    var t=null;
+    try{ t=(typeof S!=='undefined' && S && S.tasks)?S.tasks.find(function(x){ return x&&x.id===rec.habitId; }):null; }catch(e){ t=null; }
+    if(!quickLogTargetOk(t, dir)) return 'unknown';
+    var gated=false;
+    try{ gated=(typeof bootGateBlocksInput==='function')?!!bootGateBlocksInput():false; }catch(e){ gated=true; }
+    if(gated) return 'gated';
+    var evt={uid:'inbox-'+rec.id, ts:rec.ts, src:rec.src||'android-shortcut'};
+    if(localDayKey(rec.ts)===localDayKey(tNow)){
+      var before=(t.cUp||0)+(t.cDown||0);
+      scoreHabit(t.id, dir, null, {evt:evt, atMs:rec.ts});
+      if(((t.cUp||0)+(t.cDown||0))<=before) return 'error';
+      try{ toast((dir>0?'+1 · ':'−1 · ')+(t.title||'habit')+' (phone)'); }catch(e){}
+      return 'applied';
+    }
+    logEvent(Object.assign({kind:'habitTap', dir:dir, taskId:t.id, taskTitle:t.title, late:true, scored:false}, evt));
+    try{ toast('Late log saved to history · '+(t.title||'habit')); }catch(e){}
+    return 'eventOnly';
+  }catch(e){ return 'error'; }
+}
 /* END_QUICKLOG_HELPERS */
-function scoreHabit(id, dir, ev){
+// meta (optional, android-inbox-step1): {evt, atMs}. evt is merged into every event
+// this tap logs (the inbox passes its uid + real tap ts); atMs backdates the history
+// point. Every existing caller passes 3 args and is unchanged.
+function scoreHabit(id, dir, ev, meta){
   if(bootGateBlocksInput()){ toast('Syncing…'); return; } // D3 todo 11: MUST stay the first statement
   if(_suppressHabitClick===id){ _suppressHabitClick=null; return; }  // ignore the click fired right after a long-press
   const t=S.tasks.find(x=>x.id===id); if(!t)return;
+  const _mEvt=(meta&&meta.evt)||null, _mAt=(meta&&meta.atMs)||undefined;
   if(t.difficulty==='log'){
     // Log habit: a pure tally. NO xp/gold/mp/hp, and value/color never changes.
     // Any tap (+ or −) increments the period counter; a non-zero counter is what
@@ -2556,12 +2607,12 @@ function scoreHabit(id, dir, ev){
     const _rpt = t.repsPerTap || repsPerTap(t.title);
     if(dir>0){
       t.cUp=(t.cUp||0)+1;
-      logHistory(t,{value:t.value,reps:_rpt,repCounted:true,scored:false});
-      logEvent({kind:'habitTap', dir:1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value, log:true});
+      logHistory(t,{value:t.value,reps:_rpt,repCounted:true,scored:false},_mAt);
+      logEvent(Object.assign({kind:'habitTap', dir:1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value, log:true}, _mEvt));
     } else {
       t.cDown=(t.cDown||0)+1;
-      logHistory(t,{value:t.value,reps:_rpt,repCounted:true,scored:false});
-      logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value, log:true});
+      logHistory(t,{value:t.value,reps:_rpt,repCounted:true,scored:false},_mAt);
+      logEvent(Object.assign({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value, log:true}, _mEvt));
     }
     buzz(50); floatFx('logged','pos',ev);
     t.updatedAt=now();
@@ -2574,15 +2625,15 @@ function scoreHabit(id, dir, ev){
     t.value=clamp(t.value+valueDelta(t.value),-47.27,99);
     t.cUp=(t.cUp||0)+1;
     const _rpt = t.repsPerTap || repsPerTap(t.title);
-    logHistory(t,{value:t.value,scoredUp:1,reps:_rpt,repCounted:true,scored:true});
-    logEvent({kind:'habitTap', dir:1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value});
+    logHistory(t,{value:t.value,scoredUp:1,reps:_rpt,repCounted:true,scored:true},_mAt);
+    logEvent(Object.assign({kind:'habitTap', dir:1, taskId:t.id, taskTitle:t.title, reps:_rpt, value:t.value}, _mEvt));
     bumpAvatar(); buzz(50); floatFx(fxGain(r.xp,r.gold),'pos',ev);
   } else {
     const dmg=missDamage(t);
     t.value=clamp(t.value-valueDelta(t.value),-47.27,99);
     t.cDown=(t.cDown||0)+1;
-    logHistory(t,{value:t.value,scoredDown:1});
-    logEvent({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, value:t.value, dmg:dmg});
+    logHistory(t,{value:t.value,scoredDown:1},_mAt);
+    logEvent(Object.assign({kind:'habitTap', dir:-1, taskId:t.id, taskTitle:t.title, value:t.value, dmg:dmg}, _mEvt));
     takeDamage(dmg); buzz(100); floatFx('-'+dmg.toFixed(1)+' HP','neg',ev);
   }
   t.updatedAt=now();

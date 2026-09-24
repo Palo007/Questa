@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.24-1700";
+const APP_VERSION = "v2026.09.24-1717";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -2374,6 +2374,20 @@ function parseTabParam(search){
     if(!tab) return null;
     return (typeof TABS!=='undefined' && TABS && TABS.indexOf(String(tab))!==-1) ? String(tab) : null;
   }catch(e){ return null; }
+}
+// Per-habit Android shortcut setting. quickLog was a plain tick (true = +1) before
+// 2026-09-24; 'down' and 'both' were added then. Anything else truthy counts as +1.
+function quickLogMode(t){
+  var q=t&&t.quickLog;
+  if(!q) return 'off';
+  return (q==='down'||q==='both')?q:'up';
+}
+// Directions the Android app gets a long-press item for, limited to the habit's own buttons.
+function quickLogDirs(t){
+  var m=quickLogMode(t), out=[];
+  if((m==='up'||m==='both') && t.up!==false) out.push(1);
+  if((m==='down'||m==='both') && t.down!==false) out.push(-1);
+  return out;
 }
 function quickLogTargetOk(t, dir){
   if(!t || t.type!=='habit') return false;
@@ -5959,9 +5973,13 @@ function drawSheet(){
         '<button onclick="adjustCount(-1,-1)">−</button>'+
         '<button onclick="adjustCount(1,-1)">+</button></div></div>'+
       '<div class="small" style="margin-top:6px">Adjusting the + count also adds/removes its XP &amp; gold.</div>';
-    h+='<div style="display:flex;align-items:center;gap:8px;margin-top:8px">'+
-      '<input type="checkbox" id="eQuickLog" ' + (t.quickLog?'checked':'') + ' onclick="EDIT.quickLog=this.checked;drawSheet()" style="width:auto;margin:0;cursor:pointer">'+
-      '<label for="eQuickLog" style="margin:0;cursor:pointer;font-weight:normal">Android shortcut — show this habit in the Android app long-press menu</label></div>';
+    // Android long-press items (quickLog: false | true = +1 | 'down' = −1 | 'both'); see quickLogDirs()
+    var _qlv=quickLogMode(t);
+    h+='<label>Android shortcut</label><div class="seg" id="eQuickLog">'+
+      [['off','Off','false'],['up','+1','true'],['down','−1','\'down\''],['both','+1 and −1','\'both\'']].map(function(o){
+        return '<button class="'+(_qlv===o[0]?'on':'')+'" data-ql="'+o[0]+'" onclick="EDIT.quickLog='+o[2]+';drawSheet()">'+o[1]+'</button>';
+      }).join('')+'</div>'+
+      '<div class="small" style="margin-top:6px">Long-press items in the Android app. Only the buttons this habit has are used. The menu shows about 3 items.</div>';
   }
   if(t.type==='daily'){
     // 2026-09-18 (round 2): `t.repeat[i]` threw on a daily with no repeat array, and

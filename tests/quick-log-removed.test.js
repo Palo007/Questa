@@ -43,7 +43,7 @@ assert('R4e empty search -> null', sb.parseTabParam('') === null);
 assert('R5a boot calls parseTabParam(location.search)', /parseTabParam\(location\.search\)/.test(src));
 assert('R5b quickLogTargetOk kept (applyInboxLog uses it)', /^function quickLogTargetOk\(t, dir\)\{/m.test(src));
 assert('R5c applyInboxLog kept', /^function applyInboxLog\(rec, nowMs\)\{/m.test(src));
-assert('R5d habit edit sheet keeps the quickLog tick (Android shortcuts)', /id="eQuickLog"/.test(src) && /EDIT\.quickLog=this\.checked/.test(src));
+assert('R5d habit edit sheet keeps the quickLog setting (Android shortcuts)', /id="eQuickLog"/.test(src) && /EDIT\.quickLog=/.test(src));
 
 if (fails) { console.error('quick-log-removed: ' + fails + ' assertion(s) failed'); process.exit(1); }
 console.log('All quick-log-removed tests passed!');

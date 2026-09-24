@@ -12,6 +12,11 @@ const fs = require('fs'), path = require('path'), vm = require('vm');
 let src = fs.readFileSync(path.join(__dirname, '../sync.js'), 'utf8');
 src = src.replace(/\/\* BEGIN_BOOT_GATE \*\/[\s\S]*?\/\* END_BOOT_GATE \*\//, '/* boot gate stripped for test */');
 
+const { extractFunction } = require('./_extract.js');
+const appSrc = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
+const appHelpers = extractFunction(appSrc, /^function quickLogMode\(t\)\{/, 'quickLogMode') + ';\n'
+  + extractFunction(appSrc, /^function quickLogDirs\(t\)\{/, 'quickLogDirs');
+
 let failures = 0;
 function assert(desc, cond) { if (cond) console.log('[PASS] ' + desc); else { console.error('[FAIL] ' + desc); failures++; } }
 async function attempt(desc, fn) {
@@ -27,7 +32,7 @@ function makeCtx() {
 
   const S = {
     tasks: [
-      { id: 'h1', type: 'habit', title: 'Water', quickLog: true },
+      { id: 'h1', type: 'habit', title: 'Water', quickLog: 'both' },   // 2026-09-24: +1 and −1 items
       { id: 'h2', type: 'habit', title: 'Stretch', quickLog: false },
       { id: 'd1', type: 'daily', title: 'Standup' },   // non-habit: must be ignored
       { id: 't1', type: 'todo', title: 'Buy milk' },    // non-habit: must be ignored
@@ -62,6 +67,8 @@ function makeCtx() {
   sandbox.self = sandbox.window; sandbox.globalThis = sandbox;
 
   vm.createContext(sandbox);
+  // Real quickLogMode/quickLogDirs from app.js (sync.js calls them for `dirs`).
+  vm.runInContext(appHelpers, sandbox);
   try { vm.runInContext(src, sandbox); }
   catch (e) { console.error('FAIL: sync.js eval threw:', e); process.exit(1); }
   // Harness: seed a connected cfg, and install the base mocks AFTER sync.js ran --
@@ -101,6 +108,9 @@ attempt('meta-1: first call uploads once with habit-only payload', async () => {
     body && body.habits && body.habits.every(h => 'id' in h && 'title' in h && 'quickLog' in h)
     && body.habits.some(h => h.id === 'h1' && h.quickLog === true)
     && body.habits.some(h => h.id === 'h2' && h.quickLog === false));
+  assert('meta-1: dirs lists the Android items per habit (both -> [1,-1], off -> [])',
+    body && body.habits && JSON.stringify(body.habits.find(h => h.id === 'h1').dirs) === '[1,-1]'
+    && JSON.stringify(body.habits.find(h => h.id === 'h2').dirs) === '[]');
   firstUploadedHabits = body && body.habits;
 }).then(() => {
 

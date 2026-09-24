@@ -46,7 +46,7 @@ Two are read by name and must stay in step with `app.js`:
   that stops a conflict retry re-adding a peer's taps. The counter twin of
   `char.abs`. Same deal as `cResetOn`: nothing to compute, but it must ride along
   intact. A row that loses its `cAbs` reverts to double-counting on the next 409.
-- **`quickLog`** (2026-09-22) — boolean flag on habit rows (picks the Android long-press shortcuts via inbox-meta habits.json since the web quick log was removed 2026-09-24); rides along with the newest row like every unlisted field; no join_exports.py rule needed (tasks merge by id/updatedAt, equal-ts field-merge is generic).
+- **`quickLog`** (2026-09-22) — flag on habit rows: false | true (+1) | 'down' | 'both' since 2026-09-24 (picks the Android long-press shortcuts via inbox-meta habits.json since the web quick log was removed 2026-09-24); rides along with the newest row like every unlisted field; no join_exports.py rule needed (tasks merge by id/updatedAt, equal-ts field-merge is generic).
 
 ## Usage
 

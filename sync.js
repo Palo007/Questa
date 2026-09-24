@@ -665,7 +665,7 @@ function _inboxHash(s){
 async function syncInboxWriteMeta(){
   if(typeof S === "undefined" || !S || !Array.isArray(S.tasks)) return false;
   const habits = S.tasks.filter(function(t){ return t && t.type === "habit" && t.id; })
-    .map(function(t){ return { id: String(t.id), title: String(t.title || ""), quickLog: !!t.quickLog }; });
+    .map(function(t){ const dirs = (typeof quickLogDirs === "function") ? quickLogDirs(t) : (t.quickLog ? [1] : []); return { id: String(t.id), title: String(t.title || ""), quickLog: dirs.length > 0, dirs: dirs }; });
   const hash = _inboxHash(JSON.stringify(habits));
   if(syncCfg().inboxMetaHash === hash) return false;
   await dbxUploadText(INBOX_META_PATH, JSON.stringify({ v: 1, updatedAt: Date.now(), habits: habits }));

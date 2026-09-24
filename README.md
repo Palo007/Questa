@@ -105,7 +105,9 @@ node tests/run.js
 
 No framework, no dependencies. The suite is the deploy gate — never ship it red.
 Design notes for the sync engine, backup format, event log and diagnostics
-bundle are in [`docs/`](./docs/).
+bundle are in [`docs/`](./docs/). Questa also ships as a sideloaded Android
+app — see [`docs/ANDROID-APP.md`](./docs/ANDROID-APP.md) for the PWA side of
+that contract.
 
 ---
 

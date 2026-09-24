@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.24-1752";
+const APP_VERSION = "v2026.09.24-1753";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -2149,10 +2149,11 @@ function getReminderNotificationPayload(t, r, missed) {
 // app must not also fire, or the user gets two notifications for the same slot.
 // Flag lives in sessionStorage, NOT localStorage: localStorage is shared with
 // plain desktop/mobile Chrome on the same profile and would wrongly mute
-// reminders there too. Detected once at boot from document.referrer, which the
-// TWA sets to "android-app://io.github.palo007.twa" (see boot code below).
-function isAndroidTwa(){
-  try{ return sessionStorage.getItem('questa.twa') === '1'; }catch(e){ return false; }
+// reminders there too. Set once at boot when the Android launcher's start URL
+// carries ?nr=1, meaning native alarms are ready (see parseNativeRemindersParam
+// and the boot code near the ?tab= deep-link handler).
+function nativeRemindersActive(){
+  try{ return sessionStorage.getItem('questa.nativeReminders') === '1'; }catch(e){ return false; }
 }
 let _schedulerInterval = null;
 function startReminderScheduler() {
@@ -2162,20 +2163,30 @@ function startReminderScheduler() {
 }
 
 function checkReminders() {
-  if (isAndroidTwa()) return; // native AlarmManager owns reminders on Android
   if (!S.prefs || !S.prefs.notificationsEnabled) return;
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
-  
+  const nativeActive = nativeRemindersActive(); // native AlarmManager already covers missed slots
+
   const now = new Date();
   let tasksChanged = false;
-  
+
   S.tasks.forEach(t => {
     if (!t.reminders) return;
     t.reminders.forEach(r => {
       const due = isReminderDue(t, r, now);
-      // A slot that passed while the app was closed still fires, once, marked late.
-      const missed = !due && isReminderMissed(t, r, now);
-      if (!due && !missed) return;
+      // A slot that passed while the app was closed still fires, once, marked late --
+      // unless native AlarmManager already fired it while the page was closed.
+      const wouldBeMissed = !due && isReminderMissed(t, r, now);
+      const missed = wouldBeMissed && !nativeActive;
+      if (!due && !missed) {
+        // Native handled this missed slot already; still mark it handled so the
+        // next minute's check doesn't keep re-evaluating the same stale slot.
+        if (wouldBeMissed && nativeActive) {
+          r.lastFiredKey = reminderFireKey(r, now);
+          tasksChanged = true;
+        }
+        return;
+      }
 
       const payload = getReminderNotificationPayload(t, r, missed);
       if (navigator.serviceWorker && navigator.serviceWorker.controller) {
@@ -2385,6 +2396,19 @@ function parseTabParam(search){
     if(!tab) return null;
     return (typeof TABS!=='undefined' && TABS && TABS.indexOf(String(tab))!==-1) ? String(tab) : null;
   }catch(e){ return null; }
+}
+// The Android launcher appends ?nr=1 to the start URL only when native alarms
+// are ready. Strips just that param so other deep-link params (?tab=, ?code=)
+// survive for the handlers that read location.search afterward.
+function parseNativeRemindersParam(search){
+  try{
+    var q=(typeof search==='string')?search:'';
+    var sp=new URLSearchParams(q.charAt(0)==='?'?q.slice(1):q);
+    var active = sp.get('nr')==='1';
+    if(active) sp.delete('nr');
+    var cleaned = sp.toString();
+    return { active: active, cleanedSearch: cleaned ? ('?'+cleaned) : '' };
+  }catch(e){ return { active:false, cleanedSearch:(typeof search==='string')?search:'' }; }
 }
 // Per-habit Android shortcut setting. quickLog was a plain tick (true = +1) before
 // 2026-09-24; 'down' and 'both' were added then. Anything else truthy counts as +1.
@@ -8553,9 +8577,18 @@ if(LOAD_FAILED){
     try{ toast('Saved data could not be read. The original is kept in this browser as "' + LOAD_FAILED.key + '". Restore a backup before adding anything.'); }catch(e){}
   }, 600);
 }
-// Phase 1C todo 16: mark this session as running inside the Android TWA so
-// checkReminders() defers to native AlarmManager instead of double-firing.
-try{ if(typeof document!=='undefined' && document.referrer && document.referrer.indexOf('android-app://io.github.palo007.twa')===0){ sessionStorage.setItem('questa.twa','1'); } }catch(e){}
+// mark this session as having native AlarmManager reminders ready, from the
+// ?nr=1 query param the Android launcher appends to the start URL; strip only
+// that param so ?tab=/?code= survive for the handlers below.
+try{
+  if(typeof location!=='undefined' && location && typeof location.search==='string'){
+    var _nr=parseNativeRemindersParam(location.search);
+    if(_nr.active){
+      try{ sessionStorage.setItem('questa.nativeReminders','1'); }catch(e){}
+      try{ history.replaceState(null,'', location.pathname + _nr.cleanedSearch + location.hash); }catch(e){}
+    }
+  }
+}catch(e){}
 bootStartDay(); // D3 todo 13: gates only the day-rollover decision, never the paint
 try{ if(typeof location!=='undefined' && location && typeof location.search==='string'){ var _tab=parseTabParam(location.search); if(_tab){ TAB=_tab; try{ history.replaceState(null,'','./'); }catch(e){} render(); } } }catch(e){} // ?tab= deep link from the web-manifest shortcuts
 updateHeaderHeightVar();

@@ -5,10 +5,12 @@
 // schedule to /inbox-meta/reminders.json, mirroring syncInboxWriteMeta's
 // hash/upload-only-on-change pattern (see tests/inbox-meta.test.js).
 //
-// Part B: checkReminders() in app.js must fire nothing when this session is
-// flagged as running inside the Android TWA (isAndroidTwa()), and must still
-// fire normally without that flag -- native AlarmManager owns reminders on
-// Android once Phase 1C ships (todo 16).
+// Part B: checkReminders() in app.js must still fire DUE reminders when this
+// session is flagged as having native alarms ready (nativeRemindersActive()),
+// but must skip firing MISSED ones (native AlarmManager already covered them
+// while the page was closed) -- and must fire both due and missed without the
+// flag. Also covers parseNativeRemindersParam(), the pure helper that reads the
+// Android launcher's ?nr=1 boot param.
 //
 // Run: node tests/inbox-reminders.test.js
 
@@ -155,23 +157,28 @@ attempt('rem-1: first call uploads once to /inbox-meta/reminders.json', async ()
 })).then(() => {
 
   // =========================================================================
-  // Part B: checkReminders() defers to native AlarmManager on the Android TWA.
+  // Part B: checkReminders() -- due always fires; missed only fires without
+  // native alarms; native flag comes from ?nr=1 via parseNativeRemindersParam.
   // =========================================================================
 
   const reminderHelpers = appSrc.match(/\/\* BEGIN_REMINDER_HELPERS \*\/([\s\S]*?)\/\* END_REMINDER_HELPERS \*\//)[0];
-  const isAndroidTwaSrc = extractFunction(appSrc, /^function isAndroidTwa\(\)\{/, 'isAndroidTwa');
+  const nativeRemindersActiveSrc = extractFunction(appSrc, /^function nativeRemindersActive\(\)\{/, 'nativeRemindersActive');
   const checkRemindersSrc = extractFunction(appSrc, /^function checkReminders\(\) \{/, 'checkReminders');
+  const parseNativeRemindersParamSrc = extractFunction(appSrc, /^function parseNativeRemindersParam\(search\)\{/, 'parseNativeRemindersParam');
 
-  function makeAppCtx(twaFlag) {
+  function makeAppCtx(nativeFlag) {
     const sessionStore = {};
-    if (twaFlag) sessionStore['questa.twa'] = '1';
+    if (nativeFlag) sessionStore['questa.nativeReminders'] = '1';
     const notifications = [];
     let saved = 0;
 
-    // Every-day weekly reminder at 09:00, so the fixed "now" below matches
-    // regardless of which real weekday this test happens to run on.
-    const habit = { id: 'h1', type: 'habit', title: 'Water',
+    // Every-day weekly reminders, so the fixed "now" below matches regardless
+    // of which real weekday this test happens to run on. h1 is due exactly at
+    // "now" (09:00); h2's slot (08:00) already passed, i.e. missed.
+    const dueHabit = { id: 'h1', type: 'habit', title: 'Water',
       reminders: [{ id: 'r1', enabled: true, kind: 'weekly', time: '09:00', days: [true, true, true, true, true, true, true], lastFiredKey: '' }] };
+    const missedHabit = { id: 'h2', type: 'habit', title: 'Stretch',
+      reminders: [{ id: 'r2', enabled: true, kind: 'weekly', time: '08:00', days: [true, true, true, true, true, true, true], lastFiredKey: '' }] };
 
     // A fixed "now" local to this sandbox only -- it must not leak into the
     // real global Date used by the rest of the suite (a vm.createContext
@@ -192,22 +199,41 @@ attempt('rem-1: first call uploads once to /inbox-meta/reminders.json', async ()
       },
       Notification: Object.assign(function (title, opts) { notifications.push({ title: title, body: opts && opts.body }); }, { permission: 'granted' }),
       navigator: {},
-      S: { prefs: { notificationsEnabled: true }, tasks: [habit] },
+      S: { prefs: { notificationsEnabled: true }, tasks: [dueHabit, missedHabit] },
       save: function () { saved++; },
       console
     };
     vm.createContext(sandbox);
-    vm.runInContext(reminderHelpers + '\n' + isAndroidTwaSrc + '\n' + checkRemindersSrc, sandbox);
-    return { sandbox, notifications, saved: () => saved };
+    vm.runInContext(reminderHelpers + '\n' + nativeRemindersActiveSrc + '\n' + checkRemindersSrc, sandbox);
+    return { sandbox, notifications, saved: () => saved, dueHabit, missedHabit };
   }
 
-  const twa = makeAppCtx(true);
-  twa.sandbox.checkReminders();
-  assert('twa-1: checkReminders fires nothing when the TWA flag is set', twa.notifications.length === 0);
+  const native = makeAppCtx(true);
+  native.sandbox.checkReminders();
+  assert('nr-1: with native alarms active, due still fires', native.notifications.length === 1 && native.notifications[0].title === 'Water');
+  assert('nr-2: missed slot is marked handled even though it did not fire', native.missedHabit.reminders[0].lastFiredKey !== '');
 
   const plain = makeAppCtx(false);
   plain.sandbox.checkReminders();
-  assert('twa-2: checkReminders still fires without the TWA flag', plain.notifications.length === 1);
+  assert('nr-3: without native alarms, due and missed both fire', plain.notifications.length === 2);
+
+  // ---- parseNativeRemindersParam() ----
+  const sandbox2 = { URLSearchParams };
+  vm.createContext(sandbox2);
+  vm.runInContext(parseNativeRemindersParamSrc, sandbox2);
+
+  const r1 = sandbox2.parseNativeRemindersParam('?nr=1&tab=habits');
+  assert('nr-4: nr=1 with other params -> active true', r1.active === true);
+  assert('nr-4: only nr is stripped, tab survives', r1.cleanedSearch === '?tab=habits');
+
+  const r2 = sandbox2.parseNativeRemindersParam('?nr=1');
+  assert('nr-5: nr=1 alone -> cleanedSearch is empty', r2.active === true && r2.cleanedSearch === '');
+
+  const r3 = sandbox2.parseNativeRemindersParam('?tab=dailies');
+  assert('nr-6: no nr param -> inactive, other params untouched', r3.active === false && r3.cleanedSearch === '?tab=dailies');
+
+  const r4 = sandbox2.parseNativeRemindersParam('');
+  assert('nr-7: empty search -> inactive, no crash', r4.active === false && r4.cleanedSearch === '');
 
   console.log(failures ? ('\nFAILED: ' + failures + ' assertion(s)') : '\nALL PASSED');
   process.exit(failures ? 1 : 0);

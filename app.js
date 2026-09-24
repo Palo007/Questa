@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.24-1753";
+const APP_VERSION = "v2026.09.24-1915";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -2165,7 +2165,10 @@ function startReminderScheduler() {
 function checkReminders() {
   if (!S.prefs || !S.prefs.notificationsEnabled) return;
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
-  const nativeActive = nativeRemindersActive(); // native AlarmManager already covers missed slots
+  // 2026-09-24: even with native alarms active, fire due AND missed here. The phone's
+  // copy of the schedule can be stale (a reminder made minutes ago), so muting the web
+  // lost reminders. The Android DelegationService drops a web copy of a slot that the
+  // native alarm already showed, so there is no duplicate.
 
   const now = new Date();
   let tasksChanged = false;
@@ -2174,17 +2177,9 @@ function checkReminders() {
     if (!t.reminders) return;
     t.reminders.forEach(r => {
       const due = isReminderDue(t, r, now);
-      // A slot that passed while the app was closed still fires, once, marked late --
-      // unless native AlarmManager already fired it while the page was closed.
-      const wouldBeMissed = !due && isReminderMissed(t, r, now);
-      const missed = wouldBeMissed && !nativeActive;
+      // A slot that passed while the app was closed still fires, once, marked late.
+      const missed = !due && isReminderMissed(t, r, now);
       if (!due && !missed) {
-        // Native handled this missed slot already; still mark it handled so the
-        // next minute's check doesn't keep re-evaluating the same stale slot.
-        if (wouldBeMissed && nativeActive) {
-          r.lastFiredKey = reminderFireKey(r, now);
-          tasksChanged = true;
-        }
         return;
       }
 

@@ -210,8 +210,10 @@ attempt('rem-1: first call uploads once to /inbox-meta/reminders.json', async ()
 
   const native = makeAppCtx(true);
   native.sandbox.checkReminders();
-  assert('nr-1: with native alarms active, due still fires', native.notifications.length === 1 && native.notifications[0].title === 'Water');
-  assert('nr-2: missed slot is marked handled even though it did not fire', native.missedHabit.reminders[0].lastFiredKey !== '');
+  // 2026-09-24: the phone's schedule can be stale, so the web fires both; the
+  // Android DelegationService drops a slot the native alarm already showed.
+  assert('nr-1: with native alarms active, due and missed both still fire', native.notifications.length === 2);
+  assert('nr-2: missed slot is marked fired', native.missedHabit.reminders[0].lastFiredKey !== '');
 
   const plain = makeAppCtx(false);
   plain.sandbox.checkReminders();

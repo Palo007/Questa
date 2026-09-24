@@ -1,14 +1,18 @@
 // boot-gate-rollover-matrix.test.js -- morning-rollover todo 3: the complete
-// boot/sync trigger matrix with quick-log drain coverage.
+// boot/sync trigger matrix.
+//
+// The web quick-log deep-link feature (and its drain step in
+// _runDayRollover()) was removed from app.js on 2026-09-24; the Android app
+// now logs via the Dropbox inbox instead, so this file no longer covers a
+// drain step.
 //
 // Covers configured/unconfigured boot x fast sync, failed/throwing sync,
 // non-thenable return, and a reconcile promise that never settles. Asserts
 // first paint is synchronous, the app 8-second fallback and sync 2-second
-// callback can both fire, _runDayRollover() runs at most once,
-// _dayRolloverDone latches, _bootRolloverPending/bootSyncing always clear,
-// and _drainPendingQuickLog() runs after startDay() exactly once. Structural
-// assertions pin that every boot branch reaches _runDayRollover() and no boot
-// branch calls startDay() directly.
+// callback can both fire, _runDayRollover() runs at most once, and
+// _dayRolloverDone latches, _bootRolloverPending/bootSyncing always clear.
+// Structural assertions pin that every boot branch reaches _runDayRollover()
+// and no boot branch calls startDay() directly.
 //
 // Method: real app.js functions via tests/_extract.js anchors (no line-range
 // grabs); sync.js's 2-second timer body is replicated verbatim (fire +
@@ -44,8 +48,6 @@ const P = {
   timeoutConst:  grab(() => extractLine(appSrc, /^var BOOT_ROLLOVER_TIMEOUT_MS\s*=/, 'BOOT_ROLLOVER_TIMEOUT_MS'), 'BOOT_ROLLOVER_TIMEOUT_MS'),
   bootState:     grab(() => extractLine(appSrc, /^var _bootRolloverT0\s*=/, '_bootRolloverT0/_dayRolloverDone'), '_bootRolloverT0 declaration'),
   pendingDecl:   grab(() => extractLine(appSrc, /^var _bootRolloverPending\s*=/, '_bootRolloverPending'), '_bootRolloverPending'),
-  quickPendDecl: grab(() => extractLine(appSrc, /^var _pendingQuickLog\s*=/, '_pendingQuickLog'), '_pendingQuickLog'),
-  drainFn:       grab(() => extractFunction(appSrc, /^function _drainPendingQuickLog\(\)\{/, '_drainPendingQuickLog'), '_drainPendingQuickLog'),
   blocksInput:   grab(() => extractFunction(appSrc, /^function bootGateBlocksInput\(\)\{/, 'bootGateBlocksInput'), 'bootGateBlocksInput'),
   banner:        grab(() => extractFunction(appSrc, /^function _bootGateBanner\(\)\{/, '_bootGateBanner'), '_bootGateBanner'),
   cfgForBoot:    grab(() => extractFunction(appSrc, /^function _syncConfiguredForBoot\(\)\{/, '_syncConfiguredForBoot'), '_syncConfiguredForBoot'),
@@ -95,8 +97,6 @@ function bootEnv(opts) {
   const timers = [];
   let yesterOpened = 0;
   let startDayCount = 0;
-  let drainCount = 0;
-  const scoreCalls = [];
   let reconcileCalls = 0;
   let reconcileResolve = null;
   const reconMode = opts.reconcile || 'resolve';
@@ -127,7 +127,6 @@ function bootEnv(opts) {
     clamp: (v, a, b) => Math.max(a, Math.min(b, v)),
     periodBoundaryCrossed: () => false,
     _yesterTick: {}, _yesterMissed: [],
-    applyQuickIntent: (p) => { scoreCalls.push(p); order.push('score'); return true; },
     render: () => {
       order.push('paint');
       view.innerHTML = sb._banner() + '<div class="task">card</div>';
@@ -155,34 +154,29 @@ function bootEnv(opts) {
   // boot-gate tests), so alias them here before contextifying.
   sb.__order = order;
   sb.__sc = { n: 0 };
-  sb.__dc = { n: 0 };
   vm.createContext(sb);
 
   const code = [
-    P.pendingDecl, P.timeoutConst, P.bootState, P.quickPendDecl, P.drainFn,
+    P.pendingDecl, P.timeoutConst, P.bootState,
     P.blocksInput, P.banner, P.cfgForBoot, P.shouldDefer, P.dueOn, P.dueToday,
     P.localDay, P.missed, P.resetDailies, P.runCron, P.startDay, P.runner, P.firstRound, P.bootStartDay,
   ].join('\n');
   vm.runInContext(code, sb);
-  // Wrap by-name callees so the once-only runner's calls land in __order and
-  // the counters, while still executing the real extracted bodies.
+  // Wrap by-name callee so the once-only runner's calls land in __order and
+  // the counter, while still executing the real extracted body.
   vm.runInContext([
     'var _origStartDayFn = startDay;',
     'startDay = function(){ __sc.n++; __order.push("startDay"); return _origStartDayFn(); };',
-    'var _origDrainFn = _drainPendingQuickLog;',
-    '_drainPendingQuickLog = function(){ __dc.n++; var r = _origDrainFn(); __order.push("drain"); return r; };',
   ].join('\n'), sb);
-  // (Necessary note: wrappers must live in-context because _runDayRollover
-  // resolves startDay/_drainPendingQuickLog by sandbox-global name at call
-  // time; an outer closure cannot intercept that lookup.)
+  // (Necessary note: the wrapper must live in-context because _runDayRollover
+  // resolves startDay by sandbox-global name at call time; an outer closure
+  // cannot intercept that lookup.)
   vm.runInContext([
     'this._pending=function(){ return _bootRolloverPending; };',
     'this._blocks=bootGateBlocksInput; this._banner=_bootGateBanner;',
     'this._bootStartDay=bootStartDay; this._firstRound=onQuestaFirstSyncRound;',
     'this._runner=_runDayRollover;',
     'this._done=function(){ return _dayRolloverDone; };',
-    'this._stashQuick=function(){ _pendingQuickLog = { kind: "habit", id: "h1", dir: 1 }; };',
-    'this._manualDrain=function(){ return _drainPendingQuickLog(); };',
   ].join('\n'), sb);
 
   sb._bootStartDay();
@@ -208,8 +202,7 @@ function bootEnv(opts) {
     fireAppTimer: () => { appTimers().forEach(t => t.fn()); },
     yesterOpened: () => yesterOpened,
     startDayCount: () => sb.__sc.n,
-    drainCount: () => sb.__dc.n,
-    scoreCalls, reconcileCalls: () => reconcileCalls,
+    reconcileCalls: () => reconcileCalls,
     resolveReconcile: () => { if (reconcileResolve) reconcileResolve(); },
   };
 }
@@ -235,8 +228,6 @@ function gateClear(env) {
     await env.fireSyncCallback(); await tick(); // callback-first
     assert('H1 configured: callback-first lastCron advanced once', env.S.lastCron === TODAY);
     assert('H1 configured: paint precedes rollover', env.order.indexOf('paint') < env.order.indexOf('startDay'));
-    assert('H1 configured: drain ran after startDay exactly once',
-      env.drainCount() === 1 && env.order.indexOf('startDay') < env.order.indexOf('drain'));
     assert('H1 configured: runner once (startDay x1)', env.startDayCount() === 1);
     assert('H1 configured: done latched + gate clear', env.sb._done() === true && gateClear(env));
     assert('H1 configured: streak preserved, no miss event',
@@ -275,7 +266,7 @@ function gateClear(env) {
     assert('F1 hung reconcile: gate still open (lastCron yesterday)', env.S.lastCron === YESTERDAY && env.sb._pending() === true);
     env.fireAppTimer(); await tick();
     assert('F1 hung reconcile: 8s fallback releases the gate', env.S.lastCron === TODAY && gateClear(env));
-    assert('F1 hung reconcile: runner once, drain once', env.startDayCount() === 1 && env.drainCount() === 1);
+    assert('F1 hung reconcile: runner once', env.startDayCount() === 1);
     env.S.lastCron = YESTERDAY;
     env.sb._firstRound(); await tick(); // late sync callback after fallback
     assert('F1 hung reconcile: late callback is a no-op', env.S.lastCron === YESTERDAY && env.startDayCount() === 1);
@@ -317,24 +308,7 @@ function gateClear(env) {
     await env.fireSyncCallback(); await tick();
     assert('I1 triple-fire: lastCron advanced by first trigger only', env.S.lastCron === TODAY);
     assert('I1 triple-fire: startDay ran at most once', env.startDayCount() === 1);
-    assert('I1 triple-fire: drain ran at most once', env.drainCount() === 1);
     assert('I1 triple-fire: done latched + gate clear', env.sb._done() === true && gateClear(env));
-  }
-  // -- Drain-once: stashed quick-log scores once, no duplicate ------------------
-  {
-    const env = bootEnv({ configured: true, syncNowImpl: () => Promise.resolve() });
-    env.sb._stashQuick(); // deep-link arrives while the gate holds
-    assert('D1 drain: nothing scored while gate pending', env.scoreCalls.length === 0);
-    env.scheduleSyncTimer();
-    await env.fireSyncCallback(); await tick();
-    assert('D1 drain: stashed intent scored exactly once after startDay', env.scoreCalls.length === 1);
-    assert('D1 drain: drain after startDay in order log',
-      env.order.indexOf('startDay') !== -1 && env.order.indexOf('startDay') < env.order.indexOf('drain'));
-    const again = env.sb._manualDrain();
-    assert('D1 drain: second manual drain is a no-op (null, no duplicate score)',
-      again === null && env.scoreCalls.length === 1);
-    assert('D1 drain: drain wrapper ran but applied once (no duplicate quick-log score)',
-      env.drainCount() === 2 && env.scoreCalls.length === 1);
   }
   // -- Structural: every boot branch reaches the runner; none calls startDay ----
   {
@@ -349,8 +323,8 @@ function gateClear(env) {
       /reconcileDurableState\(\)\.then\(_runDayRollover,\s*_runDayRollover\)/.test(bs));
     assert('S1 final unconditional fallback exists', /\n\s*_runDayRollover\(\);\s*\n\}/.test(P.bootStartDay));
     assert('S1 no boot branch calls startDay() directly', !/(?<![A-Za-z_$])startDay\(\)/.test(bs));
-    assert('S1 runner calls startDay() before the guarded quick-log drain',
-      rn.indexOf('startDay()') !== -1 && rn.indexOf('startDay()') < rn.indexOf('_drainPendingQuickLog'));
+    assert('S1 runner has no quick-log drain (web quick log removed 2026-09-24)',
+      rn.indexOf('_drainPendingQuickLog') === -1 && rn.indexOf('startDay()') !== -1);
     assert('S1 production timeout unchanged (8000)',
       /^var BOOT_ROLLOVER_TIMEOUT_MS\s*=\s*8000\s*;/.test(strip(P.timeoutConst).trim()));
     assert('S1 predicate signature keeps three args',

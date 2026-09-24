@@ -12,8 +12,7 @@
 //      startDay() call; _runDayRollover contains exactly one)
 //   A2 commitYesterCheck() contains save() before runCron() (ordered index
 //      check on comment-stripped body)
-//   A3 _runDayRollover() calls startDay() before the guarded quick-log drain
-//      (ordered index check; drain is typeof-guarded + try/caught)
+//   A3 _runDayRollover() calls startDay(); the quick-log drain is gone
 //   A4 render() still exposes the gate banner (_bootGateBanner() in the single
 //      v.innerHTML assignment) and the body bootSyncing class toggle
 //   H1 index.html contains the body.bootSyncing .task CSS hook
@@ -118,19 +117,14 @@ if (Object.keys(P).some(k => P[k] === null)) {
     saveIdx !== -1 && cronIdx !== -1 && saveIdx < cronIdx);
 }
 
-// ============ A3: runner startDay() before guarded quick-log drain ============
+// ============ A3: runner calls startDay(); no quick-log drain ============
+// 2026-09-24: the web quick log (and its stash/drain) was removed. A3b-e used to
+// assert the drain ran after startDay(); now A3b asserts it is gone for good.
 {
   const body = stripComments(P.runner);
   const startIdx = body.search(/(?<![A-Za-z_$])startDay\(\)/);
-  const drainIdx = body.search(/_drainPendingQuickLog/);
   assert('A3a _runDayRollover() calls startDay()', startIdx !== -1);
-  assert('A3b _runDayRollover() drains the stashed quick-log', drainIdx !== -1);
-  assert('A3c drain runs AFTER startDay() (deep-link log applies on post-rollover state)',
-    startIdx !== -1 && drainIdx !== -1 && startIdx < drainIdx);
-  assert('A3d drain is typeof-guarded so a missing quick-log build never breaks boot',
-    /typeof\s+_drainPendingQuickLog\s*===\s*["']function["']/.test(P.runner));
-  assert('A3e drain is try/caught (a throwing drain never blocks the gate release)',
-    /try\s*\{\s*if\s*\(\s*typeof\s+_drainPendingQuickLog/.test(P.runner));
+  assert('A3b _runDayRollover() has no quick-log drain (feature removed)', !/_drainPendingQuickLog/.test(P.runner));
 }
 
 // ============ A4: render() gate banner + body class ============

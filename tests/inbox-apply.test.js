@@ -4,7 +4,7 @@
 //
 // applyInboxLog does not exist in app.js yet (it belongs inside the
 // BEGIN_QUICKLOG_HELPERS/END_QUICKLOG_HELPERS block, which currently ends at
-// quickLogDedupe/friends -- see app.js:2383-2450ish). scoreHabit(id,dir,ev)
+// quickLogDedupe/friends -- the web quick log, removed 2026-09-24). scoreHabit(id,dir,ev)
 // is still 3-arg. This file is expected to FAIL every applyInboxLog-shaped
 // case below, for that reason -- not a syntax/setup error. The lone
 // regression-guard case (3-arg scoreHabit emits no uid override) exercises

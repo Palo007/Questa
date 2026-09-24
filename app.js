@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.24-1515";
+const APP_VERSION = "v2026.09.24-1700";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -2363,197 +2363,22 @@ function uncompleteTodo(t){
   save(); render();
 }
 /* BEGIN_QUICKLOG_HELPERS */
-function parseQuickParams(search){
+// ?tab=<name> deep link (web-manifest Habits/Dailies shortcuts). Returns the tab or null.
+// A Dropbox OAuth return (?code=) is never a tab link.
+function parseTabParam(search){
   try{
-    var q='';
-    if(typeof search==='string'){ q=search; }
-    else if(typeof location!=='undefined' && location && typeof location.search==='string'){ q=location.search; }
-    var sp=null;
-    try{ sp=new URLSearchParams(q.charAt(0)==='?'?q.slice(1):q); }catch(e){ return null; }
+    var q=(typeof search==='string')?search:'';
+    var sp=new URLSearchParams(q.charAt(0)==='?'?q.slice(1):q);
     if(sp.get('code')) return null;
-    var quick=sp.get('quick');
-    var dirRaw=(sp.get('dir')||'').toLowerCase();
-    var dir=(dirRaw==='-1'||dirRaw==='down'||dirRaw==='-')?-1:1;
-    var tabRaw=sp.get('tab');
-    if(quick!==null && quick!==undefined && String(quick)!==''){
-      if(String(quick).toLowerCase()==='today') return {kind:'sheet', id:null, dir:1, tab:null};
-      return {kind:'habit', id:String(quick), dir:dir, tab:null};
-    }
-    if(tabRaw!==null && tabRaw!==undefined && String(tabRaw)!==''){
-      var tab=String(tabRaw);
-      var ok=false;
-      try{ ok=(typeof TABS!=='undefined' && TABS && typeof TABS.indexOf==='function') ? TABS.indexOf(tab)!==-1 : false; }catch(e){ ok=false; }
-      if(!ok) return null;
-      return {kind:'tab', id:null, dir:1, tab:tab};
-    }
-    return null;
+    var tab=sp.get('tab');
+    if(!tab) return null;
+    return (typeof TABS!=='undefined' && TABS && TABS.indexOf(String(tab))!==-1) ? String(tab) : null;
   }catch(e){ return null; }
-}
-function buildQuickUrl(base, id, dir){
-  var b=String(base||'');
-  if(!id || String(id).toLowerCase()==='today') return b+'?quick=today';
-  return b+'?quick='+encodeURIComponent(String(id))+'&dir='+((dir||0)<0?-1:1);
 }
 function quickLogTargetOk(t, dir){
   if(!t || t.type!=='habit') return false;
   if(dir!==1 && dir!==-1) return false;
   return true;
-}
-var QUICKLOG_DEDUPE_MS=3000;
-function _quickDedupeKey(id, dir){ return 'quicklog:'+String(id)+':'+String(dir); }
-function quickLogDedupe(id, dir, nowMs){
-  try{
-    var store=null;
-    try{ store=(typeof sessionStorage!=='undefined')?sessionStorage:null; }catch(e){ store=null; }
-    if(!store || typeof store.getItem!=='function') return false;
-    var k=_quickDedupeKey(id, dir);
-    var prev=0;
-    try{ prev=parseInt(store.getItem(k)||'0',10)||0; }catch(e){ prev=0; }
-    var t=(typeof nowMs==='number'&&nowMs>0)?nowMs:0;
-    if(!t){ try{ t=(typeof now==='function')?now():Date.now(); }catch(e){ try{ t=Date.now(); }catch(e2){ t=0; } } }
-    if(prev>0 && t>0 && (t-prev)<QUICKLOG_DEDUPE_MS) return true;
-    try{ store.setItem(k, String(t)); }catch(e){}
-    return false;
-  }catch(e){ return false; }
-}
-function quickLogClearDedupe(id, dir){
-  try{
-    var store=null;
-    try{ store=(typeof sessionStorage!=='undefined')?sessionStorage:null; }catch(e){ store=null; }
-    if(!store || typeof store.removeItem!=='function') return;
-    store.removeItem(_quickDedupeKey(id, dir));
-  }catch(e){}
-}
-var _pendingQuickLog=null;
-function _drainPendingQuickLog(){
-  var p=null;
-  try{
-    if(!_pendingQuickLog) return null;
-    p=_pendingQuickLog; _pendingQuickLog=null;
-  }catch(e){ return null; }
-  try{ applyQuickIntent(p, {fromDrain:true}); }catch(e){}
-  return p;
-}
-function toastAction(msg, label, fn){
-  try{
-    var w=(typeof document!=='undefined')?document.getElementById('toast'):null;
-    if(!w || typeof toast!=='function'){ try{ toast(msg); }catch(e){} return null; }
-    var e=document.createElement('div');
-    e.className='toastMsg';
-    var span=document.createElement('span'); span.textContent=msg; e.appendChild(span);
-    var fired=false;
-    var b=document.createElement('button');
-    b.type='button'; b.textContent=label||'Undo';
-    b.onclick=function(){ if(fired) return; fired=true; try{ e.remove(); }catch(x){} try{ fn(); }catch(x){} };
-    e.appendChild(b); w.appendChild(e);
-    setTimeout(function(){ try{ e.remove(); }catch(x){} fired=true; }, 4500);
-    return e;
-  }catch(e2){ try{ toast(msg); }catch(e3){} return null; }
-}
-function quickCleanUrl(){
-  try{
-    if(typeof history!=='undefined' && history && typeof history.replaceState==='function'){
-      history.replaceState(null,'','./');
-    }
-  }catch(e){}
-}
-function quickCopyLink(url){
-  try{
-    if(typeof navigator!=='undefined'&&navigator.clipboard&&navigator.clipboard.writeText){
-      navigator.clipboard.writeText(url).then(function(){ toast('Copied'); }).catch(function(){ quickFallbackCopy(url); });
-    } else { quickFallbackCopy(url); }
-  }catch(e){ try{ quickFallbackCopy(url); }catch(e2){} }
-}
-function quickFallbackCopy(t){
-  try{
-    var ta=document.createElement('textarea');
-    ta.value=t; ta.style.position='fixed'; ta.style.opacity='0';
-    document.body.appendChild(ta); ta.select();
-    try{ document.execCommand('copy'); toast('Copied'); }catch(e){ toast('Copy failed'); }
-    document.body.removeChild(ta);
-  }catch(e){ try{ toast('Copy failed'); }catch(e2){} }
-}
-function quickShareLink(url, id){
-  try{
-    var t=(typeof S!=='undefined'&&S&&S.tasks)?S.tasks.find(function(x){ return x&&x.id===id; }):null;
-    var title=(t&&t.title)?('Questa · '+t.title):'Questa quick log';
-    if(typeof navigator!=='undefined'&&navigator.share){
-      navigator.share({ title: title, url: url }).catch(function(){ quickCopyLink(url); });
-    } else { quickCopyLink(url); }
-  }catch(e){ quickCopyLink(url); }
-}
-function quickLogHabits(tasks){
-  var list=(tasks&&tasks.filter)?tasks:[];
-  var flagged=list.filter(function(t){ return t&&t.quickLog; });
-  return flagged.length?flagged:list;
-}
-function drawQuickSheet(){
-  try{
-    var sheet=(typeof document!=='undefined')?document.getElementById('sheet'):null;
-    if(!sheet) return;
-    var habits=(typeof S!=='undefined'&&S&&S.tasks)?S.tasks.filter(function(t){ return t&&t.type==='habit'; }):[];
-    // verbatim viewHabits 'all' predicate: every habit except a Log habit already tapped this reset period
-    var isLog=function(t){ return t.difficulty==='log'; };
-    var logged=function(t){ return ((t.cUp||0)+(t.cDown||0))>0; };
-    var left=quickLogHabits(habits).filter(function(t){ return !isLog(t)||!logged(t); });
-    var h='<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px">';
-    h+='<h3 style="margin:0;font-size:16px;font-weight:700">Quick log</h3>';
-    h+='<button type="button" class="btn primary" onclick="closeSheet()" style="flex:none;width:auto;padding:0 16px;height:32px;font-size:13px">Done</button>';
-    h+='</div>';
-    if(!left.length) h+='<div class="empty">Nothing left to log.</div>';
-    h+=left.map(function(t){
-      var up=t.up!==false, down=t.down!==false;
-      return '<div class="task habit quickRow" data-id="'+t.id+'">'
-        +(up?'<div class="check hbtn up" onclick="scoreHabit(\''+t.id+'\',1,event);drawQuickSheet()">+</div>':'<div class="check hbtn off">+</div>')
-        +'<div class="ttl">'+esc(t.title||'Untitled')+'</div>'
-        +(down?'<div class="check hbtn down" onclick="scoreHabit(\''+t.id+'\',-1,event);drawQuickSheet()">−</div>':'<div class="check hbtn off">−</div>')
-        +'</div>';
-    }).join('');
-    sheet.innerHTML=h;
-    var scrim=(typeof document!=='undefined')?document.getElementById('scrim'):null;
-    if(scrim&&scrim.classList&&scrim.classList.add) scrim.classList.add('show');
-  }catch(e){ try{ if(typeof toast==='function') toast('Could not open quick log'); }catch(e2){} }
-}
-function applyQuickIntent(intent, opts){
-  try{
-    if(!intent || !intent.kind) return null;
-    if(intent.kind==='tab'){
-      TAB=intent.tab;
-      try{ if(typeof render==='function') render(); }catch(e){}
-      try{ quickCleanUrl(); }catch(e){}
-      return intent;
-    }
-    if(intent.kind==='sheet'){
-      try{ if(typeof drawQuickSheet==='function') drawQuickSheet(); }catch(e){}
-      try{ quickCleanUrl(); }catch(e){}
-      return intent;
-    }
-    if(intent.kind==='habit'){
-      var id=intent.id, dir=(intent.dir===-1)?-1:1;
-      var t=null;
-      try{ t=(typeof S!=='undefined' && S && S.tasks)?S.tasks.find(function(x){ return x&&x.id===id; }):null; }catch(e){ t=null; }
-      if(!quickLogTargetOk(t, dir)) return null;
-      var gated=false;
-      try{ gated=(typeof bootGateBlocksInput==='function')?!!bootGateBlocksInput():false; }catch(e){ gated=false; }
-      if(gated){ _pendingQuickLog={kind:'habit', id:id, dir:dir, tab:null}; return _pendingQuickLog; }
-      var nowMs=0;
-      try{ nowMs=(opts&&typeof opts.nowMs==='number'&&opts.nowMs>0)?opts.nowMs:((typeof now==='function')?now():Date.now()); }catch(e){ nowMs=0; }
-      if(quickLogDedupe(id, dir, nowMs)) return null;
-      try{ TAB='habits'; }catch(e){}
-      try{ scoreHabit(id, dir, null); }catch(e){ return null; }
-      try{ quickCleanUrl(); }catch(e){}
-      try{
-        if(typeof toastAction==='function'){
-          toastAction((dir>0?'+1 · ':'−1 · ')+(t.title||'habit'), 'Undo', function(){
-            try{ scoreHabit(id,-1,null); }catch(e){}
-            try{ quickLogClearDedupe(id, dir); }catch(e){}
-          });
-        }
-      }catch(e){}
-      return {kind:'habit', id:id, dir:dir, tab:null};
-    }
-    return null;
-  }catch(e){ return null; }
 }
 // android-inbox-step1 (D3/D4): apply one phone log from the Dropbox inbox. Called by
 // sync.js syncInboxConsume after the pull and BEFORE syncSubset(), so the change
@@ -2971,7 +2796,6 @@ function _runDayRollover(){
   _dayRolloverDone = true;
   _bootRolloverPending = false; // release the inert-card gate (todo 11) before painting
   startDay();
-  try{ if(typeof _drainPendingQuickLog==='function') _drainPendingQuickLog(); }catch(e){} // android-quick-habit-log todo 1: apply a deep-link log stashed while the gate was closed
 }
 // The callback sync.js invokes when the first round settles. Top-level declaration so it
 // is both a global sync.js can find and extractable for tests. Name is fixed by the plan.
@@ -6137,7 +5961,7 @@ function drawSheet(){
       '<div class="small" style="margin-top:6px">Adjusting the + count also adds/removes its XP &amp; gold.</div>';
     h+='<div style="display:flex;align-items:center;gap:8px;margin-top:8px">'+
       '<input type="checkbox" id="eQuickLog" ' + (t.quickLog?'checked':'') + ' onclick="EDIT.quickLog=this.checked;drawSheet()" style="width:auto;margin:0;cursor:pointer">'+
-      '<label for="eQuickLog" style="margin:0;cursor:pointer;font-weight:normal">Quick log — show this habit in the home-screen Quick log sheet &amp; link panel</label></div>';
+      '<label for="eQuickLog" style="margin:0;cursor:pointer;font-weight:normal">Android shortcut — show this habit in the Android app long-press menu</label></div>';
   }
   if(t.type==='daily'){
     // 2026-09-18 (round 2): `t.repeat[i]` threw on a daily with no repeat array, and
@@ -6915,8 +6739,7 @@ const CATS = {
     settings: [
       { key: 'haptics', type: 'toggle', label: 'Haptics', desc: 'Vibration on taps and completions.' },
       { key: 'saveBtnTop', type: 'toggle', label: 'Save button position', desc: 'Top = centered next to title; Bottom = at foot of sheet.' },
-      { key: 'notifications', type: 'multi', label: 'Notifications', desc: 'Browser-based notification permission and status.' },
-      { key: 'quicklog', type: 'multi', label: 'Home-screen quick log', desc: 'Copy a per-habit link for a one-tap home-screen log button.' }
+      { key: 'notifications', type: 'multi', label: 'Notifications', desc: 'Browser-based notification permission and status.' }
     ]
   },
   activityFeed: {
@@ -6959,8 +6782,6 @@ function openCat(catKey){
         curVal = nl===0?'Off':(nl+' line'+(nl===1?'':'s'));
       } else if(s.key === 'notifications'){
         curVal = S.prefs.notificationsEnabled?'On':'Off';
-      } else if(s.key === 'quicklog'){
-        curVal = 'Links';
       }
       h += '<div class="catSetting" onclick="openOpt(\''+s.key+'\')">'+
         '<div class="catSettingMain">'+
@@ -7033,25 +6854,6 @@ function openOpt(key){
     } else {
       h+='<button type="button" class="btn ghost" style="margin-top:10px;width:100%" onclick="testNotification()">Send Test Notification</button>';
     }
-  } else if(key==='quicklog'){
-    var _qlBase=(typeof location!=='undefined'&&location)?(location.origin+location.pathname):'./';
-    h+='<h4>Home-screen quick log</h4>';
-    h+='<p class="optHint">Android does not let a web app create its own home-screen buttons — the button comes from your launcher: a URL-shortcut widget or a shortcut-maker app. Chrome\'s own <b>Add to Home screen</b> may create a browser shortcut instead of an app shortcut, so test which one you get.</p>';
-    h+='<p class="optHint"><b>1.</b> Copy the link for the habit and direction (＋1 logs up, −1 logs down). <b>2.</b> On your home screen, add a URL-shortcut widget (or use a shortcut-maker app) and paste the link as its target. <b>3.</b> Name the button after the habit — tapping it opens Questa and logs the habit at once.</p>';
-    var _qlHabits=(S&&S.tasks)?S.tasks.filter(function(t){ return t&&t.type==='habit'; }):[];
-    var _qlShown=(typeof quickLogHabits==='function')?quickLogHabits(_qlHabits):_qlHabits;
-    var _qlAnyFlag=_qlHabits.some(function(t){ return t&&t.quickLog; });
-    if(!_qlHabits.length) h+='<p class="optHint">No habits yet — add one first.</p>';
-    if(_qlHabits.length) h+='<p class="optHint" style="font-size:11px;opacity:.65;margin:4px 0 0">'+(_qlAnyFlag?('Showing '+_qlShown.length+' quick-log habit'+(_qlShown.length===1?'':'s')+' — untick Quick log in a habit\'s edit sheet to change.'):'Tip: tick Quick log in a habit\'s edit sheet to curate this list.')+'</p>';
-    h+=_qlShown.map(function(t){
-      var _up=t.up!==false, _down=t.down!==false;
-      return '<div class="quickLinkRow" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.08)">'
-        +'<div class="ttl" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(t.title||'Untitled')+'</div>'
-        +(_up?'<button type="button" class="btn ghost" style="flex:none;padding:4px 10px;font-size:12px" onclick="quickCopyLink(\''+esc(buildQuickUrl(_qlBase,t.id,1))+'\')">Copy ＋1</button>':'')
-        +(_down?'<button type="button" class="btn ghost" style="flex:none;padding:4px 10px;font-size:12px" onclick="quickCopyLink(\''+esc(buildQuickUrl(_qlBase,t.id,-1))+'\')">Copy −1</button>':'')
-        +'<button type="button" class="btn ghost" style="flex:none;padding:4px 10px;font-size:12px" onclick="quickShareLink(\''+esc(buildQuickUrl(_qlBase,t.id,1))+'\',\''+t.id+'\')">Share</button>'
-        +'</div>';
-    }).join('');
   } else if(key==='drag'){
     const ddv=(S.prefs.dragDelay==null?DRAG_DELAY_DEFAULT:Math.min(300,Math.max(100,S.prefs.dragDelay)));
     h+='<h4>Card drag delay</h4>';
@@ -8723,7 +8525,7 @@ if(LOAD_FAILED){
   }, 600);
 }
 bootStartDay(); // D3 todo 13: gates only the day-rollover decision, never the paint
-try{ if(typeof location!=='undefined' && location && typeof location.search==='string' && typeof parseQuickParams==='function' && typeof applyQuickIntent==='function'){ var _ql=parseQuickParams(location.search); if(_ql) applyQuickIntent(_ql); } }catch(e){} // android-quick-habit-log todo 1: kick off a deep-link quick log at boot (stashes while the rollover gate is closed)
+try{ if(typeof location!=='undefined' && location && typeof location.search==='string'){ var _tab=parseTabParam(location.search); if(_tab){ TAB=_tab; try{ history.replaceState(null,'','./'); }catch(e){} render(); } } }catch(e){} // ?tab= deep link from the web-manifest shortcuts
 updateHeaderHeightVar();
 if('serviceWorker' in navigator){
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })

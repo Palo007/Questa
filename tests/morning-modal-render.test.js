@@ -275,7 +275,7 @@ function creditedCountFromToast() {
 // =========================================================================
 // No-undo: this surface offers no undo action -- neither the modal markup
 // nor any commit toast carries one (the yester flow is intentionally
-// one-way; see quick-log's toastAction Undo for the surface that DOES).
+// one-way; the removed web quick log had an Undo toast, nothing here does).
 // =========================================================================
 {
   resetState();

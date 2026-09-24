@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
-const APP_VERSION = "v2026.09.24-1717";
+const APP_VERSION = "v2026.09.24-1752";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -2144,6 +2144,16 @@ function getReminderNotificationPayload(t, r, missed) {
   };
 }
 /* END_REMINDER_HELPERS */
+// Phase 1C todo 15/16: on Android, native AlarmManager (ReminderSync/ReminderReceiver)
+// owns reminders so the phone still fires them while Questa is closed. The web
+// app must not also fire, or the user gets two notifications for the same slot.
+// Flag lives in sessionStorage, NOT localStorage: localStorage is shared with
+// plain desktop/mobile Chrome on the same profile and would wrongly mute
+// reminders there too. Detected once at boot from document.referrer, which the
+// TWA sets to "android-app://io.github.palo007.twa" (see boot code below).
+function isAndroidTwa(){
+  try{ return sessionStorage.getItem('questa.twa') === '1'; }catch(e){ return false; }
+}
 let _schedulerInterval = null;
 function startReminderScheduler() {
   if (_schedulerInterval) clearInterval(_schedulerInterval);
@@ -2152,6 +2162,7 @@ function startReminderScheduler() {
 }
 
 function checkReminders() {
+  if (isAndroidTwa()) return; // native AlarmManager owns reminders on Android
   if (!S.prefs || !S.prefs.notificationsEnabled) return;
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
   
@@ -8542,6 +8553,9 @@ if(LOAD_FAILED){
     try{ toast('Saved data could not be read. The original is kept in this browser as "' + LOAD_FAILED.key + '". Restore a backup before adding anything.'); }catch(e){}
   }, 600);
 }
+// Phase 1C todo 16: mark this session as running inside the Android TWA so
+// checkReminders() defers to native AlarmManager instead of double-firing.
+try{ if(typeof document!=='undefined' && document.referrer && document.referrer.indexOf('android-app://io.github.palo007.twa')===0){ sessionStorage.setItem('questa.twa','1'); } }catch(e){}
 bootStartDay(); // D3 todo 13: gates only the day-rollover decision, never the paint
 try{ if(typeof location!=='undefined' && location && typeof location.search==='string'){ var _tab=parseTabParam(location.search); if(_tab){ TAB=_tab; try{ history.replaceState(null,'','./'); }catch(e){} render(); } } }catch(e){} // ?tab= deep link from the web-manifest shortcuts
 updateHeaderHeightVar();

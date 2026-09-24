@@ -1,0 +1,214 @@
+// inbox-reminders.test.js -- Phase 1C todo 15/16
+// (.cline/plans/android-inbox-step1.md).
+//
+// Part A: syncInboxWriteReminders() in sync.js -- publishes the reminder
+// schedule to /inbox-meta/reminders.json, mirroring syncInboxWriteMeta's
+// hash/upload-only-on-change pattern (see tests/inbox-meta.test.js).
+//
+// Part B: checkReminders() in app.js must fire nothing when this session is
+// flagged as running inside the Android TWA (isAndroidTwa()), and must still
+// fire normally without that flag -- native AlarmManager owns reminders on
+// Android once Phase 1C ships (todo 16).
+//
+// Run: node tests/inbox-reminders.test.js
+
+const fs = require('fs'), path = require('path'), vm = require('vm');
+const { extractFunction } = require('./_extract.js');
+
+let failures = 0;
+function assert(desc, cond) { if (cond) console.log('[PASS] ' + desc); else { console.error('[FAIL] ' + desc); failures++; } }
+async function attempt(desc, fn) {
+  try { await fn(); }
+  catch (e) { assert(desc + ' (threw: ' + (e && e.message || e) + ')', false); }
+}
+
+const noop = function () {};
+
+// ===========================================================================
+// Part A: syncInboxWriteReminders()
+// ===========================================================================
+
+let syncSrc = fs.readFileSync(path.join(__dirname, '../sync.js'), 'utf8');
+syncSrc = syncSrc.replace(/\/\* BEGIN_BOOT_GATE \*\/[\s\S]*?\/\* END_BOOT_GATE \*\//, '/* boot gate stripped for test */');
+
+const appSrc = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
+const appHelpers = extractFunction(appSrc, /^function quickLogMode\(t\)\{/, 'quickLogMode') + ';\n'
+  + extractFunction(appSrc, /^function quickLogDirs\(t\)\{/, 'quickLogDirs') + ';\n'
+  + extractFunction(appSrc, /^function getReminderNotificationPayload\(t, r, missed\) \{/, 'getReminderNotificationPayload');
+
+function makeCtx(tasks) {
+  const store = {};
+  const uploads = [];
+
+  const S = { tasks: tasks };
+
+  const sandbox = {
+    window: {}, navigator: { onLine: true },
+    document: { addEventListener: noop, getElementById: () => null,
+      createElement: () => ({ style: {}, appendChild: noop, setAttribute: noop, click: noop }),
+      body: { appendChild: noop, removeChild: noop } },
+    localStorage: {
+      getItem: k => Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null,
+      setItem: (k, v) => { store[k] = String(v); },
+      removeItem: k => { delete store[k]; }, key: () => null, length: 0
+    },
+    history: { replaceState: noop },
+    location: { search: '', origin: 'https://test.example', pathname: '/', href: '' },
+    crypto: { getRandomValues: arr => { for (let i = 0; i < arr.length; i++) arr[i] = i % 256; return arr; },
+      subtle: { digest: async () => new ArrayBuffer(32) } },
+    setTimeout: (fn, ms) => setTimeout(fn, 0), clearTimeout: noop, setInterval: () => 0, clearInterval: noop,
+    console, JSON, Math, Date, Map, Set, WeakSet, Array, Object, Number, String, Boolean, Promise,
+    URLSearchParams, TextEncoder, Buffer, Uint8Array, ArrayBuffer, Error, isFinite, isNaN, parseInt, RegExp,
+    logEvent: noop, toast: noop, render: noop, esc: x => x, save: noop, uid: () => 'test-device-1',
+    idbOpen: () => Promise.resolve(null), getEvents: () => Promise.resolve([]),
+    confirmDialog: () => Promise.resolve(true),
+    S: S,
+    dbxUploadText: async function (p, text) { uploads.push({ path: p, text: text }); return { rev: 'r' + uploads.length }; },
+    fetch: async function () { return { ok: true, status: 200, json: async () => ({}), text: async () => '', headers: { get: () => null } }; }
+  };
+  sandbox.window.addEventListener = noop;
+  sandbox.self = sandbox.window; sandbox.globalThis = sandbox;
+
+  vm.createContext(sandbox);
+  vm.runInContext(appHelpers, sandbox);
+  try { vm.runInContext(syncSrc, sandbox); }
+  catch (e) { console.error('FAIL: sync.js eval threw:', e); process.exit(1); }
+  store['questa.sync.v1'] = JSON.stringify({ enabled: true, appKey: 'test-key', refreshToken: 'rt', accessToken: 'tok',
+    accessExpiresAt: Date.now() + 3600000, deviceId: 'test-device-1', lastRev: null, lastError: null,
+    evtLastUploadTs: 0, evtFileRevs: {}, evtFileCounts: {}, evtPushBlocked: {} });
+  sandbox.dbxUploadText = async function (p, text) { uploads.push({ path: p, text: text }); return { rev: 'r' + uploads.length }; };
+
+  return { sandbox, store, uploads, S };
+}
+
+function mkHabit(id, time, days) {
+  return { id: id, type: 'habit', title: 'Habit ' + id,
+    reminders: [{ id: 'r-' + id, enabled: true, kind: 'weekly', time: time, days: days, lastFiredKey: '' }] };
+}
+
+(function checkSymbolExists() {
+  const { sandbox } = makeCtx([]);
+  assert('sync.js exports syncInboxWriteReminders', typeof sandbox.syncInboxWriteReminders === 'function');
+})();
+
+attempt('rem-1: first call uploads once to /inbox-meta/reminders.json', async () => {
+  const c = makeCtx([mkHabit('h1', '09:00', [true, true, true, true, true, true, true])]);
+  const changed = await c.sandbox.syncInboxWriteReminders();
+  assert('rem-1: returns true', changed === true);
+  assert('rem-1: exactly one upload', c.uploads.length === 1);
+  assert('rem-1: path is /inbox-meta/reminders.json', c.uploads[0].path === '/inbox-meta/reminders.json');
+  const body = JSON.parse(c.uploads[0].text);
+  assert('rem-1: payload has v:1', body.v === 1);
+  assert('rem-1: one item, keyed <taskId>#<index>', Array.isArray(body.items) && body.items.length === 1 && body.items[0].key === 'h1#0');
+  assert('rem-1: item carries title/body/time', body.items[0].title === 'Habit h1' && typeof body.items[0].body === 'string' && body.items[0].time === '09:00');
+}).then(() => attempt('rem-2: unchanged schedule -> no second upload, returns false', async () => {
+  const tasks = [mkHabit('h1', '09:00', [true, true, true, true, true, true, true])];
+  const c = makeCtx(tasks);
+  const first = await c.sandbox.syncInboxWriteReminders();
+  assert('rem-2: first call uploads', first === true && c.uploads.length === 1);
+  const second = await c.sandbox.syncInboxWriteReminders();
+  assert('rem-2: second call unchanged returns false', second === false);
+  assert('rem-2: no additional upload', c.uploads.length === 1);
+})).then(() => attempt('rem-3: changed reminder time -> exactly one more upload', async () => {
+  const tasks = [mkHabit('h1', '09:00', [true, true, true, true, true, true, true])];
+  const c = makeCtx(tasks);
+  await c.sandbox.syncInboxWriteReminders();
+  tasks[0].reminders[0].time = '10:00';
+  const changed = await c.sandbox.syncInboxWriteReminders();
+  assert('rem-3: change detected', changed === true);
+  assert('rem-3: exactly 2 uploads total', c.uploads.length === 2);
+  const body = JSON.parse(c.uploads[1].text);
+  assert('rem-3: new time is reflected', body.items[0].time === '10:00');
+})).then(() => attempt('rem-4: daily task uses t.repeat, not r.days', async () => {
+  const daily = { id: 'd1', type: 'daily', title: 'Standup', repeat: [false, true, false, false, false, false, false],
+    reminders: [{ id: 'rd1', enabled: true, kind: 'daily', time: '08:00', days: [true, true, true, true, true, true, true], lastFiredKey: '' }] };
+  const c = makeCtx([daily]);
+  await c.sandbox.syncInboxWriteReminders();
+  const body = JSON.parse(c.uploads[0].text);
+  assert('rem-4: days mirrors t.repeat, not r.days', JSON.stringify(body.items[0].days) === JSON.stringify([false, true, false, false, false, false, false]));
+  assert('rem-4: type is daily', body.items[0].type === 'daily');
+})).then(() => attempt('rem-5: a done todo is excluded entirely', async () => {
+  const todo = { id: 't1', type: 'todo', title: 'Pay bill', done: true,
+    reminders: [{ id: 'rt1', enabled: true, kind: 'once', time: '09:00', date: '2026-09-30', lastFiredKey: '' }] };
+  const habit = mkHabit('h1', '09:00', [true, true, true, true, true, true, true]);
+  const c = makeCtx([todo, habit]);
+  await c.sandbox.syncInboxWriteReminders();
+  const body = JSON.parse(c.uploads[0].text);
+  assert('rem-5: only the habit item is present', body.items.length === 1 && body.items[0].taskId === 'h1');
+})).then(() => attempt('rem-6: a disabled reminder is excluded', async () => {
+  const habit = mkHabit('h1', '09:00', [true, true, true, true, true, true, true]);
+  habit.reminders[0].enabled = false;
+  const c = makeCtx([habit]);
+  const changed = await c.sandbox.syncInboxWriteReminders();
+  assert('rem-6: nothing to upload -> no upload at all (empty list is still a change from unset, so upload happens with empty items)', c.uploads.length <= 1);
+  const body = JSON.parse(c.uploads[0].text);
+  assert('rem-6: items list is empty', Array.isArray(body.items) && body.items.length === 0);
+})).then(() => attempt('rem-7: a once reminder carries date and null days', async () => {
+  const todo = { id: 't2', type: 'todo', title: 'Renew passport', done: false,
+    reminders: [{ id: 'rt2', enabled: true, kind: 'once', time: '09:00', date: '2026-10-01', lastFiredKey: '' }] };
+  const c = makeCtx([todo]);
+  await c.sandbox.syncInboxWriteReminders();
+  const body = JSON.parse(c.uploads[0].text);
+  assert('rem-7: date is set', body.items[0].date === '2026-10-01');
+  assert('rem-7: days is null for a once reminder', body.items[0].days === null);
+  assert('rem-7: type is todo', body.items[0].type === 'todo');
+})).then(() => {
+
+  // =========================================================================
+  // Part B: checkReminders() defers to native AlarmManager on the Android TWA.
+  // =========================================================================
+
+  const reminderHelpers = appSrc.match(/\/\* BEGIN_REMINDER_HELPERS \*\/([\s\S]*?)\/\* END_REMINDER_HELPERS \*\//)[0];
+  const isAndroidTwaSrc = extractFunction(appSrc, /^function isAndroidTwa\(\)\{/, 'isAndroidTwa');
+  const checkRemindersSrc = extractFunction(appSrc, /^function checkReminders\(\) \{/, 'checkReminders');
+
+  function makeAppCtx(twaFlag) {
+    const sessionStore = {};
+    if (twaFlag) sessionStore['questa.twa'] = '1';
+    const notifications = [];
+    let saved = 0;
+
+    // Every-day weekly reminder at 09:00, so the fixed "now" below matches
+    // regardless of which real weekday this test happens to run on.
+    const habit = { id: 'h1', type: 'habit', title: 'Water',
+      reminders: [{ id: 'r1', enabled: true, kind: 'weekly', time: '09:00', days: [true, true, true, true, true, true, true], lastFiredKey: '' }] };
+
+    // A fixed "now" local to this sandbox only -- it must not leak into the
+    // real global Date used by the rest of the suite (a vm.createContext
+    // sandbox has its own Date, so this never touches node's global Date).
+    const RealDate = Date;
+    const fixedNow = new RealDate(2026, 8, 24, 9, 0);
+    function FixedDate(...args) {
+      if (args.length === 0) return new RealDate(fixedNow.getTime());
+      return new RealDate(...args);
+    }
+    FixedDate.now = () => fixedNow.getTime();
+
+    const sandbox = {
+      Date: FixedDate,
+      sessionStorage: {
+        getItem: k => Object.prototype.hasOwnProperty.call(sessionStore, k) ? sessionStore[k] : null,
+        setItem: (k, v) => { sessionStore[k] = String(v); }
+      },
+      Notification: Object.assign(function (title, opts) { notifications.push({ title: title, body: opts && opts.body }); }, { permission: 'granted' }),
+      navigator: {},
+      S: { prefs: { notificationsEnabled: true }, tasks: [habit] },
+      save: function () { saved++; },
+      console
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(reminderHelpers + '\n' + isAndroidTwaSrc + '\n' + checkRemindersSrc, sandbox);
+    return { sandbox, notifications, saved: () => saved };
+  }
+
+  const twa = makeAppCtx(true);
+  twa.sandbox.checkReminders();
+  assert('twa-1: checkReminders fires nothing when the TWA flag is set', twa.notifications.length === 0);
+
+  const plain = makeAppCtx(false);
+  plain.sandbox.checkReminders();
+  assert('twa-2: checkReminders still fires without the TWA flag', plain.notifications.length === 1);
+
+  console.log(failures ? ('\nFAILED: ' + failures + ' assertion(s)') : '\nALL PASSED');
+  process.exit(failures ? 1 : 0);
+});

@@ -535,6 +535,7 @@ const INBOX_DIR = "/inbox";
 const INBOX_CLAIMED_ROOT = "/inbox-claimed";
 const INBOX_REJECTED_DIR = "/inbox-rejected";
 const INBOX_META_PATH = "/inbox-meta/habits.json";
+const INBOX_REMINDERS_PATH = "/inbox-meta/reminders.json";
 const INBOX_MIN_INTERVAL_MS = 60000; // two list_folder calls at most once/min, like the events pull
 var _inboxLastRunAt = 0;
 var _inboxAppliedIds = new Set(); // this session: covers the gap before logEvent's IDB write commits
@@ -671,6 +672,48 @@ async function syncInboxWriteMeta(){
   await dbxUploadText(INBOX_META_PATH, JSON.stringify({ v: 1, updatedAt: Date.now(), habits: habits }));
   syncCfgSave({ inboxMetaHash: hash });
   return true;
+}
+
+// Todo 15 (Phase 1C): the reminder schedule the Android shell reads to arm
+// AlarmManager natively. Mirrors syncInboxWriteMeta's shape/hash/upload-only-
+// on-change pattern. Title/body come from getReminderNotificationPayload so
+// the native notification text matches what the web app would have shown.
+function _inboxNormalizeDays(days){
+  if(!Array.isArray(days) || days.length !== 7) return null;
+  return days.map(function(d){ return !!d; });
+}
+async function syncInboxWriteReminders(){
+  if(typeof S === "undefined" || !S || !Array.isArray(S.tasks)) return Promise.resolve(false);
+  const items = [];
+  S.tasks.forEach(function(t){
+    if(!t || !t.id || !Array.isArray(t.reminders)) return;
+    if(t.type === "todo" && t.done) return;
+    t.reminders.forEach(function(r, idx){
+      if(!r || !r.enabled || !r.time) return;
+      const payload = (typeof getReminderNotificationPayload === "function")
+        ? getReminderNotificationPayload(t, r, false)
+        : { title: t.title || "", body: "" };
+      const isOnce = r.kind === "once";
+      const days = isOnce ? null : _inboxNormalizeDays(t.type === "daily" ? t.repeat : r.days);
+      items.push({
+        key: String(t.id) + "#" + idx,
+        taskId: String(t.id),
+        type: t.type,
+        title: payload.title,
+        body: payload.body,
+        time: r.time,
+        date: isOnce ? (r.date || null) : null,
+        days: days
+      });
+    });
+  });
+  const hash = _inboxHash(JSON.stringify(items));
+  if(syncCfg().inboxRemindersHash === hash) return Promise.resolve(false);
+  return dbxUploadText(INBOX_REMINDERS_PATH, JSON.stringify({ v: 1, updatedAt: Date.now(), items: items }))
+    .then(function(){
+      syncCfgSave({ inboxRemindersHash: hash });
+      return true;
+    });
 }
 
 // 2026-09-19 (round 3, item 12): disconnect used to be purely local. It wiped
@@ -2337,6 +2380,7 @@ function syncNow(){
         if(!syncCfg().lastError && typeof syncEventsSync==="function") syncEventsSync();
         if(!syncCfg().lastError){
           syncInboxWriteMeta().catch(function(e){ _inboxDiag("inboxMetaFailed", { error: (e && e.message) || String(e) }); });
+          syncInboxWriteReminders().catch(function(e){ _inboxDiag("inboxRemindersFailed", { error: (e && e.message) || String(e) }); });
         }
         if(typeof syncRefreshSettingsUI==="function") syncRefreshSettingsUI();
         if(_syncRerunQueued){

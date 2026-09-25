@@ -8435,7 +8435,7 @@ function esc(s){ return (s||'').replace(/[&<>"']/g,function(c){return {'&':'&amp
 function jsq(s){
   return String(s==null?'':s)
     .replace(/\\/g,'\\\\')
-    .replace(/'/g,"\\'")
+    .replace(/'/g,"\\'").replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\u2028/g,'\\u2028').replace(/\u2029/g,'\\u2029')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 // Allow a synced colour into a style="" value only if it cannot leave the

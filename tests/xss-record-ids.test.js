@@ -3,7 +3,7 @@
 // inline handlers onclick="f('<id>')" and into double-quoted attributes.
 // An id such as  x');alert(1);//  runs script on click; an id such as
 // x" onmouseover="alert(1)  breaks out of the attribute. Handlers must use
-// jsq(), attributes esc(String(x)).
+// jsq(), attributes esc(String(x)). ID7: line breaks in an id keep handlers compiling.
 //   ID1 behavioural: taskCard/habitCard handlers get the exact id, no alert
 //   ID2 attribute break-out (data-id, class from t.type)
 //   ID3 renderSelectedHabits: data-hid / value / placeholder, dataset round-trip
@@ -108,6 +108,16 @@ const HEAD_HABIT = "<div class=\"task habit\" draggable=\"true\" data-id=\"lz3k9
 assert('ID6 uid()-shaped id renders byte-identical to HEAD (taskCard, habitCard)',
   api.taskCard({ id: UID, type: 'todo', title: 'Buy milk' }) === HEAD_TASK &&
   api.habitCard({ id: UID, type: 'habit', title: 'Pushups' }) === HEAD_HABIT);
+
+// ---- ID7 line breaks in an id (review I1) --------------------------------
+// A synced id with \n or \r would end the JS string literal inside onclick and
+// throw a SyntaxError. U+2028/U+2029 are escaped too for older engines.
+['\n', '\r', ' ', ' '].forEach((br, i) => {
+  const id = 'a' + br + 'b';
+  const r = runHandlers(api.taskCard({ id, type: 'todo', title: 'T' }));
+  assert('ID7.' + i + ' id with U+' + br.charCodeAt(0).toString(16).padStart(4, '0') + ': handlers compile, id round-trips',
+    r.n === 2 && !r.compileErr && r.calls.length === 2 && r.calls.every(c => c[1] === id));
+});
 
 console.log(failures ? '\n' + failures + ' FAILED' : '\nall passed');
 process.exit(failures ? 1 : 0);

@@ -67,6 +67,20 @@ only for a file it fails to *parse*, not one it silently misreads.
   in `sync.js`, or the reminder payload shape in `app.js`, should be treated as
   a cross-repo change: update this doc and flag the corresponding Kotlin file
   in the Android repo in the same commit series.
+- `reminders.json` never holds a `once` reminder without a `date` (CR-PWA-001).
+  Items carry no `kind`, and an everyday item is also `date:null, days:null`,
+  so a reader must not guess "once" from `date:null`.
+
+## Shared Dropbox app key and duplicate notifications
+
+- The web app, the TWA and the native Kotlin app use **one Dropbox app key**.
+  Revoking Questa's access in Dropbox (Settings → Connected apps) logs out all
+  three at once. Reconnect each app after a revoke.
+- If the web app is also open in a plain Chrome tab on the same phone, one
+  reminder can show up to three times: the native alarm, the TWA copy, and the
+  Chrome copy. The TWA drops its own web copy of a slot the native alarm already
+  showed. A plain Chrome tab is outside the TWA, so its copy is not dropped.
+  Close the Chrome tab (or turn off its notifications) to avoid the extra one.
 
 ## Moving from the Android TWA to the native app
 

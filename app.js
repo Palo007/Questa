@@ -8619,13 +8619,22 @@ function showSwUpdateBanner(){
 // An open sheet may hold unsaved typing: refuse, like the new-day reload does.
 // A sync in flight is waited for, capped at 5 s (same shape as reloadApp's cap).
 // reloadApp itself saves first and logs lifecycle reload:swUpdate.
+// D4 review F1: the sheet is checked again right before the delayed reload (it
+// may have opened during the wait), and only one tap waits at a time.
+var _swTapPending = false;
 function onSwUpdateTap(){
-  var scrim=document.getElementById('scrim');
-  if(scrim && scrim.classList.contains('show')){ toast('Close the editor first'); return; }
+  if(_swTapPending) return;
+  var sheetOpen=function(){ var s=document.getElementById('scrim'); return !!(s && s.classList.contains('show')); };
+  if(sheetOpen()){ toast('Close the editor first'); return; }
   var p=(typeof _syncInFlight!=='undefined' && _syncInFlight && typeof _syncInFlight.then==='function') ? _syncInFlight : null;
   if(!p){ reloadApp('swUpdate'); return; }
+  _swTapPending=true;
   var done=false;
-  var go=function(){ if(done) return; done=true; reloadApp('swUpdate'); };
+  var go=function(){
+    if(done) return; done=true; _swTapPending=false;
+    if(sheetOpen()){ toast('Close the editor first'); return; }
+    reloadApp('swUpdate');
+  };
   setTimeout(go, 5000);
   p.then(go, go);
 }
@@ -8635,6 +8644,10 @@ function registerServiceWorker(){
   var hadController=!!sw.controller, shown=false;
   try{
     sw.addEventListener('controllerchange', function(){
+      // D4 review F2: booted uncontrolled (first install, Shift+reload), the
+      // first takeover is silent; from then on a controller exists, so a
+      // later update in this session still gets the banner.
+      if(!hadController){ hadController=true; return; }
       if(!shouldOfferSwUpdate(hadController, shown)) return;
       shown=true;
       showSwUpdateBanner();

@@ -17,6 +17,9 @@
 //   T7c first install (no boot controller) -> no banner
 //   T7d tap while a sheet is open -> no reload, a toast instead
 //   T7e tap while a sync is in flight -> waits for it, capped at 5 s
+//   T7f a sheet opened during that wait -> no reload, the same toast (D4 F1)
+//   T7g three taps during one wait -> one reload (D4 F1)
+//   T7h no boot controller: first takeover no banner, the next one a banner (D4 F2)
 //   T8  install still skipWaiting()s and fills the cache with cache:"reload";
 //       SHOW_NOTIFICATION still shows a notification (TWA reminders)
 //   T9  foreground update check is throttled to once per 30 min
@@ -188,6 +191,8 @@ function seedIndexOnly(sw){ sw.store.set('seed', new Map([[keyOf('./index.html')
   const srcCheck = tryExtract('maybeCheckSwUpdate');
   let srcLast = null;
   try { srcLast = extractLine(appSrc, /^var _swLastUpdateCheck\s*=/, '_swLastUpdateCheck'); } catch(e){}
+  let srcPending = null;
+  try { srcPending = extractLine(appSrc, /^var _swTapPending\s*=/, '_swTapPending'); } catch(e){}
 
   // T7a
   {
@@ -217,7 +222,7 @@ function seedIndexOnly(sw){ sw.store.set('seed', new Map([[keyOf('./index.html')
     const toastBox = el('div'), scrim = el('div');
     if(o.sheetOpen) scrim.classList.add('show');
     const ctx = {
-      log, swListeners, toastBox,
+      log, swListeners, toastBox, scrimEl: scrim,
       document: {
         getElementById: id => id === 'toast' ? toastBox : id === 'scrim' ? scrim : null,
         createElement: el,
@@ -237,7 +242,7 @@ function seedIndexOnly(sw){ sw.store.set('seed', new Map([[keyOf('./index.html')
       _syncInFlight: o.syncInFlight || null,
     };
     vm.createContext(ctx);
-    for(const s of [srcShould, srcBanner, srcTap, srcReg, srcCheck, srcLast]) if(s) vm.runInContext(s, ctx);
+    for(const s of [srcPending, srcShould, srcBanner, srcTap, srcReg, srcCheck, srcLast]) if(s) vm.runInContext(s, ctx);
     return ctx;
   }
   const fireCC = ctx => (ctx.swListeners.controllerchange || []).forEach(f => f({}));
@@ -336,6 +341,56 @@ function seedIndexOnly(sw){ sw.store.set('seed', new Map([[keyOf('./index.html')
     ok(waits, 'T7e1 tap during a sync waits for it');
     ok(after, 'T7e2 reloads exactly once after the sync settles (cap timer is then a no-op)');
     ok(capped, 'T7e3 a hung sync is capped at 5 s, then reloads once');
+  }
+  // T7f (D4 F1) the sheet opens while the tap waits for the sync
+  {
+    let t = false;
+    if(have){
+      let resolve;
+      const ctx = makeApp({ syncInFlight: new Promise(r => { resolve = r; }) });
+      ctx.registerServiceWorker(); await tick();
+      fireCC(ctx);
+      buttonOf(banners(ctx)[0]).onclick();
+      await tick();
+      ctx.scrimEl.classList.add('show');          // user opens an editor during the wait
+      resolve(); await tick(); await tick();
+      ctx.log.timers.filter(x => x.ms === 5000).forEach(x => x.fn());
+      t = ctx.log.reloadApp.length === 0
+        && ctx.log.toast.length === 1 && ctx.log.toast[0] === 'Close the editor first'
+        && banners(ctx).length === 1;
+    }
+    ok(t, 'T7f sheet opened during the sync wait: no reload, "Close the editor first", banner stays');
+  }
+  // T7g (D4 F1) repeat taps during one wait do not queue more reloads
+  {
+    let t = false;
+    if(have){
+      let resolve;
+      const ctx = makeApp({ syncInFlight: new Promise(r => { resolve = r; }) });
+      ctx.registerServiceWorker(); await tick();
+      fireCC(ctx);
+      const btn = buttonOf(banners(ctx)[0]);
+      btn.onclick(); btn.onclick(); btn.onclick();
+      await tick();
+      resolve(); await tick(); await tick();
+      ctx.log.timers.filter(x => x.ms === 5000).forEach(x => x.fn());
+      t = ctx.log.reloadApp.length === 1;
+    }
+    ok(t, 'T7g three taps during one sync wait -> exactly one reload');
+  }
+  // T7h (D4 F2) booted uncontrolled: the first takeover is silent, a later update is offered
+  {
+    let first = false, second = false;
+    if(have){
+      const ctx = makeApp({ controller: null });
+      ctx.registerServiceWorker(); await tick();
+      fireCC(ctx);
+      first = banners(ctx).length === 0 && ctx.log.reloadApp.length === 0;
+      fireCC(ctx);
+      second = banners(ctx).length === 1 && ctx.log.reloadApp.length === 0;
+    }
+    ok(first, 'T7h1 no boot controller: first controllerchange shows no banner');
+    ok(second, 'T7h2 no boot controller: the next controllerchange shows the banner');
   }
   // T9
   {

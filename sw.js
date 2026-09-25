@@ -21,8 +21,13 @@ self.addEventListener("install", e => {
     .then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", e => {
+  /* 2026-09-26 (D4, F-D4b): only delete Questa's OWN old caches. This worker
+     shares the palo007.github.io origin with other apps; deleting every cache
+     that is not CACHE used to wipe their offline caches on every Questa
+     update too. */
   e.waitUntil(
-    caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k.startsWith("questa-") && k !== CACHE).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });

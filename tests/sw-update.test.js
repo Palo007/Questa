@@ -21,6 +21,8 @@
 //       SHOW_NOTIFICATION still shows a notification (TWA reminders)
 //   T9  foreground update check is throttled to once per 30 min
 //   T10 activate deletes the old questa-vNNN cache, keeps the current one, claims
+//   T11 activate leaves other apps' caches on palo007.github.io alone: only
+//       names starting with "questa-" (and not the current one) are deleted
 //
 // Run: node tests/sw-update.test.js  (also run by node tests/run.js)
 
@@ -160,6 +162,20 @@ function seedIndexOnly(sw){ sw.store.set('seed', new Map([[keyOf('./index.html')
     ok(!keys.includes('questa-v246'), 'T10a activate deletes the old questa-v246 cache');
     ok(keys.length === 1 && keys[0] === cache, 'T10b activate keeps only the current cache (' + JSON.stringify(keys) + ')');
     ok(sw.calls.claim === 1, 'T10c activate calls clients.claim()');
+  }
+
+  // --- T11 activate spares other apps' caches ------------------------------------
+  {
+    const sw = makeSw();
+    let cache = ''; try { cache = vm.runInContext('CACHE', sw.ctx); } catch(e){}
+    sw.store.set('questa-v246', new Map());
+    sw.store.set(cache, new Map());
+    sw.store.set('other-app-v1', new Map());
+    await waitEv(sw, 'activate');
+    const keys = [...sw.store.keys()];
+    ok(!keys.includes('questa-v246'), 'T11a activate deletes the old questa-v246 cache');
+    ok(keys.includes('other-app-v1'), 'T11b activate leaves another app\'s cache alone');
+    ok(keys.includes(cache), 'T11c activate keeps the current cache');
   }
 
   // ---------------------------------------------------------------------------

@@ -68,7 +68,8 @@ serializes as `{ "__error": "..." }`.
   delete; **no tombstone** = the delete-on-absence bug class (should no longer happen
   post-tombstones, v2026.07.12-0832+). Streak values live on the task (`t.streak`).
 - **Stale app / update didn't take.** Check `meta.appVersion` and `serviceWorker`
-  active/waiting script URLs and `caches` names vs the latest `questa-vNNN`. A `waiting`
+  active/waiting script URLs and `caches` names vs `questa-<meta.appVersion>` (builds
+  before 2026-09-26 used `questa-vNNN`). A `waiting`
   SW or an old cache name = the new build hasn't activated; a hard reload / cache clear
   is needed.
 - **Sync failing.** `localStorage["questa.sync.v1"].lastError`, `lastSyncAt`, `lastRev`.

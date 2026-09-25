@@ -85,13 +85,17 @@ that backup to confirm every changed line was intentional.
 
 ## 3. Mandatory on every edit that touches shipped files
 
-1. **Bump `APP_VERSION`** — top of `app.js`:
-   `const APP_VERSION = "vYYYY.MM.DD-HHMM";`. Generate with `date +v%Y.%m.%d-%H%M`.
-   It renders at the bottom of Settings (`.appVersion`) so the user can see which
-   build they are on. GitHub Pages strips file dates, so this stamp is the only
-   version signal. It must change on **every** edit.
-2. **Bump the SW cache** — `sw.js` line 3, `const CACHE = "questa-vN";` →
-   increment `N`. Without this, existing installs keep the old files.
+1. **Bump the version stamp in BOTH files, to the same value** — `app.js` line 3
+   `const APP_VERSION = "vYYYY.MM.DD-HHMM";` and `sw.js`
+   `const VERSION = "vYYYY.MM.DD-HHMM";`. Generate with `date +v%Y.%m.%d-%H%M`.
+   APP_VERSION renders at the bottom of Settings (`.appVersion`) so the user can see
+   which build they are on; GitHub Pages strips file dates, so this stamp is the
+   only version signal. It must change on **every** edit. The SW cache is derived
+   (`const CACHE = "questa-" + VERSION;`), so this is also the cache bump — without
+   it, existing installs keep the old files. Never write a literal cache name.
+   `tests/sw-update.test.js` (T5) and `morning-rollover-contract` (V2) fail when
+   the two stamps differ.
+2. *(merged into step 1, 2026-09-26: there is no separate cache counter any more.)*
 3. **Added or renamed a shipped file?** Add it to `ASSETS` in `sw.js` **and** to
    the network-first "shell" condition in the fetch handler, so updates appear on
    next launch instead of serving stale cache.

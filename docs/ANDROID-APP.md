@@ -67,3 +67,43 @@ only for a file it fails to *parse*, not one it silently misreads.
   in `sync.js`, or the reminder payload shape in `app.js`, should be treated as
   a cross-repo change: update this doc and flag the corresponding Kotlin file
   in the Android repo in the same commit series.
+- `reminders.json` never holds a `once` reminder without a `date` (CR-PWA-001).
+  Items carry no `kind`, and an everyday item is also `date:null, days:null`,
+  so a reader must not guess "once" from `date:null`.
+
+## Shared Dropbox app key and duplicate notifications
+
+- The web app, the TWA and the native Kotlin app use **one Dropbox app key**.
+  Revoking Questa's access in Dropbox (Settings → Connected apps) logs out all
+  three at once. Reconnect each app after a revoke.
+- Inside the TWA, a reminder slot shows once: the TWA and its native alarm
+  drop each other's copy of the same slot (both directions).
+- A browser tab outside the TWA (any browser other than the TWA's host
+  browser, or a plain tab in it) is not deduped. It can add one more copy of
+  the same reminder, and the native Kotlin app, if also installed, can add
+  another. Close that tab (or turn off its notifications) to avoid extras.
+
+## Moving from the Android TWA to the native app
+
+The TWA keeps its data inside the browser (Chrome or Brave) storage for this
+site. It is not in the TWA app itself. If you uninstall the TWA, or clear the
+browser's data, before you sync or export, anything not yet synced is lost.
+
+Do the steps in this order:
+
+1. **Final sync.** In the TWA, open Questa online and let it sync to Dropbox.
+   Check "last synced" in the sync panel.
+2. **Export a file.** In the TWA, run **Export** with all sections. Save the
+   JSON outside the browser (Downloads, plus a copy off the phone). This is
+   your safety copy.
+3. **Stop using the TWA shortcuts** from here on, so no new taps land in
+   the inbox mid-switch.
+4. **Install the native (Kotlin) app.** Grant notifications and exact alarms.
+5. **Bring the data in.** Connect the same Dropbox account and sync, or
+   import the JSON from step 2. Do one, check the result, then decide about
+   the other.
+6. **Verify counts.** Habits, tasks, today's log, character stats and the
+   reminder list must match the TWA export.
+7. **Uninstall the TWA.** Uninstall it, do not just disable it: uninstalling
+   removes its alarms and its home-screen shortcuts, so reminders stop firing
+   twice. Leave the browser's site data alone for a while as a fallback.

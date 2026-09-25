@@ -1,0 +1,407 @@
+{
+  "_backup": {
+    "schema": 2,
+    "exportedAt": "2026-07-17T12:00:00.000Z",
+    "appVersion": "v2026.07.16-1611",
+    "eventCount": 4,
+    "items": {
+      "tasks": 3,
+      "rewards": 1,
+      "tags": 2,
+      "views": 1,
+      "lastActivityAt": "2026-07-17T07:05:00.000Z"
+    },
+    "hash": "87f87faf8c2b1486016ab00ff6c19c9b1551479b5dce4050200b9aa6702ae003"
+  },
+  "K": [
+    "complete",
+    "subtask",
+    "export"
+  ],
+  "SRC": [
+    "tap"
+  ],
+  "TID": [
+    "lqxh2e5f6g7h",
+    "lqxh3i8j9k0l",
+    "lqxh1a2b3c4d"
+  ],
+  "TT": [
+    "Morning Meditation",
+    "Buy groceries",
+    "Export Data",
+    "Drink Water"
+  ],
+  "FM": {
+    "id": "a",
+    "updatedAt": "b",
+    "createdAt": "c",
+    "done": "d",
+    "name": "e",
+    "tags": "f",
+    "title": "g",
+    "notes": "h",
+    "type": "i",
+    "difficulty": "j",
+    "value": "k",
+    "checklist": "l",
+    "reminders": "m",
+    "text": "n",
+    "lvl": "o",
+    "xp": "p",
+    "hp": "q",
+    "maxHp": "r",
+    "mp": "s",
+    "gold": "t",
+    "color": "u",
+    "version": "v",
+    "char": "w",
+    "face": "x",
+    "cls": "y",
+    "tasks": "z",
+    "up": "ba",
+    "down": "bb",
+    "__taskDecoy": "bc",
+    "repeat": "bd",
+    "resetFreq": "be",
+    "streak": "bf",
+    "doneAt": "bg",
+    "enabled": "bh",
+    "kind": "bi",
+    "time": "bj",
+    "lastFiredKey": "bk",
+    "days": "bl",
+    "__subDecoy": "bm",
+    "rewards": "bn",
+    "cost": "bo",
+    "devices": "bp",
+    "lastCron": "bq",
+    "history": "br",
+    "charHistory": "bs",
+    "date": "bt",
+    "monthlyBackups": "bu",
+    "deletions": "bv",
+    "at": "bw",
+    "prefs": "bx",
+    "width": "by",
+    "notesLines": "bz",
+    "lastTab": "ca",
+    "tipDelay": "cb",
+    "haptics": "cc",
+    "cardThick": "cd",
+    "notificationsEnabled": "ce",
+    "saveBtnTop": "cf",
+    "dragDelay": "cg",
+    "exportIntervalDays": "ch",
+    "lastExportTs": "ci",
+    "an": "cj",
+    "views": "ck",
+    "source": "cl",
+    "group": "cm",
+    "chart": "cn",
+    "types": "co",
+    "metricId": "cp",
+    "metrics": "cq",
+    "gfs": "cr",
+    "daily": "cs",
+    "weekly": "ct",
+    "monthly": "cu",
+    "__futureField": "cv",
+    "nested": "cw",
+    "__seq": "cx",
+    "__hlcLast": "cy",
+    "__savedAt": "cz"
+  },
+  "S": {
+    "v": 1,
+    "w": {
+      "e": "Aria Stormblade",
+      "x": "⚔️",
+      "y": "Warrior",
+      "o": 5,
+      "p": 230,
+      "q": 42,
+      "r": 60,
+      "s": 12,
+      "t": 87.5,
+      "b": 1784235600000
+    },
+    "z": [
+      {
+        "a": "lqxh1a2b3c4d",
+        "i": "habit",
+        "g": "Drink Water",
+        "h": "",
+        "j": "easy",
+        "k": 3,
+        "d": false,
+        "l": [],
+        "ba": true,
+        "bb": true,
+        "f": [
+          "lqxh5q4r5s6t"
+        ],
+        "bc": "keep-me",
+        "c": 1780304400000,
+        "b": 1784104200000,
+        "m": []
+      },
+      {
+        "a": "lqxh2e5f6g7h",
+        "i": "daily",
+        "g": "Morning Meditation",
+        "h": "10 minutes, no phone",
+        "j": "easy",
+        "k": 0,
+        "d": true,
+        "l": [
+          {
+            "n": "Breathe",
+            "d": true,
+            "a": "lg-gyisdb"
+          }
+        ],
+        "bd": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "be": "daily",
+        "bf": 4,
+        "bg": 1784271960000,
+        "f": [
+          "lqxh5q4r5s6t"
+        ],
+        "m": [
+          {
+            "a": "lqxh8c3d4e5f",
+            "bh": true,
+            "bi": "daily",
+            "bj": "07:00",
+            "bk": "",
+            "bl": [
+              true,
+              true,
+              true,
+              true,
+              true,
+              true,
+              true
+            ]
+          }
+        ],
+        "c": 1780470000000,
+        "b": 1784271900000
+      },
+      {
+        "a": "lqxh3i8j9k0l",
+        "i": "todo",
+        "g": "Buy groceries",
+        "h": "Weekly run",
+        "j": "hard",
+        "k": -1,
+        "d": false,
+        "l": [
+          {
+            "a": "lqxh9g6h7i8j",
+            "n": "Milk",
+            "d": false,
+            "bm": "keep-me-too"
+          },
+          {
+            "a": "lqxh0k9l0m1n",
+            "n": "Eggs",
+            "d": true
+          }
+        ],
+        "f": [
+          "lqxh6u7v8w9x"
+        ],
+        "c": 1783706400000,
+        "b": 1784231100000,
+        "m": []
+      }
+    ],
+    "bn": [
+      {
+        "a": "lqxh4m1n2o3p",
+        "g": "Movie night",
+        "bo": 20,
+        "h": "",
+        "c": 1781956800000,
+        "b": 1781956800000
+      }
+    ],
+    "f": [
+      {
+        "a": "lqxh5q4r5s6t",
+        "e": "Health",
+        "u": "#4CAF50",
+        "c": 1780300800000,
+        "b": 1780300800000
+      },
+      {
+        "a": "lqxh6u7v8w9x",
+        "e": "Chores",
+        "u": "#FF9800",
+        "c": 1780300860000,
+        "b": 1780300860000
+      }
+    ],
+    "bp": [
+      {
+        "a": "lqxh7y0z1a2b",
+        "e": "Pixel 7",
+        "b": 1784286000000
+      }
+    ],
+    "bq": 20260717,
+    "br": [],
+    "bs": [
+      {
+        "bt": 1784235600000,
+        "q": 40,
+        "r": 60,
+        "p": 220,
+        "s": 10,
+        "t": 80,
+        "o": 5
+      }
+    ],
+    "bu": [
+      "2026-06",
+      "2026-07"
+    ],
+    "bv": [
+      {
+        "a": "lqxhbs5t6u7v",
+        "bw": 1783245600000
+      }
+    ],
+    "bx": {
+      "by": 500,
+      "bz": 4,
+      "ca": "analytics",
+      "cb": 0,
+      "cc": true,
+      "cd": 10,
+      "ce": true,
+      "cf": true,
+      "cg": 180,
+      "ch": 7,
+      "ci": 1784188800000,
+      "cj": {
+        "ck": [
+          {
+            "a": "lqxhaop2q3r4",
+            "e": "Weekly completions",
+            "cl": "completed",
+            "cm": "week",
+            "cn": "bar",
+            "f": [],
+            "co": [
+              "habit",
+              "daily"
+            ],
+            "cp": null,
+            "c": 1782378000000,
+            "b": 1782378000000
+          }
+        ],
+        "cq": []
+      },
+      "cr": {
+        "cs": 0,
+        "ct": 0,
+        "cu": 0
+      }
+    },
+    "cv": {
+      "cw": [
+        "decoy",
+        1,
+        true
+      ]
+    },
+    "cx": 3,
+    "cy": 1784289600000,
+    "cz": 1784289600000
+  },
+  "E": [
+    {
+      "id": 1,
+      "t": 1784271960000,
+      "uid": "lqxh7y0z1a2b-lqxh40-aaaaa",
+      "dev": "lqxh7y0z1a2b",
+      "k": 0,
+      "ty": "daily",
+      "ti": 0,
+      "n": 0,
+      "st": 4,
+      "rw": {
+        "xp": 10,
+        "gold": 2,
+        "mp": 0,
+        "delta": 1
+      },
+      "rp": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "cl": [
+        {
+          "id": "lg-gyisdb",
+          "text": "Breathe",
+          "done": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "t": 1784231040000,
+      "uid": "lqxh7y0z1a2b-lqxh41-bbbbb",
+      "dev": "lqxh7y0z1a2b",
+      "k": 1,
+      "ty": "todo",
+      "ti": 1,
+      "n": 1,
+      "si": "lqxh0k9l0m1n",
+      "sx": "Eggs",
+      "do": 1
+    },
+    {
+      "id": 3,
+      "t": 1784188805000,
+      "uid": "lqxh7y0z1a2b-lqxh42-ccccc",
+      "dev": "lqxh7y0z1a2b",
+      "k": 2,
+      "n": 2,
+      "no": "Created backup file via Download",
+      "sy": 0
+    },
+    {
+      "id": 4,
+      "t": 1784104140000,
+      "uid": "lqxh7y0z1a2b-lqxh43-ddddd",
+      "dev": "lqxh7y0z1a2b",
+      "k": 0,
+      "ty": "habit",
+      "ti": 2,
+      "n": 3,
+      "dr": 1,
+      "v": 1,
+      "rs": 1,
+      "o": 0,
+      "rc": 1
+    }
+  ]
+}

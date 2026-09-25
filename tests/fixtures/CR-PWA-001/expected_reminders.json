@@ -1,0 +1,34 @@
+{
+  "v": 1,
+  "updatedAt": "<Date.now()>",
+  "items": [
+    {
+      "key": "t-once-dated#0",
+      "taskId": "t-once-dated",
+      "type": "todo",
+      "title": "Renew passport",
+      "body": "Complete your to-do!",
+      "time": "09:30",
+      "date": "2026-10-01",
+      "days": null
+    },
+    {
+      "key": "h-weekly#0",
+      "taskId": "h-weekly",
+      "type": "habit",
+      "title": "Stretch",
+      "body": "Time to score your habit!",
+      "time": "08:00",
+      "date": null,
+      "days": [
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    }
+  ]
+}

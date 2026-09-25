@@ -288,31 +288,47 @@ assertEq('K2-0 sanity: tolerance constant agrees between app.js and this test',
 // =====================================================================
 (function(){
   const N = 500;
-  const PROBE = FIXED_NOW + TOLERANCE + 300;   // just beyond a constant physical ceiling
+
+  // Clock-race fix (F-FLAKE, 2026-09-26): the ceiling is Date.now() + tolerance, read
+  // when merge() starts. PROBE used to hang off FIXED_NOW (module load), so when the
+  // sandbox builds + K2-A/B took 300ms or more the real ceiling had already passed
+  // PROBE and the remote legitimately won (flaky, ~1 in 7). So: build the sandboxes
+  // FIRST, then read T and derive every stamp from it, then merge straight away. The
+  // 300ms margin stays -- it is what makes the pre-K2 ratcheting ceiling fail.
+  let T = 0;
 
   // A faithful stand-in for app.js now(): ratchets and never goes down.
-  let hlcVal = FIXED_NOW;
-  const ratchetingNow = function(){ hlcVal = Math.max(FIXED_NOW, hlcVal + 1); return hlcVal; };
+  let hlcVal = 0;
+  const ratchetingNow = function(){ hlcVal = Math.max(T, hlcVal + 1); return hlcVal; };
 
-  const base = [], local = [], remote = [];
-  for(let i = 0; i < N; i++){
-    base.push(  { id:'t'+i, type:'todo', title:'base'+i,   updatedAt: FIXED_NOW - 20000 });
-    local.push( { id:'t'+i, type:'todo', title:'local'+i,  updatedAt: FIXED_NOW - 5000  });
-    remote.push({ id:'t'+i, type:'todo', title:'remote'+i, updatedAt: PROBE            });
+  function fixture(n){
+    const PROBE = T + TOLERANCE + 300;   // just beyond a constant physical ceiling
+    const base = [], local = [], remote = [];
+    for(let i = 0; i < n; i++){
+      base.push(  { id:'t'+i, type:'todo', title:'base'+i,   updatedAt: T - 20000 });
+      local.push( { id:'t'+i, type:'todo', title:'local'+i,  updatedAt: T - 5000  });
+      remote.push({ id:'t'+i, type:'todo', title:'remote'+i, updatedAt: PROBE     });
+    }
+    return { base, local, remote };
   }
 
   const Q = makeQ('devSelf', ratchetingNow).window.QuestaSync;
-  const m = Q.merge(state(base), state(local), state(remote), FIXED_NOW, FIXED_NOW, 'devSelf', 'devOther');
+  const Q5 = makeQ('devSelf', function(){ return T; }).window.QuestaSync;
+
+  T = Date.now(); hlcVal = T;
+  const f = fixture(N);
+  const m = Q.merge(state(f.base), state(f.local), state(f.remote), T, T, 'devSelf', 'devOther');
 
   let localWins = 0;
   m.tasks.forEach(t => { if(String(t.title).indexOf('local') === 0) localWins++; });
   assertEq('K2-C1 the clamp ceiling does not grow while merging 500 records', localWins, N);
 
   // Same fixture, 5 records: pre-K2 this passes (too few calls to drift the ceiling),
-  // which is exactly why the 500-record case is the one that matters.
-  const b5 = base.slice(0,5), l5 = local.slice(0,5), r5 = remote.slice(0,5);
-  const Q5 = makeQ('devSelf', function(){ return FIXED_NOW; }).window.QuestaSync;
-  const m5 = Q5.merge(state(b5), state(l5), state(r5), FIXED_NOW, FIXED_NOW, 'devSelf', 'devOther');
+  // which is exactly why the 500-record case is the one that matters. Fresh T so the
+  // 500-record merge above cannot eat into this one's margin either.
+  T = Date.now();
+  const f5 = fixture(5);
+  const m5 = Q5.merge(state(f5.base), state(f5.local), state(f5.remote), T, T, 'devSelf', 'devOther');
   let localWins5 = 0;
   m5.tasks.forEach(t => { if(String(t.title).indexOf('local') === 0) localWins5++; });
   assertEq('K2-C2 GUARD: the same fixture at 5 records clamps the skewed remote', localWins5, 5);

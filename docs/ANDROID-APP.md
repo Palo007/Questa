@@ -76,11 +76,12 @@ only for a file it fails to *parse*, not one it silently misreads.
 - The web app, the TWA and the native Kotlin app use **one Dropbox app key**.
   Revoking Questa's access in Dropbox (Settings → Connected apps) logs out all
   three at once. Reconnect each app after a revoke.
-- If the web app is also open in a plain Chrome tab on the same phone, one
-  reminder can show up to three times: the native alarm, the TWA copy, and the
-  Chrome copy. The TWA drops its own web copy of a slot the native alarm already
-  showed. A plain Chrome tab is outside the TWA, so its copy is not dropped.
-  Close the Chrome tab (or turn off its notifications) to avoid the extra one.
+- Inside the TWA, a reminder slot shows once: the TWA and its native alarm
+  drop each other's copy of the same slot (both directions).
+- A browser tab outside the TWA (any browser other than the TWA's host
+  browser, or a plain tab in it) is not deduped. It can add one more copy of
+  the same reminder, and the native Kotlin app, if also installed, can add
+  another. Close that tab (or turn off its notifications) to avoid extras.
 
 ## Moving from the Android TWA to the native app
 

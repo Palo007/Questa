@@ -1,5 +1,5 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
-// APP_VERSION is stamped on every edit; it is shown at the bottom of Settings.
+// APP_VERSION is stamped on every edit; it is shown at the bottom of Settings. It must equal sw.js VERSION.
 const APP_VERSION = "v2026.09.25-2251";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
@@ -874,8 +874,8 @@ function questaFullDiagnostic(){
         meta: "Runtime/environment: appVersion, userAgent, viewport, display-mode, online, permissions.",
         localStorage: "Every localStorage key/value. questa.save.v1 = full persisted state S; questa.sync.v1 = sync config; questa.baseReset.v1 = one-time base-purge flag.",
         indexedDB: "Every IndexedDB db+store. questa.backups = Tier-1 snapshots; questa.syncmeta (key 'base') = last synced baseline; the events store = append-only event log (streak/completion history); durable store = persistence mirror of S.",
-        caches: "Cache Storage: cache name -> cached URLs. Diagnoses stale-shell / SW-update issues (look for questa-vNNN).",
-        serviceWorker: "Active/waiting/installing SW script URLs + controller. Mismatch vs latest questa-vNNN => update did not take.",
+        caches: "Cache Storage: cache name -> cached URLs. Diagnoses stale-shell / SW-update issues (look for questa-<appVersion>; builds before v2026.09.26 used questa-vNNN).",
+        serviceWorker: "Active/waiting/installing SW script URLs + controller. Cache name other than questa-<appVersion> => update did not take.",
         storageEstimate: "Quota vs usage bytes.",
         errors: "Ring buffer (<=50) of uncaught errors + unhandled promise rejections, newest last.",
         liveS: "In-memory app state S at capture time (tasks incl. streak/done/repeat, char, prefs, deletions tombstones). Compare to localStorage.questa.save.v1 to spot divergence."
@@ -8594,16 +8594,77 @@ try{
 bootStartDay(); // D3 todo 13: gates only the day-rollover decision, never the paint
 try{ if(typeof location!=='undefined' && location && typeof location.search==='string'){ var _tab=parseTabParam(location.search); if(_tab){ TAB=_tab; try{ history.replaceState(null,'','./'); }catch(e){} render(); } } }catch(e){} // ?tab= deep link from the web-manifest shortcuts
 updateHeaderHeightVar();
-if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
-    .then(() => { startReminderScheduler(); })
-    .catch(()=>{ startReminderScheduler(); });
-} else {
-  startReminderScheduler();
+// 2026-09-26 (design D4, DEC-P06 option A): sw.js still auto-activates
+// (skipWaiting + clients.claim), so a new build takes over this page's fetches
+// while the page keeps running the old app.js. That takeover is now VISIBLE: when
+// the controller changes on a page that already had one at boot, a persistent
+// "Update ready" banner appears and the page reloads ONLY when the user taps it.
+// No automatic reload exists anywhere, so a reload loop cannot happen. A first
+// install also fires controllerchange (clients.claim with no previous
+// controller); hadController is read before register() so that shows nothing.
+function shouldOfferSwUpdate(hadController, alreadyShown){
+  return !!hadController && !alreadyShown;
 }
+function showSwUpdateBanner(){
+  try{
+    var w=document.getElementById('toast'); if(!w) return;
+    var e=document.createElement('div');
+    e.className='toastMsg'; e.style.animation='none';   // stays until tapped, no 2.4 s fade
+    e.textContent='Update ready';
+    var b=document.createElement('button');
+    b.textContent='Tap to reload'; b.onclick=onSwUpdateTap;
+    e.appendChild(b); w.appendChild(e);
+  }catch(err){}
+}
+// An open sheet may hold unsaved typing: refuse, like the new-day reload does.
+// A sync in flight is waited for, capped at 5 s (same shape as reloadApp's cap).
+// reloadApp itself saves first and logs lifecycle reload:swUpdate.
+function onSwUpdateTap(){
+  var scrim=document.getElementById('scrim');
+  if(scrim && scrim.classList.contains('show')){ toast('Close the editor first'); return; }
+  var p=(typeof _syncInFlight!=='undefined' && _syncInFlight && typeof _syncInFlight.then==='function') ? _syncInFlight : null;
+  if(!p){ reloadApp('swUpdate'); return; }
+  var done=false;
+  var go=function(){ if(done) return; done=true; reloadApp('swUpdate'); };
+  setTimeout(go, 5000);
+  p.then(go, go);
+}
+function registerServiceWorker(){
+  if(!('serviceWorker' in navigator)){ startReminderScheduler(); return; }
+  var sw=navigator.serviceWorker;
+  var hadController=!!sw.controller, shown=false;
+  try{
+    sw.addEventListener('controllerchange', function(){
+      if(!shouldOfferSwUpdate(hadController, shown)) return;
+      shown=true;
+      showSwUpdateBanner();
+    });
+  }catch(e){}
+  sw.register('sw.js', { updateViaCache: 'none' })
+    .then(function(){ startReminderScheduler(); })
+    .catch(function(err){
+      try{ if(typeof logEvent==="function") logEvent({kind:'lifecycle', detail:'swRegisterFail', error:String(err && err.message || err).slice(0,200)}); }catch(e){}
+      startReminderScheduler();
+    });
+}
+// A TWA or installed PWA kept in memory never navigates, so the browser never
+// checks for a new sw.js and the banner above would never appear. Ask on
+// foregrounding, at most once per 30 min.
+var _swLastUpdateCheck = 0;
+function maybeCheckSwUpdate(nowMs){
+  if(nowMs - _swLastUpdateCheck < 30*60*1000) return;
+  _swLastUpdateCheck = nowMs;
+  try{
+    if(navigator.serviceWorker && navigator.serviceWorker.getRegistration){
+      navigator.serviceWorker.getRegistration().then(function(r){ return r && r.update(); }).catch(function(){});
+    }
+  }catch(e){}
+}
+registerServiceWorker();
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     checkReminders();
+    maybeCheckSwUpdate(Date.now());
   }
 });
 

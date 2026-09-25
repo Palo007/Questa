@@ -22,7 +22,8 @@
 //      code alone
 //   V1 APP_VERSION format vYYYY.MM.DD-HHMM (v2026.09.24-1221 or later --
 //      bumped by todo 5; later features bump again)
-//   V2 sw.js CACHE is questa-v238 or later (bumped by todo 5)
+//   V2 sw.js VERSION equals APP_VERSION and CACHE is "questa-" + VERSION
+//      (2026-09-26, design D4: the old questa-vNNN floor became this equality)
 //
 // Run: node tests/morning-rollover-contract.test.js (also run by node tests/run.js)
 
@@ -175,10 +176,14 @@ if (Object.keys(P).some(k => P[k] === null)) {
   // still caught.
   assert('V1b APP_VERSION is the todo-5 stamp v2026.09.24-1221 or later (got "' + ver + '")',
     ver >= 'v2026.09.24-1221');
-  const cache = (swSrc.match(/const CACHE\s*=\s*"([^"]+)"/) || [])[1] || '';
-  const cacheN = parseInt((cache.match(/^questa-v(\d+)$/) || [])[1] || '0', 10);
-  assert('V2 sw.js CACHE is questa-v238 or later (got "' + cache + '")',
-    cacheN >= 238);
+  // 2026-09-26 (design D4): the cache is named after the build, so the old
+  // "questa-v238 or later" floor is replaced by one stamp shared by both files.
+  // A bump of APP_VERSION alone (or of sw.js VERSION alone) now turns this red.
+  const swVer = (swSrc.match(/^const VERSION\s*=\s*"([^"]+)"/m) || [])[1] || '';
+  assert('V2a sw.js VERSION equals APP_VERSION (sw "' + swVer + '", app "' + ver + '")',
+    swVer !== '' && swVer === ver);
+  assert('V2b sw.js CACHE is derived as "questa-" + VERSION (no literal cache name)',
+    /^const CACHE\s*=\s*"questa-"\s*\+\s*VERSION\s*;/m.test(swSrc));
 }
 
 // ============ summary ============

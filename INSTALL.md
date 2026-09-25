@@ -89,8 +89,13 @@ After that it launches full-screen and runs with no network.
 `sw.js` uses a network-first strategy for the app shell, so a new version
 appears **on the next launch** after you deploy it. There is nothing to press.
 
-If you are hacking on the code and an old version seems stuck, bump the cache
-name in `sw.js` (line 3, `const CACHE = "questa-vN"`) and reload twice.
+The new service worker takes over at once. An app that is already open keeps
+running the old code until you tap the **Update ready - Tap to reload** banner
+(or reload it yourself); it never reloads on its own.
+
+If you are hacking on the code and an old version seems stuck, change the version
+stamp: `APP_VERSION` in `app.js` and `VERSION` in `sw.js`, both to the same
+`date +v%Y.%m.%d-%H%M` value (the cache is named `questa-<VERSION>`), then reload.
 
 ---
 

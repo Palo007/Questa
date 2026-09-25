@@ -1,6 +1,10 @@
 /* Questa service worker - network-first for the app shell so updates appear
    on the next launch; cache fallback keeps it working fully offline. */
-const CACHE = "questa-v246";
+/* VERSION must equal APP_VERSION (app.js line 3); tests/sw-update.test.js T5
+   fails when they differ. The cache is named after the build, so every stamp
+   bump is also a cache bump and activate drops the previous build's cache. */
+const VERSION = "v2026.09.25-2251";
+const CACHE = "questa-" + VERSION;
 const ASSETS = ["./", "./index.html", "./app.js", "./sync.js", "./manifest.json", "./icon.svg",
                 "./icon-192.png", "./icon-512.png"];
 
@@ -25,7 +29,8 @@ self.addEventListener("activate", e => {
 self.addEventListener("fetch", e => {
   if (e.request.method !== "GET") return;
   const url = new URL(e.request.url);
-  const isShell = e.request.mode === "navigate"
+  const isNav = e.request.mode === "navigate";
+  const isShell = isNav
     || url.pathname.endsWith("/")
     || url.pathname.endsWith("index.html")
     || url.pathname.endsWith("app.js")
@@ -39,16 +44,24 @@ self.addEventListener("fetch", e => {
          served to the page, AND get written into CACHE -- poisoning the offline
          copy until the next CACHE bump. Treat a bad status like being offline,
          and only cache a response we would be willing to serve. */
-      fetch(e.request).then(res => {
+      /* 2026-09-26 (D4, PWA-11): {cache:"no-cache"} revalidates every shell GET
+         with Pages (304 when unchanged) instead of reading the max-age=600 HTTP
+         cache, so a live load cannot pair build N's app.js with build N+1's
+         sync.js. It is the fetch-path twin of the install comment above. */
+      fetch(e.request, { cache: "no-cache" }).then(res => {
         if (res && res.ok) {
           const copy = res.clone();
           caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
           return res;
         }
+        /* 2026-09-26 (D4, PWA-12): index.html is a fallback for NAVIGATIONS only.
+           Served in place of app.js/sync.js it failed as "Unexpected token '<'". */
         return caches.match(e.request)
-          .then(hit => hit || caches.match("./index.html"))
+          .then(hit => hit || (isNav ? caches.match("./index.html") : undefined))
           .then(hit => hit || res);   // nothing cached -> the real response still beats nothing
-      }).catch(() => caches.match(e.request).then(hit => hit || caches.match("./index.html")))
+      }).catch(() => caches.match(e.request)
+        .then(hit => hit || (isNav ? caches.match("./index.html") : undefined))
+        .then(hit => hit || Response.error()))
     );
   } else {
     /* cache-first for static assets (icons) */

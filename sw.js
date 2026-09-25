@@ -3,7 +3,7 @@
 /* VERSION must equal APP_VERSION (app.js line 3); tests/sw-update.test.js T5
    fails when they differ. The cache is named after the build, so every stamp
    bump is also a cache bump and activate drops the previous build's cache. */
-const VERSION = "v2026.09.25-2251";
+const VERSION = "v2026.09.26-0134";
 const CACHE = "questa-" + VERSION;
 const ASSETS = ["./", "./index.html", "./app.js", "./sync.js", "./manifest.json", "./icon.svg",
                 "./icon-192.png", "./icon-512.png"];

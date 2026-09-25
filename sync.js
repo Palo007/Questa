@@ -694,6 +694,7 @@ async function syncInboxWriteReminders(){
         ? getReminderNotificationPayload(t, r, false)
         : { title: t.title || "", body: "" };
       const isOnce = r.kind === "once";
+      if(isOnce && !r.date) return;
       const days = isOnce ? null : _inboxNormalizeDays(t.type === "daily" ? t.repeat : r.days);
       items.push({
         key: String(t.id) + "#" + idx,

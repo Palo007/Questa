@@ -2143,6 +2143,44 @@ function getReminderNotificationPayload(t, r, missed) {
     tag: `questa-${t.id}`
   };
 }
+
+// PWA-17: per-slot tag. One tag per task made two slots of the same task replace
+// each other in the tray. Applied at the checkReminders call site so the payload
+// above stays byte-identical. The TWA dedupe reads only title and body, never the tag.
+function reminderNotificationTag(t, r) {
+  return `questa-${t.id}-${String(r.time || '').replace(':', '')}`;
+}
+
+// PWA-01: reminder slots between lastCheckMs and nowMs (max 7 days back) that
+// applied on their day and did not fire. Pure: no task mutation, no now().
+// includeToday=false leaves today's slots to checkReminders' same-day path.
+function findMissedReminderSlots(tasks, lastCheckMs, nowMs, includeToday) {
+  const out = [];
+  if (typeof lastCheckMs !== 'number' || !isFinite(lastCheckMs)) return out;
+  if (typeof nowMs !== 'number' || !isFinite(nowMs) || lastCheckMs > nowMs) return out;
+  const from = Math.max(lastCheckMs, nowMs - 7 * 86400000);
+  const n = new Date(nowMs);
+  const todayStart = new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime();
+  const f = new Date(from);
+  const day = new Date(f.getFullYear(), f.getMonth(), f.getDate());
+  for (; day.getTime() <= todayStart; day.setDate(day.getDate() + 1)) {
+    if (day.getTime() === todayStart && !includeToday) break;
+    (tasks || []).forEach(t => {
+      if (!t || !Array.isArray(t.reminders)) return;
+      t.reminders.forEach(r => {
+        if (!r || typeof r.time !== 'string' || !/^\d\d:\d\d$/.test(r.time)) return;
+        const slot = new Date(day.getFullYear(), day.getMonth(), day.getDate(), +r.time.slice(0, 2), +r.time.slice(3, 5));
+        const ms = slot.getTime();
+        if (!(from < ms && ms < nowMs)) return;
+        if (!reminderAppliesToday(t, r, slot)) return;
+        const date = `${slot.getFullYear()}-${String(slot.getMonth() + 1).padStart(2, '0')}-${String(slot.getDate()).padStart(2, '0')}`;
+        out.push({ k: t.id + '|' + date + '|' + r.time, taskId: t.id, title: t.title || 'Questa Reminder', date: date, time: r.time });
+      });
+    });
+  }
+  out.sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : a.date + a.time > b.date + b.time ? 1 : 0));
+  return out;
+}
 /* END_REMINDER_HELPERS */
 // Phase 1C todo 15/16: on Android, native AlarmManager (ReminderSync/ReminderReceiver)
 // owns reminders so the phone still fires them while Questa is closed. The web
@@ -2158,8 +2196,8 @@ function nativeRemindersActive(){
 let _schedulerInterval = null;
 function startReminderScheduler() {
   if (_schedulerInterval) clearInterval(_schedulerInterval);
-  checkReminders();
-  _schedulerInterval = setInterval(checkReminders, 60000);
+  runReminderPass();
+  _schedulerInterval = setInterval(runReminderPass, 60000);
 }
 
 function checkReminders() {
@@ -2184,6 +2222,7 @@ function checkReminders() {
       }
 
       const payload = getReminderNotificationPayload(t, r, missed);
+      payload.tag = reminderNotificationTag(t, r); // PWA-17: one tag per slot, not per task
       if (navigator.serviceWorker && navigator.serviceWorker.controller) {
         navigator.serviceWorker.controller.postMessage({
           type: 'SHOW_NOTIFICATION',
@@ -2203,6 +2242,100 @@ function checkReminders() {
   if (tasksChanged) {
     save();
   }
+}
+// PWA-01: cross-day missed reminders. checkReminders() only sees TODAY, so a slot
+// from an earlier day that passed while Questa was closed was lost. Each pass
+// stamps questa.reminderLastCheck; the next pass lists slots between the stamp
+// and now (up to 7 days) in questa.missedReminders.v1 (device-local, never in S).
+// In-app ONLY: no Notification / SW post. The Android DelegationService keys a
+// "Missed at HH:MM" body on TODAY's date, so a system notification for an older
+// slot would make the native side skip today's real alarm. With native alarms
+// active (TWA) the scan is skipped: native fired those slots while closed.
+function loadMissedReminders() {
+  try {
+    const a = JSON.parse(localStorage.getItem('questa.missedReminders.v1') || '[]');
+    return Array.isArray(a) ? a.filter(x => x && typeof x.k === 'string') : [];
+  } catch (e) { return []; }
+}
+function saveMissedReminders(list) {
+  try {
+    if (!list.length) localStorage.removeItem('questa.missedReminders.v1');
+    else localStorage.setItem('questa.missedReminders.v1', JSON.stringify(list.slice(-30)));
+  } catch (e) {}
+}
+function runReminderPass() {
+  const nowMs = Date.now();
+  let lastCheck = NaN;
+  try { lastCheck = parseInt(localStorage.getItem('questa.reminderLastCheck') || '', 10); } catch (e) {}
+  if (S.prefs && S.prefs.notificationsEnabled && !nativeRemindersActive()) {
+    // With permission granted, today's passed slots go out through the existing
+    // same-day "Missed at" path in checkReminders(); without it they would vanish.
+    const includeToday = (typeof Notification === 'undefined' || Notification.permission !== 'granted');
+    const found = findMissedReminderSlots(S.tasks, lastCheck, nowMs, includeToday);
+    if (found.length) {
+      const list = loadMissedReminders();
+      const seen = new Set(list.map(x => x.k));
+      found.forEach(x => { if (!seen.has(x.k)) { seen.add(x.k); list.push(x); } });
+      list.sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : a.date + a.time > b.date + b.time ? 1 : 0));
+      saveMissedReminders(list);
+    }
+  }
+  try { localStorage.setItem('questa.reminderLastCheck', String(nowMs)); } catch (e) {}
+  try { renderMissedReminders(); } catch (e) {}
+  checkReminders();
+}
+function missedReminderDayLabel(date, nowMs) {
+  const n = new Date(nowMs);
+  const p = String(date).split('-').map(Number);
+  const d = new Date(p[0], p[1] - 1, p[2]);
+  const diff = Math.round((new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime() - d.getTime()) / 86400000);
+  if (diff === 0) return 'today';
+  if (diff === 1) return 'yesterday';
+  return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()] + ' ' + d.getDate() + ' '
+    + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
+}
+function renderMissedReminders() {
+  const box = document.getElementById('missedReminders');
+  if (!box) return;
+  const list = loadMissedReminders();
+  while (box.firstChild) box.removeChild(box.firstChild);
+  if (!list.length) { box.hidden = true; return; }
+  const nowMs = Date.now();
+  const head = document.createElement('div');
+  head.className = 'mrHead';
+  const h = document.createElement('b');
+  h.textContent = 'Missed while Questa was closed';
+  const all = document.createElement('button');
+  all.type = 'button';
+  all.textContent = 'Dismiss all';
+  all.addEventListener('click', dismissAllMissedReminders);
+  head.appendChild(h);
+  head.appendChild(all);
+  box.appendChild(head);
+  const ul = document.createElement('ul');
+  list.forEach(x => {
+    const li = document.createElement('li');
+    const span = document.createElement('span');
+    span.textContent = x.time + ' ' + x.title + ' (' + missedReminderDayLabel(x.date, nowMs) + ')';
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = 'Dismiss';
+    b.setAttribute('aria-label', 'Dismiss missed reminder: ' + x.title + ' at ' + x.time);
+    b.addEventListener('click', () => dismissMissedReminder(x.k));
+    li.appendChild(span);
+    li.appendChild(b);
+    ul.appendChild(li);
+  });
+  box.appendChild(ul);
+  box.hidden = false;
+}
+function dismissMissedReminder(k) {
+  saveMissedReminders(loadMissedReminders().filter(x => x.k !== k));
+  try { renderMissedReminders(); } catch (e) {}
+}
+function dismissAllMissedReminders() {
+  saveMissedReminders([]);
+  try { renderMissedReminders(); } catch (e) {}
 }
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
@@ -6891,7 +7024,7 @@ function openOpt(key){
     const ne=S.prefs.notificationsEnabled;
     const perm=typeof Notification!=='undefined'?Notification.permission:'default';
     h+='<h4>Notifications</h4>';
-    h+='<p class="optHint">Local reminders for habits, dailies, and to-dos. These fire only while Questa is open — a web app cannot wake itself once you close it. Any reminder whose time passed while Questa was shut is shown, marked <b>Missed</b>, the next time you open it that same day.</p>';
+    h+='<p class="optHint">Local reminders for habits, dailies, and to-dos. They fire only while Questa is open (or through the Android app) — a web app cannot wake itself once closed. A reminder that passed today is shown marked <b>Missed</b> when you come back; ones from earlier days (up to 7) are listed at the top of the app.</p>';
     h+='<div class="optChoices">';
     h+='<button type="button" class="'+(ne?'on':'')+'" onclick="setNotificationsPref(true)">On</button>';
     h+='<button type="button" class="'+(ne?'':'on')+'" onclick="setNotificationsPref(false)">Off</button>';
@@ -8674,9 +8807,12 @@ function maybeCheckSwUpdate(nowMs){
   }catch(e){}
 }
 registerServiceWorker();
+// Show missed reminders kept from an earlier pass right away, before the
+// scheduler's first pass (which waits for the service worker registration).
+try{ renderMissedReminders(); }catch(e){}
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
-    checkReminders();
+    runReminderPass();
     maybeCheckSwUpdate(Date.now());
   }
 });

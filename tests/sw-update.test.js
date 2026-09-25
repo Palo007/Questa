@@ -406,7 +406,8 @@ function seedIndexOnly(sw){ sw.store.set('seed', new Map([[keyOf('./index.html')
     }
     ok(t, 'T9a foreground SW update check runs at most once per 30 min');
     ok(/^registerServiceWorker\(\);/m.test(appSrc), 'T9b wiring: registerServiceWorker() is called at boot');
-    ok(/visibilitychange[\s\S]{0,200}checkReminders\(\);[\s\S]{0,120}maybeCheckSwUpdate\(Date\.now\(\)\)/.test(appSrc),
+    // D6 (PWA-01): the listener now calls runReminderPass(), which ends in checkReminders().
+    ok(/visibilitychange[\s\S]{0,200}runReminderPass\(\);[\s\S]{0,120}maybeCheckSwUpdate\(Date\.now\(\)\)/.test(appSrc),
       'T9c wiring: the reminder visibilitychange listener calls maybeCheckSwUpdate(Date.now())');
   }
 

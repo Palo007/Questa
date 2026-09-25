@@ -39,6 +39,8 @@ function assert(desc, cond) {
 // =========================================================================
 const railFn = extractFunction(appSrc, /^function rail\(t\)\{/, 'rail');
 const escFn  = extractFunction(appSrc, /^function esc\(s\)\{/, 'esc');
+// 2026-09-25 (PWA-22): rail wraps the id in jsq() inside onclick.
+const jsqFn  = extractFunction(appSrc, /^function jsq\(s\)\{/, 'jsq');
 
 // rail() calls these two only on the not-done/not-due-today branch. Returning
 // "due today" keeps the notdue badge out of the way unless a test asks for it.
@@ -51,7 +53,7 @@ const stubs = [
 
 const sandbox = { console };
 vm.createContext(sandbox);
-vm.runInContext(stubs + '\n' + escFn + '\n' + railFn, sandbox);
+vm.runInContext(stubs + '\n' + escFn + '\n' + jsqFn + '\n' + railFn, sandbox);
 
 function renderRail(prefs, task, notDue) {
   sandbox.S.prefs = prefs;

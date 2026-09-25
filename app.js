@@ -2711,7 +2711,7 @@ function drawYesterCheck(){
   h+='<div class="yList">';
   _yesterMissed.forEach(t=>{
     const on=!!_yesterTick[t.id];
-    h+='<div class="yItem'+(on?' on':'')+'" onclick="toggleYesterTick(\''+t.id+'\')">'+
+    h+='<div class="yItem'+(on?' on':'')+'" onclick="toggleYesterTick(\''+jsq(t.id)+'\')">'+
          '<span class="yBox">'+(on?'✓':'')+'</span>'+
          '<span class="yBody"><span class="yTitle">'+esc(t.title)+'</span>'+
            '<span class="yNote">'+(on?'Will restore streak · +XP':'Leave unticked → counts as missed')+'</span>'+
@@ -3095,7 +3095,7 @@ function checklistBlock(t){
   if(!EXPANDED[t.id]) return '';
   let h='<div class="sublist">';
   cl.forEach((c,i)=>{
-    h+='<div class="subitem" draggable="true" data-task-id="'+t.id+'" data-idx="'+i+'" onclick="event.stopPropagation();toggleSub(\''+t.id+'\',\''+(c.id||'')+'\','+i+')">'+
+    h+='<div class="subitem" draggable="true" data-task-id="'+esc(String(t.id))+'" data-idx="'+i+'" onclick="event.stopPropagation();toggleSub(\''+jsq(t.id)+'\',\''+jsq(c.id||'')+'\','+i+')">'+
        '<span class="subbox '+(c.done?'on':'')+'">'+(c.done?'✔':'')+'</span>'+
        '<span class="subtxt '+(c.done?'sdone':'')+'">'+esc(c.text)+'</span></div>';
   });
@@ -3177,7 +3177,7 @@ function rail(t){
   const cl=(t.checklist||[]);
   if(cl.length){
     const doneCl=cl.filter(c=>c.done).length;
-    items.push('<span class="subFrac'+(doneCl===cl.length?' full':'')+'" onclick="event.stopPropagation();toggleExpand(\''+t.id+'\')">'+
+    items.push('<span class="subFrac'+(doneCl===cl.length?' full':'')+'" onclick="event.stopPropagation();toggleExpand(\''+jsq(t.id)+'\')">'+
         '<b>'+doneCl+'</b><i></i><b>'+cl.length+'</b></span>');
   }
   return '<div class="rail">'+items.join('')+'</div>';
@@ -3191,18 +3191,18 @@ function taskCard(t){
   const ccol=valColor(t.value)[1];
   const inner = t.done ? '<span class="ckmark">✓</span>' : '<span class="ckbox"></span>';
   const notDue = t.type==='daily' && !t.done && !isDailyDueToday(t);
-  return '<div class="task '+t.type+' '+(t.done?'done':'')+(notDue?' notdue':'')+'" draggable="'+(dragOK(t.type)?'true':'false')+'" data-id="'+t.id+'" data-list="tasks">'+
+  return '<div class="task '+esc(String(t.type))+' '+(t.done?'done':'')+(notDue?' notdue':'')+'" draggable="'+(dragOK(t.type)?'true':'false')+'" data-id="'+esc(String(t.id))+'" data-list="tasks">'+
     '<div class="valdot" style="background:'+ccol+'"></div>'+
-    '<div class="check" onclick="toggle(\''+t.id+'\',event)">'+inner+'</div>'+
-    '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+rail(t)+'</div>';
+    '<div class="check" onclick="toggle(\''+jsq(t.id)+'\',event)">'+inner+'</div>'+
+    '<div class="body" onclick="openEdit(\''+jsq(t.id)+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+rail(t)+'</div>';
 }
 function habitCard(t){
   const ccol=valColor(t.value)[1];
   const up = t.up!==false, down = t.down!==false;
-  return '<div class="task habit" draggable="'+(dragOK('habit')?'true':'false')+'" data-id="'+t.id+'" data-list="tasks"><div class="valdot" style="background:'+ccol+'"></div>'+
-    (up?'<div class="check hbtn up" onclick="scoreHabit(\''+t.id+'\',1,event)">+</div>':'<div class="check hbtn off">+</div>')+
-    '<div class="body" onclick="openEdit(\''+t.id+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+rail(t)+
-    (down?'<div class="check hbtn down" onclick="scoreHabit(\''+t.id+'\',-1,event)">−</div>':'<div class="check hbtn off">−</div>')+'</div>';
+  return '<div class="task habit" draggable="'+(dragOK('habit')?'true':'false')+'" data-id="'+esc(String(t.id))+'" data-list="tasks"><div class="valdot" style="background:'+ccol+'"></div>'+
+    (up?'<div class="check hbtn up" onclick="scoreHabit(\''+jsq(t.id)+'\',1,event)">+</div>':'<div class="check hbtn off">+</div>')+
+    '<div class="body" onclick="openEdit(\''+jsq(t.id)+'\')"><div class="ttl">'+esc(t.title||'Untitled')+'</div>'+metaRow(t)+'</div>'+rail(t)+
+    (down?'<div class="check hbtn down" onclick="scoreHabit(\''+jsq(t.id)+'\',-1,event)">−</div>':'<div class="check hbtn off">−</div>')+'</div>';
 }
 function sortActiveFunc(tab){ return (SORT&&SORT[tab]&&SORT[tab]!=="manual"); }
 function colTitle(title, addType, customTabKey){
@@ -3271,7 +3271,7 @@ function addTag(name){ name=(name||'').trim(); if(!name) return null; ensureTags
 // list, then save() AND render(). The tag editor offers add and toggle only.
 function tagChips(t){ const ids=taskTags(t); if(!ids.length) return '';
   return '<span class="tagChips">'+ids.map(id=>{ const g=tagById(id); if(!g) return '';
-    return '<span class="tagChip" style="--tc:'+esc(g.color)+'">'+esc(g.name)+'</span>'; }).join('')+'</span>'; }
+    return '<span class="tagChip" style="--tc:'+esc(cssColor(g.color))+'">'+esc(g.name)+'</span>'; }).join('')+'</span>'; }
 // tag filter (per screen, OR)
 function toggleTagFilter(tab,id){ TAGFILTER[tab]=TAGFILTER[tab]||[]; const i=TAGFILTER[tab].indexOf(id);
   if(i<0) TAGFILTER[tab].push(id); else TAGFILTER[tab].splice(i,1); S.prefs.tagFilter=TAGFILTER; save(); render(); }
@@ -3292,7 +3292,7 @@ function tagFilterBar(tab){
   const noneBtn = '<button class="tagBtn' + (noneActive ? ' on' : '') + '" style="--tc:var(--muted)" onclick="toggleTagFilter(\''+tab+'\',\'none\')">None</button>';
   return '<div class="filterBar tagFilterBar"><span class="sortLbl">Tags</span>'+
     noneBtn+
-    S.tags.map(g=>'<button class="tagBtn'+(sel.indexOf(g.id)>=0?' on':'')+'" style="--tc:'+esc(g.color)+'" onclick="toggleTagFilter(\''+jsq(tab)+'\',\''+jsq(g.id)+'\')">'+esc(g.name)+'</button>').join('')+
+    S.tags.map(g=>'<button class="tagBtn'+(sel.indexOf(g.id)>=0?' on':'')+'" style="--tc:'+esc(cssColor(g.color))+'" onclick="toggleTagFilter(\''+jsq(tab)+'\',\''+jsq(g.id)+'\')">'+esc(g.name)+'</button>').join('')+
     (sel.length?'<button class="tagClear" onclick="clearTagFilter(\''+tab+'\')">clear</button>':'')+'</div>';
 }
 // tag editing inside the task sheet
@@ -3305,11 +3305,11 @@ function tagEditorBlock(t){
   ensureTags(); const own=taskTags(t);
   let h='<label>Tags</label><div class="tagEdit">';
   h+= own.length? own.map(id=>{ const g=tagById(id); if(!g) return '';
-      return '<span class="tagChip on" style="--tc:'+esc(g.color)+'" onclick="toggleEditTag(\''+jsq(id)+'\')">'+esc(g.name)+' \u00d7</span>'; }).join('')
+      return '<span class="tagChip on" style="--tc:'+esc(cssColor(g.color))+'" onclick="toggleEditTag(\''+jsq(id)+'\')">'+esc(g.name)+' \u00d7</span>'; }).join('')
     : '<span class="tagNone">No tags yet.</span>';
   h+='</div>';
   const others=S.tags.filter(g=>own.indexOf(g.id)<0);
-  if(others.length){ h+='<div class="tagEdit tagPick">'+others.map(g=>'<span class="tagChip" style="--tc:'+esc(g.color)+'" onclick="toggleEditTag(\''+jsq(g.id)+'\')">+ '+esc(g.name)+'</span>').join('')+'</div>'; }
+  if(others.length){ h+='<div class="tagEdit tagPick">'+others.map(g=>'<span class="tagChip" style="--tc:'+esc(cssColor(g.color))+'" onclick="toggleEditTag(\''+jsq(g.id)+'\')">+ '+esc(g.name)+'</span>').join('')+'</div>'; }
   h+='<div class="tagAddRow"><input type="text" id="eTagInput" placeholder="New tag\u2026" autocomplete="off" onkeydown="if(event.key===\'Enter\'){event.preventDefault();addTagToEdit();}"><button type="button" class="btn ghost" onclick="addTagToEdit()">+ Add</button></div>';
   return h;
 }
@@ -3411,9 +3411,9 @@ function viewRewards(){
     '<div class="small" style="margin:0 4px 10px">Spend gold on real-life rewards you define yourself.</div>'+sortBar('rewards');
   const _rw=sortList(S.rewards,'rewards');
   const searchRw = applySearch(_rw, 'rewards');
-  h+= searchRw.length ? searchRw.map(r=>'<div class="task" draggable="'+(dragOK('reward')?'true':'false')+'" data-id="'+r.id+'" data-list="rewards"><div class="valdot" style="background:var(--gold)"></div>'+
-    '<div class="check coin" onclick="buyReward(\''+r.id+'\')" title="Buy">'+COIN_SVG+'</div>'+
-    '<div class="body" onclick="openReward(\''+r.id+'\')"><div class="ttl">'+esc(r.title)+'</div>'+
+  h+= searchRw.length ? searchRw.map(r=>'<div class="task" draggable="'+(dragOK('reward')?'true':'false')+'" data-id="'+esc(String(r.id))+'" data-list="rewards"><div class="valdot" style="background:var(--gold)"></div>'+
+    '<div class="check coin" onclick="buyReward(\''+jsq(r.id)+'\')" title="Buy">'+COIN_SVG+'</div>'+
+    '<div class="body" onclick="openReward(\''+jsq(r.id)+'\')"><div class="ttl">'+esc(r.title)+'</div>'+
     '<div class="meta"><span class="pill">'+esc(String(r.cost))+' gold</span>'+(r.notes?'<span>📝</span>':'')+'</div></div></div>').join('')
     : '<div class="empty">No rewards yet. Create one to spend your gold on.</div>';
   return h;
@@ -4027,7 +4027,7 @@ function renderHabitPicker(filter){
   if(!habits.length){ list.innerHTML='<div class="mEmpty">'+(f?'No matching habits.':'All habits added.')+'</div>'; return; }
   list.innerHTML=habits.slice(0,50).map(t=>{
     const tn=t.repsPerTap||repsPerTap(t.title);
-    return '<button type="button" class="mPickItem" data-hid="'+t.id+'">'+
+    return '<button type="button" class="mPickItem" data-hid="'+esc(String(t.id))+'">'+
       '<span class="mPickName">'+esc(t.title)+'</span>'+
       '<span class="mPickAdd">+ add</span></button>';
   }).join('');
@@ -4046,9 +4046,9 @@ function renderSelectedHabits(){
     const t=(S.tasks||[]).find(x=>x.id===h.id);
     const titleNum=t? (t.repsPerTap||repsPerTap(t.title)) : '';
     return '<div class="mSelRow">'+
-      '<button type="button" class="mSelRemove" data-hid="'+h.id+'" title="Remove">×</button>'+
+      '<button type="button" class="mSelRemove" data-hid="'+esc(String(h.id))+'" title="Remove">×</button>'+
       '<span class="mSelName">'+esc(t?t.title:h.id)+'</span>'+
-      '<span class="mSelReps"><input type="number" min="0" class="mReps" data-hid="'+h.id+'" value="'+(h.reps===''?'':h.reps)+'" placeholder="'+titleNum+'"><span class="mSelUnit">/tap</span></span>'+
+      '<span class="mSelReps"><input type="number" min="0" class="mReps" data-hid="'+esc(String(h.id))+'" value="'+esc(String(h.reps===''?'':h.reps))+'" placeholder="'+esc(String(titleNum))+'"><span class="mSelUnit">/tap</span></span>'+
       '</div>';
   }).join('');
   wrap.querySelectorAll('.mReps').forEach(inp=>{
@@ -4276,13 +4276,13 @@ function anSnapshotHistoryBucket(v, from, to){
 function anListHTML(rows){
   if(!rows.length) return '<div class="anNote">No data in this window.</div>';
   return '<div class="anList">'+rows.map(r=>'<div class="anListRow">'+
-    (r.color?'<span class="anDot" style="background:'+r.color+'"></span>':'')+
+    (r.color?'<span class="anDot" style="background:'+cssColor(r.color)+'"></span>':'')+
     '<span class="anListLbl">'+esc(String(r.label))+'</span>'+
     '<span class="anListVal">'+Number(r.v).toLocaleString()+'</span></div>').join('')+'</div>';
 }
 function anRowLegend(rows){
   if(!rows.some(r=>r.color)) return '';
-  return '<div class="anLegendTags">'+rows.filter(r=>r.color).map(r=>'<span class="anLegTag"><i style="background:'+r.color+'"></i>'+esc(r.label)+'</span>').join('')+'</div>';
+  return '<div class="anLegendTags">'+rows.filter(r=>r.color).map(r=>'<span class="anLegTag"><i style="background:'+cssColor(r.color)+'"></i>'+esc(r.label)+'</span>').join('')+'</div>';
 }
 function heatLegend(){ return '<div class="anLegend">Less <i style="background:var(--panel2)"></i><i style="background:#6f4ddb"></i><i style="background:#8a5cff"></i><i style="background:#a98bff"></i><i style="background:#bda8ff"></i> More</div>'; }
 function barsCard(rows){ return '<div class="anCard full">'+svgBars(rows.map(r=>({label:r.label,v:r.v})),'var(--accent)')+'</div>'+anRowLegend(rows); }
@@ -4344,7 +4344,7 @@ function anTagSummaryBody(from,to){
     return {name:g.name,color:g.color,count:items.length,comp:comp,created:created};
   }).sort((a,b)=>b.count-a.count);
   let h='<div class="anCard full">'+svgBars(rows.map(r=>({label:r.name,v:r.count})),'var(--accent)')+'</div>';
-  h+='<div class="anList">'+rows.map(r=>'<div class="anListRow"><span class="anDot" style="background:'+r.color+'"></span><span class="anListLbl">'+esc(r.name)+'</span><span class="anListVal">'+r.count+' items · '+r.comp+' done · '+r.created+' new</span></div>').join('')+'</div>';
+  h+='<div class="anList">'+rows.map(r=>'<div class="anListRow"><span class="anDot" style="background:'+cssColor(r.color)+'"></span><span class="anListLbl">'+esc(r.name)+'</span><span class="anListVal">'+r.count+' items · '+r.comp+' done · '+r.created+' new</span></div>').join('')+'</div>';
   return h;
 }
 // ---- views UI + builder ------------------------------------------------
@@ -4384,9 +4384,9 @@ function drawViewBuilder(){
   if(VDRAFT.source==='metric'){
     const ms=(anPrefs().metrics||[]);
     h+='<label>Reps metric</label><div class="seg vSeg">'+
-       ms.map(m=>'<button class="'+(VDRAFT.metricId===m.id?'on':'')+'" onclick="vSet(\'metricId\',\''+m.id+'\')">'+esc(m.name)+'</button>').join('')+
+       ms.map(m=>'<button class="'+(VDRAFT.metricId===m.id?'on':'')+'" onclick="vSet(\'metricId\',\''+jsq(m.id)+'\')">'+esc(m.name)+'</button>').join('')+
        '<button onclick="bAddMetric()">+ new metric</button></div>';
-    if(VDRAFT.metricId){ h+='<div class="mMetricEditRow"><button class="anMini" onclick="bEditMetric(\''+VDRAFT.metricId+'\')">Edit this metric</button></div>'; }
+    if(VDRAFT.metricId){ h+='<div class="mMetricEditRow"><button class="anMini" onclick="bEditMetric(\''+jsq(VDRAFT.metricId)+'\')">Edit this metric</button></div>'; }
     else if(!ms.length){ h+='<div class="mHint">No reps metrics yet — tap “+ new metric” to create one.</div>'; }
   }
   if(V_SPECIAL.indexOf(VDRAFT.source)<0){
@@ -4394,7 +4394,7 @@ function drawViewBuilder(){
     h+='<label>Chart</label>'+seg('chart',V_CHARTS);
     if(VDRAFT.source!=='metric'){
       h+='<label>Only these types (optional)</label><div class="seg vSeg">'+V_TYPES.map(o=>'<button class="'+((VDRAFT.types||[]).indexOf(o[1])>=0?'on':'')+'" onclick="vToggleType(\''+o[1]+'\')">'+o[0]+'</button>').join('')+'</div>';
-      if(S.tags.length){ h+='<label>Only these tags (optional)</label><div class="tagEdit">'+S.tags.map(g=>'<span class="tagChip'+((VDRAFT.tags||[]).indexOf(g.id)>=0?' on':'')+'" style="--tc:'+g.color+'" onclick="vToggleTag(\''+g.id+'\')">'+esc(g.name)+'</span>').join('')+'</div>'; }
+      if(S.tags.length){ h+='<label>Only these tags (optional)</label><div class="tagEdit">'+S.tags.map(g=>'<span class="tagChip'+((VDRAFT.tags||[]).indexOf(g.id)>=0?' on':'')+'" style="--tc:'+cssColor(g.color)+'" onclick="vToggleTag(\''+jsq(g.id)+'\')">'+esc(g.name)+'</span>').join('')+'</div>'; }
     }
   } else {
     h+='<div class="mHint">This view shows a fixed summary layout and ignores grouping, chart and filters.</div>';
@@ -4427,9 +4427,9 @@ function anViewsUI(from,to){
     h+='<div class="anViewSection">';
     h+='<div class="anViewHead"><span class="anViewName">'+esc(v.name)+'</span>'+
        '<span class="anViewMeta">'+esc(viewMetaLabel(v))+'</span>'+
-       '<button class="anMini" title="Move up" onclick="moveView(\''+v.id+'\',-1)"'+(i===0?' disabled':'')+'>↑</button>'+
-       '<button class="anMini" title="Move down" onclick="moveView(\''+v.id+'\',1)"'+(i===views.length-1?' disabled':'')+'>↓</button>'+
-       '<button class="anMini" onclick="editView(\''+v.id+'\')">edit</button></div>';
+       '<button class="anMini" title="Move up" onclick="moveView(\''+jsq(v.id)+'\',-1)"'+(i===0?' disabled':'')+'>↑</button>'+
+       '<button class="anMini" title="Move down" onclick="moveView(\''+jsq(v.id)+'\',1)"'+(i===views.length-1?' disabled':'')+'>↓</button>'+
+       '<button class="anMini" onclick="editView(\''+jsq(v.id)+'\')">edit</button></div>';
     h+='<div class="anViewBody">'+renderView(v,from,to)+'</div>';
     h+='</div>';
   });
@@ -4488,7 +4488,7 @@ function anDetailDashboard(from,to){
   let h='';
   h+='<div class="anSection">Reps metric</div>';
   h+='<div class="anChips" id="anMetricChips">'+
-     p.metrics.map(m=>'<span class="anChip'+(m.id===p.activeMetric?' on':'')+'" data-mid="'+m.id+'">'+esc(m.name)+'</span>').join('')+
+     p.metrics.map(m=>'<span class="anChip'+(m.id===p.activeMetric?' on':'')+'" data-mid="'+esc(String(m.id))+'">'+esc(m.name)+'</span>').join('')+
      '<span class="anChip" id="anMetricAdd" style="border-style:dashed">+ add</span></div>';
   h+='<div id="anMetricEdit"></div>';
   const M=anActiveMetric();
@@ -5711,8 +5711,8 @@ function tipDelayMs(){ const d=(S.prefs&&S.prefs.tipDelay); return Math.max(0,(d
 function tipHTML(text){
   const lines=String(text||'').split('\n').filter(l=>l.length);
   if(!lines.length) return '';
-  let h='<div class="ttTitle">'+lines[0]+'</div>';
-  if(lines.length>1) h+='<div class="ttBody">'+lines.slice(1).join('<br>')+'</div>';
+  let h='<div class="ttTitle">'+esc(lines[0])+'</div>';
+  if(lines.length>1) h+='<div class="ttBody">'+lines.slice(1).map(esc).join('<br>')+'</div>';
   return h;
 }
 // show tip near (x,y). above=true puts it above the point (used on touch so a
@@ -8426,7 +8426,7 @@ function uploadFace(ev){
   rd.readAsDataURL(f);
 }
 function removeFace(){ delete S.char.faceImg; save(); renderStats(); openSettings(); toast('Image removed'); }
-function esc(s){ return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+function esc(s){ return (s||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
 // Escape a value that lands inside a SINGLE-quoted JS string literal within a
 // double-quoted inline handler, e.g. onclick="f('<here>')". esc() is not enough:
 // the HTML parser decodes entities BEFORE the JS is compiled, so &#39; becomes a
@@ -8437,6 +8437,13 @@ function jsq(s){
     .replace(/\\/g,'\\\\')
     .replace(/'/g,"\\'")
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+// Allow a synced colour into a style="" value only if it cannot leave the
+// declaration: #hex, var(--name) or a plain colour name. Anything else (url(),
+// ';', quotes) falls back. Pure: tests slice it out on its own.
+function cssColor(c,fallback){
+  const s=String(c==null?'':c);
+  return (/^#[0-9a-f]{3,8}$/i.test(s)||/^var\(--[a-z0-9-]+\)$/.test(s)||/^[a-z]{3,20}$/i.test(s)) ? s : (fallback||'var(--muted)');
 }
 // Ordered list of screens; used by both the nav bar and swipe navigation.
 const TABS=['habits','dailies','todos','analytics','rewards'];

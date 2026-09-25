@@ -34,6 +34,8 @@ const xpToLevelFn = extractFunction(appSrc, /^function xpToLevel\(lvl\)\{/, 'xpT
 const completionRewardFn = extractFunction(appSrc, /^function completionReward\(task\)\{/, 'completionReward');
 const gainXpFn = extractFunction(appSrc, /^function gainXp\(xp\)\{/, 'gainXp');
 const escFnSrc = extractFunction(appSrc, /^function esc\(s\)\{/, 'esc');
+// 2026-09-25 (PWA-22): drawYesterCheck wraps the id in jsq() inside onclick.
+const jsqFnSrc = extractFunction(appSrc, /^function jsq\(s\)\{/, 'jsq');
 const isDailyDueOnFn = extractFunction(appSrc, /^function isDailyDueOn\(t, dow\)\{/, 'isDailyDueOn');
 const dayStampFn = extractFunction(appSrc, /^function dayStamp\(d\)\{/, 'dayStamp');
 const localDayFn = extractFunction(appSrc, /^function localDayDateAtOffset\(baseMs, dayOffset\)\{/, 'localDayDateAtOffset');
@@ -72,6 +74,7 @@ const code = [
   completionRewardFn,
   gainXpFn,
   escFnSrc,
+  jsqFnSrc,
   isDailyDueOnFn,
   dayStampFn,
   localDayFn,

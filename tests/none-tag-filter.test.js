@@ -29,6 +29,8 @@ const ensureSrc  = extract(/function ensureTags\(\)\{[\s\S]*?\r?\n\}/, 'ensureTa
 const tagByIdSrc = extract(/function tagById\(id\)\{[\s\S]*?\r?\n?\}/, 'tagById');
 const applySrc   = extract(/function applyTagFilter\(list,tab\)\{[\s\S]*?\r?\n\}/, 'applyTagFilter');
 const barSrc     = extract(/function tagFilterBar\(tab\)\{[\s\S]*?\n\}/, 'tagFilterBar');
+// 2026-09-25 (PWA-22): tagFilterBar passes the tag colour through cssColor().
+const cssColorSrc = extract(/function cssColor\([\s\S]*?\r?\n\}/, 'cssColor');
 
 let failures = 0;
 function assert(desc, cond) {
@@ -39,7 +41,7 @@ function assert(desc, cond) {
 // Build a context exposing only what the extracted functions touch.
 const factory = new Function(
   'escSrc', 'taskTagsSrc', 'ensureSrc', 'tagByIdSrc', 'applySrc', 'barSrc',
-  escSrc + '\n' + taskTagsSrc + '\n' + ensureSrc + '\n' + tagByIdSrc + '\n' + applySrc + '\n' + barSrc + `
+  escSrc + '\n' + taskTagsSrc + '\n' + ensureSrc + '\n' + tagByIdSrc + '\n' + applySrc + '\n' + barSrc + '\n' + cssColorSrc + `
   return { esc, taskTags, ensureTags, tagById, applyTagFilter, tagFilterBar };
 `
 );

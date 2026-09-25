@@ -1,0 +1,30 @@
+{
+  "tasks": [
+    {
+      "id": "t-once-nodate",
+      "type": "todo",
+      "title": "Call dentist",
+      "done": false,
+      "reminders": [
+        { "id": "r1", "enabled": true, "kind": "once", "time": "09:00", "lastFiredKey": "" }
+      ]
+    },
+    {
+      "id": "t-once-dated",
+      "type": "todo",
+      "title": "Renew passport",
+      "done": false,
+      "reminders": [
+        { "id": "r2", "enabled": true, "kind": "once", "time": "09:30", "date": "2026-10-01", "lastFiredKey": "" }
+      ]
+    },
+    {
+      "id": "h-weekly",
+      "type": "habit",
+      "title": "Stretch",
+      "reminders": [
+        { "id": "r3", "enabled": true, "kind": "weekly", "time": "08:00", "days": [false, true, true, true, true, true, false], "lastFiredKey": "" }
+      ]
+    }
+  ]
+}

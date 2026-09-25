@@ -154,6 +154,29 @@ attempt('rem-1: first call uploads once to /inbox-meta/reminders.json', async ()
   assert('rem-7: date is set', body.items[0].date === '2026-10-01');
   assert('rem-7: days is null for a once reminder', body.items[0].days === null);
   assert('rem-7: type is todo', body.items[0].type === 'todo');
+})).then(() => attempt('rem-8: an undated once reminder is not emitted (CR-PWA-001)', async () => {
+  const todo = { id: 't3', type: 'todo', title: 'Call dentist', done: false,
+    reminders: [
+      { id: 'rt3', enabled: true, kind: 'once', time: '09:00', lastFiredKey: '' },
+      { id: 'rt4', enabled: true, kind: 'weekly', time: '10:00', days: [true, true, true, true, true, true, true], lastFiredKey: '' }
+    ] };
+  const c = makeCtx([todo, mkHabit('h1', '09:00', [true, true, true, true, true, true, true])]);
+  await c.sandbox.syncInboxWriteReminders();
+  const body = JSON.parse(c.uploads[0].text);
+  assert('rem-8: no t3 item with date:null and days:null', !body.items.some(it => it.taskId === 't3' && it.days === null && it.date === null));
+  assert('rem-8: exactly 2 items', body.items.length === 2);
+  assert('rem-8: weekly sibling keeps key t3#1', body.items.some(it => it.taskId === 't3' && it.key === 't3#1'));
+})).then(() => attempt('rem-9: golden fixture CR-PWA-001', async () => {
+  const fxDir = path.join(__dirname, 'fixtures', 'CR-PWA-001');
+  const input = JSON.parse(fs.readFileSync(path.join(fxDir, 'input_state_once_no_date.json'), 'utf8'));
+  const expected = JSON.parse(fs.readFileSync(path.join(fxDir, 'expected_reminders.json'), 'utf8'));
+  const c = makeCtx(input.tasks);
+  await c.sandbox.syncInboxWriteReminders();
+  const body = JSON.parse(c.uploads[0].text);
+  assert('rem-9: v is 1', body.v === 1);
+  assert('rem-9: items match expected_reminders.json', JSON.stringify(body.items) === JSON.stringify(expected.items));
+  const hash = JSON.parse(c.store['questa.sync.v1']).inboxRemindersHash;
+  assert('rem-9: inboxRemindersHash is 781f046d:348 (got ' + hash + ')', hash === '781f046d:348');
 })).then(() => {
 
   // =========================================================================

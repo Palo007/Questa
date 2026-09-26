@@ -315,6 +315,53 @@ function _adoptStateStamps(){
 }
 /* BEGIN_DURABLE_STATE_HELPERS */
 let _stateWritePromise = null;
+// D5 2026-09-26 (PWA-06, PWA-04): device-only durability readouts set by save().
+// None of these live in S, so syncSubset() never copies them and the export token
+// map (_EXPORT_FIELD_MAP) is untouched -- an older build can still import a backup.
+//  - localEditAt: wall-clock Date.now() of the last USER save (never a syncApply
+//    save), also kept in "questa.localEditAt.v1". The "not synced" badge compares it
+//    with sync's lastSyncAt, which is also this device's Date.now(). It must NOT use
+//    S.__savedAt: that is the HLC (now()), which a peer can push up to 120 s ahead.
+//  - _lastSaveChars: length of the JSON save() just wrote (no second stringify).
+let localEditAt = null;
+let _lastSaveChars = 0;
+let _storageWarnLevel = null;   // 0, 80 or 90: the last size warning shown (mirrors "questa.storageWarn.v1")
+// Roughly the localStorage cap in UTF-16 code units in Chromium/Brave. An
+// approximation, and it covers the state key only (not events, not IndexedDB).
+const STATE_BUDGET_CHARS = 5000000;
+// Called by _saveCommit right after the localStorage write (JSON length passed in:
+// no second stringify). A USER edit only is stamped: a syncApply save (applying) is
+// the merge being written back, not something this device still has to upload.
+function _noteSaveCommitted(jsonLen, applying, quotaHit){
+  _lastSaveChars = jsonLen;
+  if(!applying){
+    localEditAt = Date.now();   // Date.now(), not now(): see localEditAt above
+    try{ localStorage.setItem("questa.localEditAt.v1", String(localEditAt)); }catch(_){}
+  }
+  if(!quotaHit) checkStorageWarning();
+}
+function storageUsage(){
+  var chars = _lastSaveChars;
+  if(!chars){ try{ var raw = localStorage.getItem(STORE_KEY); chars = raw ? raw.length : 0; }catch(_){ chars = 0; } }
+  return { chars: chars, budget: STATE_BUDGET_CHARS, pct: Math.floor(chars / STATE_BUDGET_CHARS * 100) };
+}
+// Warn once at 80 %, once more at 90 %; re-armed only after dropping below 70 %.
+// Runs via _noteSaveCommitted after setItem returned, inside a try: it can never
+// throw into the save path and does not touch the quota-failure handling.
+function checkStorageWarning(){
+  var u = storageUsage();
+  var level = _storageWarnLevel;
+  if(level === null){ try{ level = Number(localStorage.getItem("questa.storageWarn.v1")) || 0; }catch(_){ level = 0; } }
+  var next = level;
+  if(u.pct < 70) next = 0;
+  else if(u.pct >= 90 && level < 90) next = 90;
+  else if(u.pct >= 80 && level < 80) next = 80;
+  _storageWarnLevel = next;
+  if(next !== level){ try{ localStorage.setItem("questa.storageWarn.v1", String(next)); }catch(_){} }
+  if(next > level && typeof toast==="function"){
+    toast("Questa's saved data is " + u.pct + " % full (" + (u.chars/1e6).toFixed(1) + " of " + (u.budget/1e6) + " MB). Export a backup now. If it fills up, new changes may not be saved.");
+  }
+}
 // 2026-07-13 P0-1: save() must be fully SYNCHRONOUS. The previous design
 // deferred the actual localStorage write into a navigator.locks.request()
 // callback, so save() returned before anything persisted — the pagehide
@@ -369,6 +416,9 @@ function save(){
       _quotaHit = true;
       try{ if(typeof logEvent==="function") logEvent({kind:"quotaError", message:String(quotaErr&&quotaErr.message||quotaErr)}); }catch(_){}
     }
+    // D5 PWA-04/PWA-06: size meter, user-edit stamp, 80/90 % warning. typeof-guarded
+    // and try-wrapped: slice tests eval save() without it, and it must never throw here.
+    if(typeof _noteSaveCommitted==="function"){ try{ _noteSaveCommitted(_json.length, applying, _quotaHit); }catch(_){} }
     // Fire-and-forget durable mirror. IDB commits (oncomplete) far more
     // reliably than localStorage's batched flush; this is the actual fix, not
     // a backup of one. Exposed as _stateWritePromise so lifecycle handlers can
@@ -384,6 +434,7 @@ function save(){
       if(_quotaHit){ try{ if(typeof toast==="function") toast("Storage full — THIS CHANGE WAS NOT SAVED. Free up space or export a backup."); }catch(_){} }
     });
     if(typeof scheduleSync==="function" && !applying) scheduleSync();
+    if(typeof updateSyncBadge==="function"){ try{ updateSyncBadge(); }catch(_){} }
   }
   // Fast synchronous check against the companion seq key (no full-state
   // parse on the common path). If absent (legacy/first run), skip the check
@@ -6738,7 +6789,9 @@ function openSettings(){
                // 2026-09-18 (round 2): auto-backup failures have their own key now, so
                // a failed backup no longer reports itself as a sync error. Show it as
                // its own line rather than hiding it.
-               (scfg.lastBackupError?('<br><span style="color:#f7a24e">'+esc(scfg.lastBackupError)+'</span>'):'')+'</div>'+
+               (scfg.lastBackupError?('<br><span style="color:#f7a24e">'+esc(scfg.lastBackupError)+'</span>'):'')+
+               // D5 PWA-24: until the next successful round (constant text, no user data).
+               (typeof longOfflineSettingsLine==="function"?longOfflineSettingsLine(scfg):'')+'</div>'+
              '<label class="devNameLbl">Device name</label>'+
              '<div></div>'+
            '</div>'+
@@ -6780,6 +6833,11 @@ function openSettings(){
     '<button class="btn ghost" onclick="openRestorePicker()">Restore Snapshot</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json,text/plain,.txt" style="display:none" onchange="importData(event)">';
   h+='<div class="backupMeta small"><span id="lastFullBackupDate"></span><span id="lastExportDate"></span></div>';
+  // D5 PWA-03/PWA-04: eviction protection, last off-device copy, saved-data size.
+  if(typeof durabilityRowsHtml==="function"){
+    h+=durabilityRowsHtml((typeof storagePersistState==="function")?storagePersistState():null,
+      (typeof storageUsage==="function")?storageUsage():null, lastOffDeviceCopy(), Date.now());
+  }
   // K2 (2026-09-11): until now a forward clock excursion demoted this device to
   // read-only in every sync conflict with NO signal at all -- which is why it went
   // unnoticed for so long. No "resync clock" button on purpose: now() heals itself in
@@ -6800,6 +6858,8 @@ function openSettings(){
   bindTips('.infoTip');
   setTimeout(() => updateLastFullBackupText(), 100);
   setTimeout(() => updateLastExportText(), 100);
+  if(typeof fillStorageEstimate==="function") fillStorageEstimate();
+  if(typeof updateSyncBadge==="function"){ try{ updateSyncBadge(); }catch(_){} }
   checkExportStaleness();
   document.getElementById('scrim').classList.add('show');
   // Measured AFTER the scrim gets display:flex (was display:none until here) --
@@ -6820,6 +6880,183 @@ function checkExportStaleness(){
     btn.classList.remove('stale');
   }
 }
+/* BEGIN_DURABILITY_UX */
+// D5 2026-09-26 (PWA-02, PWA-03, PWA-06, PWA-24 warning): app-side durability
+// warnings. Every one is a MITIGATION that makes a platform limit visible; none
+// calls a sync function or writes sync state (sync.js is unchanged on purpose).
+// Their own stamps live in device-only localStorage keys, never in S.
+const SYNC_STALE_MS = 3600000;               // 1 h: after this the badge shows "Last synced ..."
+// Must equal sync.js TOMBSTONE_MAX_AGE_MS ("const TOMBSTONE_MAX_AGE_MS = 180 * 86400000"
+// in sync.js's tombstone-expiry block). Copied, not imported: app.js loads first.
+// tests/durability-ux.test.js T12j reads both sources and goes red if they drift.
+const LONG_OFFLINE_MS = 180 * 86400000;
+const OFF_DEVICE_NAG_MS = 7 * 86400000;
+function _readSyncCfgRaw(){
+  var c = {}; try{ c = JSON.parse(localStorage.getItem("questa.sync.v1") || "{}") || {}; }catch(e){ c = {}; }
+  return c;
+}
+// Captured while app.js loads, i.e. BEFORE sync.js exists: its first round (about 2 s
+// after it loads) rewrites lastSyncAt, and then the evidence of a long gap is gone.
+const _bootSyncSnap = (function(){
+  var c = _readSyncCfgRaw();
+  return { enabled: !!c.enabled, lastSyncAt: (c.lastSyncAt ? Number(c.lastSyncAt) : null) };
+})();
+// Pure. Both sides of the unsynced rule are this device's Date.now() (see localEditAt
+// in the durable block). Known limit: an edit made while a round is uploading can
+// read as synced until the rerun that edit queued finishes (a few seconds).
+function syncStatusFrom(cfg, editAt, nowMs){
+  cfg = cfg || {};
+  var enabled = !!cfg.enabled;
+  var last = cfg.lastSyncAt ? Number(cfg.lastSyncAt) : null;
+  var edit = Number(editAt) || 0;
+  var ageMs = (last == null) ? null : (nowMs - last);
+  return {
+    enabled: enabled,
+    lastSyncAt: last,
+    ageMs: ageMs,
+    unsynced: enabled && edit > 0 && (last == null || edit > last),
+    stale: enabled && (last == null || ageMs > SYNC_STALE_MS),
+    longOffline: enabled && last != null && ageMs > LONG_OFFLINE_MS,
+    error: (enabled && cfg.lastError) ? String(cfg.lastError) : null
+  };
+}
+function _agoText(ts, nowMs){
+  var s = Math.max(0, Math.floor((nowMs - ts) / 1000));
+  if(s < 60) return 'just now';
+  var m = Math.floor(s / 60); if(m < 60) return m + (m === 1 ? ' minute' : ' minutes') + ' ago';
+  var h = Math.floor(m / 60); if(h < 24) return h + (h === 1 ? ' hour' : ' hours') + ' ago';
+  var d = Math.floor(h / 24); return d + (d === 1 ? ' day' : ' days') + ' ago';
+}
+// Pure. "" while fresh (1 h or less).
+function staleSyncLabel(lastSyncAt, nowMs){
+  if(!lastSyncAt) return 'Never synced';
+  if(nowMs - lastSyncAt <= SYNC_STALE_MS) return '';
+  return 'Last synced ' + _agoText(lastSyncAt, nowMs);
+}
+// Must never throw. syncCfg() once sync.js is loaded, the same inline read as
+// _syncConfiguredForBoot before that.
+function readSyncStatus(nowMs){
+  if(nowMs == null) nowMs = Date.now();
+  try{
+    var cfg = (typeof syncCfg === "function") ? syncCfg() : _readSyncCfgRaw();
+    var edit = (typeof localEditAt !== "undefined" && localEditAt) ? localEditAt : null;
+    if(!edit){ try{ edit = Number(localStorage.getItem("questa.localEditAt.v1")) || null; }catch(e){ edit = null; } }
+    return syncStatusFrom(cfg, edit, nowMs);
+  }catch(e){ return syncStatusFrom({}, null, nowMs); }
+}
+// Header badge (index.html #syncBadge). Nothing at all when sync is off. Only reports:
+// tapping opens Settings, where "Sync now" already is. There is no "round finished"
+// hook in sync.js, so a 5 s poll runs ONLY while the page is visible and the badge is
+// shown; it reads the small sync config key, never the state.
+let _syncBadgeTimer = null;
+function updateSyncBadge(st){
+  var el = (typeof document !== "undefined" && document.getElementById) ? document.getElementById('syncBadge') : null;
+  if(!el) return '';
+  var nowMs = Date.now();
+  st = st || readSyncStatus(nowMs);
+  var mode = '', tip = '', text = '';
+  if(st.enabled){
+    if(st.unsynced && st.error){ mode = 'err'; tip = 'Sync problem. Tap to see details.'; }
+    else if(st.unsynced){ mode = 'unsynced'; tip = 'Not synced yet. Your latest changes are only on this device.'; }
+    else if(st.stale){ mode = 'stale'; text = staleSyncLabel(st.lastSyncAt, nowMs); tip = text; }
+  }
+  el.className = mode;
+  el.hidden = !mode;
+  el.title = tip;
+  el.setAttribute('aria-label', tip || 'Sync status');
+  var lbl = document.getElementById('syncBadgeLbl');
+  if(lbl) lbl.textContent = text;
+  var visible = !(document.visibilityState && document.visibilityState !== 'visible');
+  if(mode && visible){
+    if(!_syncBadgeTimer) _syncBadgeTimer = setInterval(function(){ try{ updateSyncBadge(); }catch(e){} }, 5000);
+  } else if(_syncBadgeTimer){ clearInterval(_syncBadgeTimer); _syncBadgeTimer = null; }
+  return mode;
+}
+function isLongOffline(snap, nowMs){
+  return !!(snap && snap.enabled && snap.lastSyncAt != null && (nowMs - snap.lastSyncAt) > LONG_OFFLINE_MS);
+}
+// PWA-02: one toast per session when the last sync is more than a day old, so the
+// user knows before re-doing work. The long-offline dialog says more, so it wins.
+let _staleToastShown = false;
+function maybeStaleSyncToast(nowMs){
+  if(_staleToastShown) return false;
+  if(nowMs == null) nowMs = Date.now();
+  var st = readSyncStatus(nowMs);
+  if(!st.enabled || st.lastSyncAt == null || st.ageMs <= 86400000) return false;
+  if(isLongOffline(_bootSyncSnap, nowMs) && st.lastSyncAt === _bootSyncSnap.lastSyncAt) return false;
+  _staleToastShown = true;
+  if(typeof toast === "function") toast(staleSyncLabel(st.lastSyncAt, nowMs) + '. What you see here may be out of date.');
+  return true;
+}
+// PWA-24 (decision A): WARNING ONLY. It calls no sync function and does not delay,
+// gate or change the first merge; the text is true before and after that merge.
+const LONG_OFFLINE_TITLE = 'This device has not synced for more than 6 months.';
+const LONG_OFFLINE_TEXT = 'Items you deleted on your other devices during that time may come back here and on your other devices after this sync. If you see old items reappear, delete them again. If you would rather replace everything on this device with your Dropbox copy, open Settings and use Force pull.';
+let _longOfflineShown = false;
+function longOfflineWarning(nowMs){
+  if(_longOfflineShown) return false;
+  if(!isLongOffline(_bootSyncSnap, nowMs == null ? Date.now() : nowMs)) return false;
+  _longOfflineShown = true;
+  if(typeof alertDialog === "function") alertDialog(LONG_OFFLINE_TITLE, LONG_OFFLINE_TEXT);
+  return true;
+}
+// Settings sync section: shown until the next successful round changes lastSyncAt.
+function longOfflineSettingsLine(cfg){
+  if(!isLongOffline(_bootSyncSnap, Date.now())) return '';
+  if(cfg && cfg.lastSyncAt && Number(cfg.lastSyncAt) !== _bootSyncSnap.lastSyncAt) return '';
+  return '<br><span style="color:#f7a24e">' + LONG_OFFLINE_TITLE + ' Items deleted on your other devices may come back. Delete them again if they do.</span>';
+}
+// PWA-03: the newest copy that survives a browser wipe of this device -- a backup
+// file the user confirmed (lastExportTs) or, with sync on, the last Dropbox round.
+function lastOffDeviceCopy(){
+  var exp = (S && S.prefs && Number(S.prefs.lastExportTs)) || 0;
+  var cfg = {}; try{ cfg = (typeof syncCfg === "function") ? syncCfg() : _readSyncCfgRaw(); }catch(e){ cfg = {}; }
+  var sy = (cfg && cfg.enabled && Number(cfg.lastSyncAt)) || 0;
+  if(!exp && !sy) return { ts: null, via: '' };
+  return (sy > exp) ? { ts: sy, via: 'Dropbox sync' } : { ts: exp, via: 'backup file' };
+}
+function _offDeviceText(off, nowMs){
+  return (off && off.ts) ? (_agoText(off.ts, nowMs) + ' (' + off.via + ')') : 'never';
+}
+// Non-blocking, at most once per 7 days (stamp "questa.persistNagAt.v1", device-only).
+// Only for a definite "not protected" (false). Unknown (null: iOS, old browsers) never
+// nags; the gear's backup nag still covers that case.
+function maybeStorageNag(persisted, nowMs){
+  if(persisted !== false) return false;
+  if(nowMs == null) nowMs = Date.now();
+  var off = lastOffDeviceCopy();
+  if(off.ts && nowMs - off.ts <= OFF_DEVICE_NAG_MS) return false;
+  var last = 0; try{ last = Number(localStorage.getItem("questa.persistNagAt.v1")) || 0; }catch(e){ last = 0; }
+  if(last && nowMs >= last && nowMs - last < OFF_DEVICE_NAG_MS) return false;
+  try{ localStorage.setItem("questa.persistNagAt.v1", String(nowMs)); }catch(e){}
+  if(typeof toast === "function") toast('Your data is not protected from browser cleanup. Last copy outside this device: ' + (off.ts ? _agoText(off.ts, nowMs) : 'never') + '. Export a backup or turn on Dropbox sync.');
+  return true;
+}
+// Settings "Backup & transfer" rows. Pure: every input is passed in.
+function durabilityRowsHtml(persisted, usage, off, nowMs){
+  var p = (persisted === true) ? 'Yes' : (persisted === false) ? 'No' : 'Unknown (this browser does not say)';
+  var h = '<div class="small durabilityRows" style="margin-top:6px">';
+  h += '<div>Storage protected from browser cleanup: ' + p + '</div>';
+  h += '<div>Last copy outside this device: ' + _offDeviceText(off, nowMs) + '</div>';
+  if(usage && usage.chars){
+    h += '<span>Saved data: ' + (usage.chars / 1e6).toFixed(1) + ' MB of about ' + (usage.budget / 1e6) + ' MB (' + usage.pct + ' %)</div>';
+  }
+  h += '<div id="storageEstimateRow"></div></div>';
+  return h;
+}
+// Informational only (never drives a warning): the whole origin, events and snapshots included.
+function fillStorageEstimate(){
+  try{
+    if(!(navigator && navigator.storage && typeof navigator.storage.estimate === "function")) return;
+    navigator.storage.estimate().then(function(e){
+      var el = document.getElementById('storageEstimateRow');
+      if(!el || !e || typeof e.usage !== "number") return;
+      var mb = e.usage / 1e6;
+      el.textContent = 'Browser storage for this site: ' + (mb < 10 ? mb.toFixed(1) : Math.round(mb)) + ' MB used';
+    }).catch(function(){});
+  }catch(e){}
+}
+/* END_DURABILITY_UX */
 function resetEverything() {
   confirmDialog('Reset Everything', 'Erase ALL progress on this device? This cannot be undone.').then(async ok => {
     if(!ok) return;
@@ -7940,15 +8177,22 @@ function exportSaveDevice(blob, filename, eventCount, opts) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 
-  // See exportShare: only a real backup may clear the staleness nag.
-  if (isBackup) {
-    S.prefs.lastExportTs = Date.now();
-    save();
-    checkExportStaleness();
-  }
-  toast('Exported' + (eventCount ? (' (' + eventCount + ' events)') : ''));
+  // D5 EXTRA-1 (2026-09-26): <a download> reports nothing -- the browser gives no
+  // saved/blocked signal, and the TWA (Brave) can block a download silently. So say
+  // only that the download STARTED, and never clear the backup nag on our own.
+  toast('Download started' + (eventCount ? (' (' + eventCount + ' events)') : '') + '. Check your Downloads folder.');
   closeSheet();
   logEvent({kind: 'export', taskTitle: 'Export Data', notes: (opts.logNote || 'Created backup file via Download')});
+  // See exportShare: only a real backup may clear the staleness nag -- and here only
+  // after the user says the file is really there. Cancel leaves the nag on.
+  if (isBackup) {
+    confirmDialog('Did the backup file save?', 'Look in your Downloads folder for ' + filename + '. Tap Yes only if the file is there. Until then Questa keeps reminding you to back up.').then(function (ok) {
+      if (!ok) return;
+      S.prefs.lastExportTs = Date.now();
+      save();
+      checkExportStaleness();
+    });
+  }
 }
 
 // --- Section picker dialogs (export + import) --------------------------------
@@ -8460,12 +8704,12 @@ async function updateLastFullBackupText(){
     const last = snapshots.find(s => s.type === "full" && s.verified);
     if(last){
       const d = new Date(last.ts);
-      el.textContent = 'Last full backup: ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      el.textContent = 'Last local snapshot (on this device only): ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
     } else {
-      el.textContent = 'Last full backup: None';
+      el.textContent = 'Last local snapshot (on this device only): None';
     }
   } catch(e) {
-    el.textContent = 'Last full backup: (unavailable)';
+    el.textContent = 'Last local snapshot (on this device only): (unavailable)';
   }
 }
 
@@ -8944,7 +9188,60 @@ checkExportStaleness();
 // #11b: Request persistent storage to reduce browser-eviction risk (Safari ITP
 // 7-day wipe, Chrome eviction under pressure). PWAs get this automatically;
 // browser-tab usage does not (MDN: all-or-nothing per origin).
-try{ if(navigator&&navigator.storage&&typeof navigator.storage.persist==="function"){ navigator.storage.persist().then(function(granted){ if(typeof logEvent==="function") logEvent({kind:"storagePersist", granted:!!granted}); }).catch(function(){}); } }catch(_){}
+/* BEGIN_STORAGE_PERSIST */
+// D5 PWA-03 (2026-09-26): the answer is now KEPT, so Settings can show it and the
+// gentle nag can use it: null = unknown / API missing, true, false. The diagnostic
+// storagePersist log entry is unchanged. persisted() first (no prompt, cheap), then
+// persist() only when not yet persisted. Tests eval this block from the source
+// (tests/quota-persist.test.js P1-P5, tests/durability-ux.test.js T1/T2).
+let _storagePersisted = null;
+function storagePersistState(){ return _storagePersisted; }
+function requestStoragePersist(){
+  try{
+    var st = navigator && navigator.storage;
+    if(!st || typeof st.persist !== "function") return Promise.resolve(_storagePersisted);
+    var first = (typeof st.persisted === "function") ? Promise.resolve().then(function(){ return st.persisted(); }) : Promise.resolve(false);
+    return first.then(function(already){
+      return already ? true : st.persist();
+    }).then(function(granted){
+      _storagePersisted = !!granted;
+      if(typeof logEvent==="function") logEvent({kind:"storagePersist", granted:!!granted});
+      return _storagePersisted;
+    }).catch(function(){ return _storagePersisted; });
+  }catch(_){ return Promise.resolve(_storagePersisted); }
+}
+// Re-ask when the app gets installed (a browser may grant it to an installed app). A
+// TWA install fires no appinstalled; its launches run in display-mode standalone,
+// where the every-launch ask below covers it. "questa.persistAskedStandalone.v1"
+// records that the first standalone launch has asked; it is set only after the ask
+// resolved, so a launch killed mid-ask asks again next time.
+function _persistBootAsk(){
+  try{ window.addEventListener("appinstalled", function(){ requestStoragePersist(); }); }catch(_){}
+  var standalone = false;
+  try{ standalone = !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches); }catch(_){}
+  var askedStandalone = null;
+  try{ askedStandalone = localStorage.getItem("questa.persistAskedStandalone.v1"); }catch(_){}
+  var p = requestStoragePersist();
+  if(standalone && !askedStandalone){
+    p = p.then(function(v){ try{ localStorage.setItem("questa.persistAskedStandalone.v1", "1"); }catch(_){} return v; });
+  }
+  return p;
+}
+try{ _persistBootAsk().then(function(p){ if(typeof maybeStorageNag==="function") maybeStorageNag(p, Date.now()); }).catch(function(){}); }catch(_){}
+/* END_STORAGE_PERSIST */
+// D5 PWA-06/PWA-02/PWA-24 boot: badge, one stale toast, the long-offline warning.
+// Runs before sync.js loads (index.html loads app.js first), so the long-offline
+// check still sees the pre-sync lastSyncAt (_bootSyncSnap). None of these calls sync.
+try{
+  if(!longOfflineWarning(Date.now())) maybeStaleSyncToast(Date.now());
+  updateSyncBadge();
+  document.addEventListener('visibilitychange', function(){
+    try{
+      if(document.visibilityState === 'visible'){ updateSyncBadge(); maybeStaleSyncToast(Date.now()); }
+      else updateSyncBadge();   // stops the 5 s poll while hidden
+    }catch(_){}
+  });
+}catch(_){}
 
 setTimeout(()=>{
   if(_flushPromise) return;

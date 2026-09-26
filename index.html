@@ -502,6 +502,7 @@
     border-radius:20px;font-size:13px;font-weight:700;animation:pop 2.4s forwards}
   .toastMsg button{margin-left:10px;background:var(--accent);border:none;color:#fff;font-weight:800;font-size:12px;
     padding:4px 12px;border-radius:12px;pointer-events:auto;cursor:pointer}
+  .toastMsg.toastLong{animation:none;pointer-events:auto;cursor:pointer;max-width:min(92vw,420px);text-align:center}
   /* PWA-01: in-app list of reminders missed on earlier days (never a system notification) */
   #missedReminders{position:fixed;left:50%;transform:translateX(-50%);top:calc(8px + env(safe-area-inset-top));z-index:61;
     width:min(420px,calc(100vw - 24px));max-height:45vh;overflow:auto;background:#1d0f38;border:1px solid var(--accent);

@@ -357,9 +357,21 @@ function checkStorageWarning(){
   else if(u.pct >= 90 && level < 90) next = 90;
   else if(u.pct >= 80 && level < 80) next = 80;
   _storageWarnLevel = next;
-  if(next !== level){ try{ localStorage.setItem("questa.storageWarn.v1", String(next)); }catch(_){} }
-  if(next > level && typeof toast==="function"){
-    toast("Questa's saved data is " + u.pct + " % full (" + (u.chars/1e6).toFixed(1) + " of " + (u.budget/1e6) + " MB). Export a backup now. If it fills up, new changes may not be saved.");
+  if(next < level){ try{ localStorage.setItem("questa.storageWarn.v1", String(next)); }catch(_){} }
+  if(next > level){
+    // S3 review M1: 80 % is a long toast, 90 % a dialog. The level is stored only once
+    // the warning was seen (tapped, or 10 s visible), so an unseen one comes back on
+    // the next launch. The module var above already stops a repeat in this session.
+    var shown = next;
+    var seen = function(){
+      if(_storageWarnLevel !== shown) return;
+      try{ localStorage.setItem("questa.storageWarn.v1", String(shown)); }catch(_){}
+    };
+    var msg = "Questa's saved data is " + u.pct + " % full (" + (u.chars/1e6).toFixed(1) + " of " + (u.budget/1e6) + " MB). Export a backup now. If it fills up, new changes may not be saved.";
+    if(shown >= 90 && typeof alertDialog==="function"){
+      var p = alertDialog("Storage almost full", msg);
+      if(p && typeof p.then==="function") p.then(seen);
+    } else if(typeof toastLong==="function") toastLong(msg, seen);
   }
 }
 // 2026-07-13 P0-1: save() must be fully SYNCHRONOUS. The previous design
@@ -2318,19 +2330,22 @@ function runReminderPass() {
   const nowMs = Date.now();
   let lastCheck = NaN;
   try { lastCheck = parseInt(localStorage.getItem('questa.reminderLastCheck') || '', 10); } catch (e) {}
-  if (S.prefs && S.prefs.notificationsEnabled && !nativeRemindersActive()) {
-    // With permission granted, today's passed slots go out through the existing
-    // same-day "Missed at" path in checkReminders(); without it they would vanish.
-    const includeToday = (typeof Notification === 'undefined' || Notification.permission !== 'granted');
-    const found = findMissedReminderSlots(S.tasks, lastCheck, nowMs, includeToday);
-    if (found.length) {
-      const list = loadMissedReminders();
-      const seen = new Set(list.map(x => x.k));
-      found.forEach(x => { if (!seen.has(x.k)) { seen.add(x.k); list.push(x); } });
-      list.sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : a.date + a.time > b.date + b.time ? 1 : 0));
-      saveMissedReminders(list);
+  // S3 review: bad task data must not stop the stamp or today's checkReminders().
+  try {
+    if (S.prefs && S.prefs.notificationsEnabled && !nativeRemindersActive()) {
+      // With permission granted, today's passed slots go out through the existing
+      // same-day "Missed at" path in checkReminders(); without it they would vanish.
+      const includeToday = (typeof Notification === 'undefined' || Notification.permission !== 'granted');
+      const found = findMissedReminderSlots(S.tasks, lastCheck, nowMs, includeToday);
+      if (found.length) {
+        const list = loadMissedReminders();
+        const seen = new Set(list.map(x => x.k));
+        found.forEach(x => { if (!seen.has(x.k)) { seen.add(x.k); list.push(x); } });
+        list.sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : a.date + a.time > b.date + b.time ? 1 : 0));
+        saveMissedReminders(list);
+      }
     }
-  }
+  } catch (e) {}
   try { localStorage.setItem('questa.reminderLastCheck', String(nowMs)); } catch (e) {}
   try { renderMissedReminders(); } catch (e) {}
   checkReminders();
@@ -2355,7 +2370,7 @@ function renderMissedReminders() {
   const head = document.createElement('div');
   head.className = 'mrHead';
   const h = document.createElement('b');
-  h.textContent = 'Missed while Questa was closed';
+  h.textContent = 'Missed reminders';
   const all = document.createElement('button');
   all.type = 'button';
   all.textContent = 'Dismiss all';
@@ -3260,6 +3275,20 @@ function toast(msg){
   const w=document.getElementById('toast'); const e=document.createElement('div');
   e.className='toastMsg'; e.textContent=msg; w.appendChild(e);
   setTimeout(()=>e.remove(),2400);
+}
+// S3 review M1: a long one-shot warning. It stays until tapped (or 20 s). onSeen runs
+// once, on the tap or after 10 s on a visible page, so the caller's once-limit is used
+// up only when the message could really be read.
+function toastLong(msg, onSeen){
+  const w=document.getElementById('toast'); if(!w) return;
+  const e=document.createElement('div');
+  e.className='toastMsg toastLong'; e.textContent=msg; e.setAttribute('role','status');
+  let seen=false;
+  const mark=()=>{ if(seen) return; seen=true; try{ if(typeof onSeen==='function') onSeen(); }catch(_){} };
+  e.addEventListener('click', ()=>{ mark(); e.remove(); });
+  w.appendChild(e);
+  setTimeout(()=>{ if(document.visibilityState!=='hidden') mark(); }, 10000);
+  setTimeout(()=>e.remove(), 20000);
 }
 let TAB=(S.prefs && S.prefs.lastTab) || 'habits', EDIT=null;
 // Pristine copy of the task as it was when the edit sheet opened, so saveTask()
@@ -6988,14 +7017,51 @@ function maybeStaleSyncToast(nowMs){
   if(typeof toast === "function") toast(staleSyncLabel(st.lastSyncAt, nowMs) + '. What you see here may be out of date.');
   return true;
 }
+// S3 review M2: at boot (and on return to the page) a sync round starts a moment
+// later, so checking at once is a false alarm. Poll the small sync key: a new
+// lastSyncAt means the round succeeded (no toast at all); a new lastError means it
+// failed (check now); nothing after about 15 s (offline, no round) means check then.
+// Reads only; calls no sync function.
+const STALE_CHECK_POLL_MS = 1000, STALE_CHECK_MAX_POLLS = 15;
+let _staleCheckPending = false;
+function scheduleStaleSyncCheck(){
+  if(_staleToastShown || _staleCheckPending) return false;
+  var read = function(){ try{ return ((typeof syncCfg === "function") ? syncCfg() : _readSyncCfgRaw()) || {}; }catch(e){ return {}; } };
+  var base = read();
+  if(!base.enabled) return false;
+  var baseSync = base.lastSyncAt ? Number(base.lastSyncAt) : null;
+  var baseErr = base.lastError ? String(base.lastError) : '';
+  var polls = 0;
+  _staleCheckPending = true;
+  var tick = function(){
+    polls++;
+    var c = read();
+    var last = c.lastSyncAt ? Number(c.lastSyncAt) : null;
+    if(last != null && last !== baseSync){ _staleCheckPending = false; return; }
+    var failed = !!c.lastError && String(c.lastError) !== baseErr;
+    if(!failed && polls < STALE_CHECK_MAX_POLLS){ setTimeout(tick, STALE_CHECK_POLL_MS); return; }
+    _staleCheckPending = false;
+    if(document.visibilityState === 'hidden') return;   // the visible path schedules again
+    maybeStaleSyncToast(Date.now());
+  };
+  setTimeout(tick, STALE_CHECK_POLL_MS);
+  return true;
+}
 // PWA-24 (decision A): WARNING ONLY. It calls no sync function and does not delay,
 // gate or change the first merge; the text is true before and after that merge.
 const LONG_OFFLINE_TITLE = 'This device has not synced for more than 6 months.';
 const LONG_OFFLINE_TEXT = 'Items you deleted on your other devices during that time may come back here and on your other devices after this sync. If you see old items reappear, delete them again. If you would rather replace everything on this device with your Dropbox copy, open Settings and use Force pull.';
 let _longOfflineShown = false;
+// E2: at most one dialog per 24 h across page loads (device-only stamp). A successful
+// round makes the stamp irrelevant: the next boot no longer sees a long gap.
+const LONG_OFFLINE_WARN_KEY = 'questa.longOfflineWarnedAt.v1';
 function longOfflineWarning(nowMs){
   if(_longOfflineShown) return false;
-  if(!isLongOffline(_bootSyncSnap, nowMs == null ? Date.now() : nowMs)) return false;
+  if(nowMs == null) nowMs = Date.now();
+  if(!isLongOffline(_bootSyncSnap, nowMs)) return false;
+  var last = 0; try{ last = Number(localStorage.getItem(LONG_OFFLINE_WARN_KEY)) || 0; }catch(e){ last = 0; }
+  if(last && nowMs >= last && nowMs - last < 86400000) return false;
+  try{ localStorage.setItem(LONG_OFFLINE_WARN_KEY, String(nowMs)); }catch(e){}
   _longOfflineShown = true;
   if(typeof alertDialog === "function") alertDialog(LONG_OFFLINE_TITLE, LONG_OFFLINE_TEXT);
   return true;
@@ -7028,8 +7094,9 @@ function maybeStorageNag(persisted, nowMs){
   if(off.ts && nowMs - off.ts <= OFF_DEVICE_NAG_MS) return false;
   var last = 0; try{ last = Number(localStorage.getItem("questa.persistNagAt.v1")) || 0; }catch(e){ last = 0; }
   if(last && nowMs >= last && nowMs - last < OFF_DEVICE_NAG_MS) return false;
-  try{ localStorage.setItem("questa.persistNagAt.v1", String(nowMs)); }catch(e){}
-  if(typeof toast === "function") toast('Your data is not protected from browser cleanup. Last copy outside this device: ' + (off.ts ? _agoText(off.ts, nowMs) : 'never') + '. Export a backup or turn on Dropbox sync.');
+  // S3 review M1: long toast; the 7-day stamp is written only once it was seen.
+  var msg = 'Your data is not protected from browser cleanup. Last copy outside this device: ' + (off.ts ? _agoText(off.ts, nowMs) : 'never') + '. Export a backup or turn on Dropbox sync.';
+  if(typeof toastLong === "function") toastLong(msg, function(){ try{ localStorage.setItem("questa.persistNagAt.v1", String(nowMs)); }catch(e){} });
   return true;
 }
 // Settings "Backup & transfer" rows. Pure: every input is passed in.
@@ -7039,7 +7106,7 @@ function durabilityRowsHtml(persisted, usage, off, nowMs){
   h += '<div>Storage protected from browser cleanup: ' + p + '</div>';
   h += '<div>Last copy outside this device: ' + _offDeviceText(off, nowMs) + '</div>';
   if(usage && usage.chars){
-    h += '<span>Saved data: ' + (usage.chars / 1e6).toFixed(1) + ' MB of about ' + (usage.budget / 1e6) + ' MB (' + usage.pct + ' %)</div>';
+    h += '<div>Saved data: ' + (usage.chars / 1e6).toFixed(1) + ' MB of about ' + (usage.budget / 1e6) + ' MB (' + usage.pct + ' %)</div>';
   }
   h += '<div id="storageEstimateRow"></div></div>';
   return h;
@@ -9233,11 +9300,11 @@ try{ _persistBootAsk().then(function(p){ if(typeof maybeStorageNag==="function")
 // Runs before sync.js loads (index.html loads app.js first), so the long-offline
 // check still sees the pre-sync lastSyncAt (_bootSyncSnap). None of these calls sync.
 try{
-  if(!longOfflineWarning(Date.now())) maybeStaleSyncToast(Date.now());
+  if(!longOfflineWarning(Date.now())) scheduleStaleSyncCheck();   // waits for the first round (M2)
   updateSyncBadge();
   document.addEventListener('visibilitychange', function(){
     try{
-      if(document.visibilityState === 'visible'){ updateSyncBadge(); maybeStaleSyncToast(Date.now()); }
+      if(document.visibilityState === 'visible'){ updateSyncBadge(); scheduleStaleSyncCheck(); }
       else updateSyncBadge();   // stops the 5 s poll while hidden
     }catch(_){}
   });

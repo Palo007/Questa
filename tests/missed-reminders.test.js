@@ -234,6 +234,26 @@ attempt('MP7', () => {
   assert('MP7: older label is "Mon 21 Sep"', sb.missedReminderDayLabel('2026-09-21', at(24, 7)) === 'Mon 21 Sep');
 });
 
+// D6 Low 1 (S3 review): a scan that throws on bad task data must not skip the stamp
+// or today's checkReminders().
+attempt('MP8', () => {
+  const c = passCtx({ tasks: [daily('a', '21:00')], nowMs: at(24, 7), store: { [STAMP]: String(at(23, 20)) } });
+  c.sb.S.tasks = { a: daily('a', '21:00') };   // corrupt: tasks stored as an object, not an array
+  let threw = null;
+  try { c.sb.runReminderPass(); } catch (e) { threw = e; }
+  assert('MP8: bad task data -> runReminderPass does not throw', threw === null);
+  assert('MP8: bad task data -> stamp still advances', c.store[STAMP] === String(at(24, 7)));
+  assert('MP8: bad task data -> checkReminders still runs', c.calls.check === 1);
+});
+
+// D6 Low 2 (S3 review): the card can hold slots that passed while Questa was open
+// (no browser permission), so its heading must not say "while Questa was closed".
+attempt('MP9', () => {
+  const renderSrc = tryExtract(/^function renderMissedReminders\(\) \{/, 'renderMissedReminders');
+  assert('MP9: card heading is "Missed reminders"', renderSrc.includes("h.textContent = 'Missed reminders';"));
+  assert('MP9: old "while Questa was closed" heading gone', !/while Questa was closed/.test(renderSrc));
+});
+
 // ---- MR9 guard pins / MR10 wiring (source regex) ----
 attempt('MR9', () => {
   const payloadSrc = extractFunction(appSrc, /^function getReminderNotificationPayload\(t, r, missed\) \{/, 'getReminderNotificationPayload');

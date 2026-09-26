@@ -2977,6 +2977,66 @@ function _runDayRollover(){
 // The callback sync.js invokes when the first round settles. Top-level declaration so it
 // is both a global sync.js can find and extractable for tests. Name is fixed by the plan.
 function onQuestaFirstSyncRound(){ _runDayRollover(); }
+// --- PWA-23: warn when THIS device's clock is ahead of Dropbox's -------------
+// sync.js clamps stamps more than HLC_RATCHET_TOLERANCE_MS in the future
+// (_clampFuture), so edits made on a fast-clocked device can lose to older edits
+// from its peers. sync.js stays byte-identical (owner rule: keep legacy sync
+// logic, add app-side warnings only), so the evidence is read here instead:
+// dbxUpload (a top-level function in sync.js, so a writable global) returns the
+// files/upload metadata, whose server_modified is Dropbox's own time for the
+// write. _installClockProbe swaps the global for a pass-through wrapper once
+// sync.js has loaded (DOMContentLoaded; index.html loads app.js THEN sync.js).
+// HIDDEN COUPLING: tests/clock-upload-coupling-guard.test.js fails if sync.js
+// stops calling dbxUpload by its global name or stops returning that metadata.
+// Never calls now() (two tests eval now() as a slice) -- Date.now() only.
+const CLOCK_AHEAD_WARN_KEY = 'questa.clockAheadWarnedAt'; // device-local, never synced
+const CLOCK_AHEAD_WARN_EVERY_MS = 24 * 3600 * 1000;
+var _clockAheadWarnedMem = 0; // throttle fallback when localStorage throws
+// A LOWER bound on how far the local clock is ahead: the server stamped the write
+// after local t0, and server_modified is truncated to the second (hence -1000),
+// so network or upload time can never produce a false warning.
+function _clockAheadMs(t0Local, serverModifiedIso){
+  if(typeof serverModifiedIso !== 'string' || !isFinite(t0Local)) return null;
+  var srv = Date.parse(serverModifiedIso);
+  if(!isFinite(srv)) return null;
+  return t0Local - srv - 1000;
+}
+// Idempotent: a conflict retry re-uploads, so a sample may arrive several times
+// per round. Only the 24 h throttle decides whether anything is shown.
+function _noteClockSample(t0Local, serverModifiedIso){
+  var ahead = _clockAheadMs(t0Local, serverModifiedIso);
+  if(ahead === null || !(ahead > HLC_RATCHET_TOLERANCE_MS)) return false;
+  var nowMs = Date.now(), last = _clockAheadWarnedMem;
+  try{ var v = Number(localStorage.getItem(CLOCK_AHEAD_WARN_KEY)); if(isFinite(v) && v > last) last = v; }catch(e){}
+  if(last && nowMs >= last && nowMs - last < CLOCK_AHEAD_WARN_EVERY_MS) return false;
+  _clockAheadWarnedMem = nowMs;
+  try{ localStorage.setItem(CLOCK_AHEAD_WARN_KEY, String(nowMs)); }catch(e){}
+  try{ if(typeof _qDiagPush === 'function') _qDiagPush('clockAhead', {aheadMs: ahead}); }catch(e){}
+  var mins = Math.max(1, Math.round(ahead / 60000));
+  try{
+    alertDialog('Clock ahead', "This device's clock is about " + mins + ' minute' + (mins === 1 ? '' : 's') +
+      " ahead of Dropbox's time. When you sync, changes made here may lose to older changes from your" +
+      " other devices. Turn on automatic date and time in this device's settings.");
+  }catch(e){}
+  return true;
+}
+// Pass-through: same arguments and `this`, resolves with the SAME object and
+// rejects with the SAME error object (_pushWithConflictRetry tests
+// `e instanceof ConflictError`). Nothing the probe does can throw into sync.
+function _installClockProbe(){
+  if(typeof dbxUpload !== 'function' || dbxUpload.__clockProbe) return false;
+  var orig = dbxUpload;
+  var wrapped = async function(){
+    var t0 = Date.now();
+    var r = await orig.apply(this, arguments);
+    try{ _noteClockSample(t0, r && r.server_modified); }catch(e){}
+    return r;
+  };
+  wrapped.__clockProbe = true;
+  dbxUpload = wrapped;
+  return true;
+}
+if(typeof document !== 'undefined' && document && typeof document.addEventListener === 'function') document.addEventListener("DOMContentLoaded", _installClockProbe);
 // Replaces the straight-line boot `startDay();` call. Named so tests/_extract.js can
 // reach it -- top-level script statements are not extractable.
 function bootStartDay(){
@@ -8305,8 +8365,18 @@ function showImportSectionPicker(data, detected){
   document.getElementById('scrim').classList.add('show');
 }
 
+// PWA-25: peak memory while importing is about 3-4x the file size. 8 MB is about
+// twice today's real backup, so a normal backup never asks. Size is known before
+// anything is read (an event count is not -- counting needs the very parse).
+const IMPORT_LARGE_WARN_BYTES = 8 * 1024 * 1024;
 function importData(ev){
   const f=ev.target.files[0]; if(!f)return;
+  if(f.size > IMPORT_LARGE_WARN_BYTES && !ev.__largeOk){
+    ev.target.value=''; // so the same file can be picked again
+    confirmDialog('Large backup', 'This backup is large (' + (f.size / (1024 * 1024)).toFixed(1) + ' MB). Import may be slow or fail on this phone. Continue?')
+      .then(function(ok){ if(ok) importData({target:{files:[f], value:''}, __largeOk:true}); });
+    return;
+  }
   const rd=new FileReader();
   rd.onload=()=>{ try{ const parsed=JSON.parse(rd.result);
       // Detect tokenized schema-2 export and expand it to the legacy shape

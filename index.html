@@ -66,6 +66,14 @@
     padding:4px;line-height:1;flex:none;opacity:.7}
   #gearBtn:hover,#refreshBtn:hover{opacity:1}
   #gearBtn.stale{animation:gearStale 2s infinite;opacity:1}
+  /* D5 PWA-06/PWA-02: "not synced" dot / "Last synced ..." text. Hidden when sync is off. */
+  #syncBadge{background:none;border:none;color:var(--muted);font-size:11px;cursor:pointer;padding:4px;flex:none;
+    display:flex;align-items:center;gap:4px;max-width:34vw;line-height:1}
+  #syncBadge[hidden]{display:none}
+  #syncBadge .sbDot{display:none;width:9px;height:9px;border-radius:50%;background:#f7a24e}
+  #syncBadge.unsynced .sbDot,#syncBadge.err .sbDot{display:inline-block}
+  #syncBadge.err .sbDot{background:#f74e52}
+  #syncBadge .sbLbl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   @keyframes gearStale{0%,100%{color:var(--muted)}50%{color:var(--hp);text-shadow:0 0 8px var(--hp)}}
   .bars{margin-top:6px;display:flex;flex-direction:column;gap:4px}
   .bar{height:14px;border-radius:6px;background:#23143d;position:relative;overflow:hidden;
@@ -494,6 +502,19 @@
     border-radius:20px;font-size:13px;font-weight:700;animation:pop 2.4s forwards}
   .toastMsg button{margin-left:10px;background:var(--accent);border:none;color:#fff;font-weight:800;font-size:12px;
     padding:4px 12px;border-radius:12px;pointer-events:auto;cursor:pointer}
+  .toastMsg.toastLong{animation:none;pointer-events:auto;cursor:pointer;max-width:min(92vw,420px);text-align:center}
+  /* PWA-01: in-app list of reminders missed on earlier days (never a system notification) */
+  #missedReminders{position:fixed;left:50%;transform:translateX(-50%);top:calc(8px + env(safe-area-inset-top));z-index:61;
+    width:min(420px,calc(100vw - 24px));max-height:45vh;overflow:auto;background:#1d0f38;border:1px solid var(--accent);
+    color:var(--ink);border-radius:14px;padding:10px 12px;font-size:13px;box-shadow:0 6px 20px rgba(0,0,0,.4)}
+  #missedReminders[hidden]{display:none}
+  #missedReminders .mrHead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+  #missedReminders ul{list-style:none;margin:0;padding:0}
+  #missedReminders li{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 0;
+    border-top:1px solid var(--line)}
+  #missedReminders li span{color:var(--ink);overflow-wrap:anywhere}
+  #missedReminders button{background:none;border:1px solid var(--accent);color:var(--accent);font-weight:700;
+    font-size:12px;padding:3px 10px;border-radius:12px;cursor:pointer;flex:none}
   @keyframes pop{0%{opacity:0;transform:translateY(8px)}10%{opacity:1;transform:none}
     80%{opacity:1}100%{opacity:0;transform:translateY(-6px)}}
   /* Habitica-style floating reward/penalty near the tapped control */
@@ -1051,6 +1072,7 @@
     <div class="coins">
       <span title="Gold"><svg viewBox="0 0 24 24" width="16" height="16" style="vertical-align:-3px;margin-right:2px" aria-label="gold" role="img"><circle cx="12" cy="12" r="10" fill="#ffbe5c" stroke="#c8862f" stroke-width="1.5"/><circle cx="12" cy="12" r="6.5" fill="none" stroke="#c8862f" stroke-width="1.2" opacity="0.7"/><text x="12" y="16" text-anchor="middle" font-size="9" font-weight="700" fill="#7a4d12" font-family="serif">$</text></svg><b id="statGold">0</b></span>
     </div>
+    <button id="syncBadge" type="button" hidden onclick="openSettings()"><span class="sbDot"></span><span class="sbLbl" id="syncBadgeLbl"></span></button>
     <button id="refreshBtn" title="Refresh" aria-label="Refresh" onclick="reloadApp('button')">&#8635;</button>
     <button id="gearBtn" title="Settings" onclick="openSettings()">&#9881;</button>
   </div>
@@ -1076,6 +1098,7 @@
 <div class="yScrim" id="yScrim"></div>
 <div class="optScrim" id="optScrim"><div class="optMenu" id="optMenu"></div></div>
 <div id="toast"></div>
+<div id="missedReminders" role="region" aria-label="Missed reminders" hidden></div>
 <div id="lvlFlash"><b id="lvlFlashTxt"></b></div>
 <div class="deathOverlay" id="deathOverlay"><div class="card">
   <h2>You died!</h2>

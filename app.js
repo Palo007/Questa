@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings. It must equal sw.js VERSION.
-const APP_VERSION = "v2026.09.26-0134";
+const APP_VERSION = "v2026.09.26-0209";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -315,6 +315,65 @@ function _adoptStateStamps(){
 }
 /* BEGIN_DURABLE_STATE_HELPERS */
 let _stateWritePromise = null;
+// D5 2026-09-26 (PWA-06, PWA-04): device-only durability readouts set by save().
+// None of these live in S, so syncSubset() never copies them and the export token
+// map (_EXPORT_FIELD_MAP) is untouched -- an older build can still import a backup.
+//  - localEditAt: wall-clock Date.now() of the last USER save (never a syncApply
+//    save), also kept in "questa.localEditAt.v1". The "not synced" badge compares it
+//    with sync's lastSyncAt, which is also this device's Date.now(). It must NOT use
+//    S.__savedAt: that is the HLC (now()), which a peer can push up to 120 s ahead.
+//  - _lastSaveChars: length of the JSON save() just wrote (no second stringify).
+let localEditAt = null;
+let _lastSaveChars = 0;
+let _storageWarnLevel = null;   // 0, 80 or 90: the last size warning shown (mirrors "questa.storageWarn.v1")
+// Roughly the localStorage cap in UTF-16 code units in Chromium/Brave. An
+// approximation, and it covers the state key only (not events, not IndexedDB).
+const STATE_BUDGET_CHARS = 5000000;
+// Called by _saveCommit right after the localStorage write (JSON length passed in:
+// no second stringify). A USER edit only is stamped: a syncApply save (applying) is
+// the merge being written back, not something this device still has to upload.
+function _noteSaveCommitted(jsonLen, applying, quotaHit){
+  _lastSaveChars = jsonLen;
+  if(!applying){
+    localEditAt = Date.now();   // Date.now(), not now(): see localEditAt above
+    try{ localStorage.setItem("questa.localEditAt.v1", String(localEditAt)); }catch(_){}
+  }
+  if(!quotaHit) checkStorageWarning();
+}
+function storageUsage(){
+  var chars = _lastSaveChars;
+  if(!chars){ try{ var raw = localStorage.getItem(STORE_KEY); chars = raw ? raw.length : 0; }catch(_){ chars = 0; } }
+  return { chars: chars, budget: STATE_BUDGET_CHARS, pct: Math.floor(chars / STATE_BUDGET_CHARS * 100) };
+}
+// Warn once at 80 %, once more at 90 %; re-armed only after dropping below 70 %.
+// Runs via _noteSaveCommitted after setItem returned, inside a try: it can never
+// throw into the save path and does not touch the quota-failure handling.
+function checkStorageWarning(){
+  var u = storageUsage();
+  var level = _storageWarnLevel;
+  if(level === null){ try{ level = Number(localStorage.getItem("questa.storageWarn.v1")) || 0; }catch(_){ level = 0; } }
+  var next = level;
+  if(u.pct < 70) next = 0;
+  else if(u.pct >= 90 && level < 90) next = 90;
+  else if(u.pct >= 80 && level < 80) next = 80;
+  _storageWarnLevel = next;
+  if(next < level){ try{ localStorage.setItem("questa.storageWarn.v1", String(next)); }catch(_){} }
+  if(next > level){
+    // S3 review M1: 80 % is a long toast, 90 % a dialog. The level is stored only once
+    // the warning was seen (tapped, or 10 s visible), so an unseen one comes back on
+    // the next launch. The module var above already stops a repeat in this session.
+    var shown = next;
+    var seen = function(){
+      if(_storageWarnLevel !== shown) return;
+      try{ localStorage.setItem("questa.storageWarn.v1", String(shown)); }catch(_){}
+    };
+    var msg = "Questa's saved data is " + u.pct + " % full (" + (u.chars/1e6).toFixed(1) + " of " + (u.budget/1e6) + " MB). Export a backup now. If it fills up, new changes may not be saved.";
+    if(shown >= 90 && typeof alertDialog==="function"){
+      var p = alertDialog("Storage almost full", msg);
+      if(p && typeof p.then==="function") p.then(seen);
+    } else if(typeof toastLong==="function") toastLong(msg, seen);
+  }
+}
 // 2026-07-13 P0-1: save() must be fully SYNCHRONOUS. The previous design
 // deferred the actual localStorage write into a navigator.locks.request()
 // callback, so save() returned before anything persisted — the pagehide
@@ -369,6 +428,9 @@ function save(){
       _quotaHit = true;
       try{ if(typeof logEvent==="function") logEvent({kind:"quotaError", message:String(quotaErr&&quotaErr.message||quotaErr)}); }catch(_){}
     }
+    // D5 PWA-04/PWA-06: size meter, user-edit stamp, 80/90 % warning. typeof-guarded
+    // and try-wrapped: slice tests eval save() without it, and it must never throw here.
+    if(typeof _noteSaveCommitted==="function"){ try{ _noteSaveCommitted(_json.length, applying, _quotaHit); }catch(_){} }
     // Fire-and-forget durable mirror. IDB commits (oncomplete) far more
     // reliably than localStorage's batched flush; this is the actual fix, not
     // a backup of one. Exposed as _stateWritePromise so lifecycle handlers can
@@ -384,6 +446,7 @@ function save(){
       if(_quotaHit){ try{ if(typeof toast==="function") toast("Storage full — THIS CHANGE WAS NOT SAVED. Free up space or export a backup."); }catch(_){} }
     });
     if(typeof scheduleSync==="function" && !applying) scheduleSync();
+    if(typeof updateSyncBadge==="function"){ try{ updateSyncBadge(); }catch(_){} }
   }
   // Fast synchronous check against the companion seq key (no full-state
   // parse on the common path). If absent (legacy/first run), skip the check
@@ -2143,6 +2206,44 @@ function getReminderNotificationPayload(t, r, missed) {
     tag: `questa-${t.id}`
   };
 }
+
+// PWA-17: per-slot tag. One tag per task made two slots of the same task replace
+// each other in the tray. Applied at the checkReminders call site so the payload
+// above stays byte-identical. The TWA dedupe reads only title and body, never the tag.
+function reminderNotificationTag(t, r) {
+  return `questa-${t.id}-${String(r.time || '').replace(':', '')}`;
+}
+
+// PWA-01: reminder slots between lastCheckMs and nowMs (max 7 days back) that
+// applied on their day and did not fire. Pure: no task mutation, no now().
+// includeToday=false leaves today's slots to checkReminders' same-day path.
+function findMissedReminderSlots(tasks, lastCheckMs, nowMs, includeToday) {
+  const out = [];
+  if (typeof lastCheckMs !== 'number' || !isFinite(lastCheckMs)) return out;
+  if (typeof nowMs !== 'number' || !isFinite(nowMs) || lastCheckMs > nowMs) return out;
+  const from = Math.max(lastCheckMs, nowMs - 7 * 86400000);
+  const n = new Date(nowMs);
+  const todayStart = new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime();
+  const f = new Date(from);
+  const day = new Date(f.getFullYear(), f.getMonth(), f.getDate());
+  for (; day.getTime() <= todayStart; day.setDate(day.getDate() + 1)) {
+    if (day.getTime() === todayStart && !includeToday) break;
+    (tasks || []).forEach(t => {
+      if (!t || !Array.isArray(t.reminders)) return;
+      t.reminders.forEach(r => {
+        if (!r || typeof r.time !== 'string' || !/^\d\d:\d\d$/.test(r.time)) return;
+        const slot = new Date(day.getFullYear(), day.getMonth(), day.getDate(), +r.time.slice(0, 2), +r.time.slice(3, 5));
+        const ms = slot.getTime();
+        if (!(from < ms && ms < nowMs)) return;
+        if (!reminderAppliesToday(t, r, slot)) return;
+        const date = `${slot.getFullYear()}-${String(slot.getMonth() + 1).padStart(2, '0')}-${String(slot.getDate()).padStart(2, '0')}`;
+        out.push({ k: t.id + '|' + date + '|' + r.time, taskId: t.id, title: t.title || 'Questa Reminder', date: date, time: r.time });
+      });
+    });
+  }
+  out.sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : a.date + a.time > b.date + b.time ? 1 : 0));
+  return out;
+}
 /* END_REMINDER_HELPERS */
 // Phase 1C todo 15/16: on Android, native AlarmManager (ReminderSync/ReminderReceiver)
 // owns reminders so the phone still fires them while Questa is closed. The web
@@ -2158,8 +2259,8 @@ function nativeRemindersActive(){
 let _schedulerInterval = null;
 function startReminderScheduler() {
   if (_schedulerInterval) clearInterval(_schedulerInterval);
-  checkReminders();
-  _schedulerInterval = setInterval(checkReminders, 60000);
+  runReminderPass();
+  _schedulerInterval = setInterval(runReminderPass, 60000);
 }
 
 function checkReminders() {
@@ -2184,6 +2285,7 @@ function checkReminders() {
       }
 
       const payload = getReminderNotificationPayload(t, r, missed);
+      payload.tag = reminderNotificationTag(t, r); // PWA-17: one tag per slot, not per task
       if (navigator.serviceWorker && navigator.serviceWorker.controller) {
         navigator.serviceWorker.controller.postMessage({
           type: 'SHOW_NOTIFICATION',
@@ -2203,6 +2305,103 @@ function checkReminders() {
   if (tasksChanged) {
     save();
   }
+}
+// PWA-01: cross-day missed reminders. checkReminders() only sees TODAY, so a slot
+// from an earlier day that passed while Questa was closed was lost. Each pass
+// stamps questa.reminderLastCheck; the next pass lists slots between the stamp
+// and now (up to 7 days) in questa.missedReminders.v1 (device-local, never in S).
+// In-app ONLY: no Notification / SW post. The Android DelegationService keys a
+// "Missed at HH:MM" body on TODAY's date, so a system notification for an older
+// slot would make the native side skip today's real alarm. With native alarms
+// active (TWA) the scan is skipped: native fired those slots while closed.
+function loadMissedReminders() {
+  try {
+    const a = JSON.parse(localStorage.getItem('questa.missedReminders.v1') || '[]');
+    return Array.isArray(a) ? a.filter(x => x && typeof x.k === 'string') : [];
+  } catch (e) { return []; }
+}
+function saveMissedReminders(list) {
+  try {
+    if (!list.length) localStorage.removeItem('questa.missedReminders.v1');
+    else localStorage.setItem('questa.missedReminders.v1', JSON.stringify(list.slice(-30)));
+  } catch (e) {}
+}
+function runReminderPass() {
+  const nowMs = Date.now();
+  let lastCheck = NaN;
+  try { lastCheck = parseInt(localStorage.getItem('questa.reminderLastCheck') || '', 10); } catch (e) {}
+  // S3 review: bad task data must not stop the stamp or today's checkReminders().
+  try {
+    if (S.prefs && S.prefs.notificationsEnabled && !nativeRemindersActive()) {
+      // With permission granted, today's passed slots go out through the existing
+      // same-day "Missed at" path in checkReminders(); without it they would vanish.
+      const includeToday = (typeof Notification === 'undefined' || Notification.permission !== 'granted');
+      const found = findMissedReminderSlots(S.tasks, lastCheck, nowMs, includeToday);
+      if (found.length) {
+        const list = loadMissedReminders();
+        const seen = new Set(list.map(x => x.k));
+        found.forEach(x => { if (!seen.has(x.k)) { seen.add(x.k); list.push(x); } });
+        list.sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : a.date + a.time > b.date + b.time ? 1 : 0));
+        saveMissedReminders(list);
+      }
+    }
+  } catch (e) {}
+  try { localStorage.setItem('questa.reminderLastCheck', String(nowMs)); } catch (e) {}
+  try { renderMissedReminders(); } catch (e) {}
+  checkReminders();
+}
+function missedReminderDayLabel(date, nowMs) {
+  const n = new Date(nowMs);
+  const p = String(date).split('-').map(Number);
+  const d = new Date(p[0], p[1] - 1, p[2]);
+  const diff = Math.round((new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime() - d.getTime()) / 86400000);
+  if (diff === 0) return 'today';
+  if (diff === 1) return 'yesterday';
+  return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()] + ' ' + d.getDate() + ' '
+    + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
+}
+function renderMissedReminders() {
+  const box = document.getElementById('missedReminders');
+  if (!box) return;
+  const list = loadMissedReminders();
+  while (box.firstChild) box.removeChild(box.firstChild);
+  if (!list.length) { box.hidden = true; return; }
+  const nowMs = Date.now();
+  const head = document.createElement('div');
+  head.className = 'mrHead';
+  const h = document.createElement('b');
+  h.textContent = 'Missed reminders';
+  const all = document.createElement('button');
+  all.type = 'button';
+  all.textContent = 'Dismiss all';
+  all.addEventListener('click', dismissAllMissedReminders);
+  head.appendChild(h);
+  head.appendChild(all);
+  box.appendChild(head);
+  const ul = document.createElement('ul');
+  list.forEach(x => {
+    const li = document.createElement('li');
+    const span = document.createElement('span');
+    span.textContent = x.time + ' ' + x.title + ' (' + missedReminderDayLabel(x.date, nowMs) + ')';
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = 'Dismiss';
+    b.setAttribute('aria-label', 'Dismiss missed reminder: ' + x.title + ' at ' + x.time);
+    b.addEventListener('click', () => dismissMissedReminder(x.k));
+    li.appendChild(span);
+    li.appendChild(b);
+    ul.appendChild(li);
+  });
+  box.appendChild(ul);
+  box.hidden = false;
+}
+function dismissMissedReminder(k) {
+  saveMissedReminders(loadMissedReminders().filter(x => x.k !== k));
+  try { renderMissedReminders(); } catch (e) {}
+}
+function dismissAllMissedReminders() {
+  saveMissedReminders([]);
+  try { renderMissedReminders(); } catch (e) {}
 }
 function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
 
@@ -2844,6 +3043,66 @@ function _runDayRollover(){
 // The callback sync.js invokes when the first round settles. Top-level declaration so it
 // is both a global sync.js can find and extractable for tests. Name is fixed by the plan.
 function onQuestaFirstSyncRound(){ _runDayRollover(); }
+// --- PWA-23: warn when THIS device's clock is ahead of Dropbox's -------------
+// sync.js clamps stamps more than HLC_RATCHET_TOLERANCE_MS in the future
+// (_clampFuture), so edits made on a fast-clocked device can lose to older edits
+// from its peers. sync.js stays byte-identical (owner rule: keep legacy sync
+// logic, add app-side warnings only), so the evidence is read here instead:
+// dbxUpload (a top-level function in sync.js, so a writable global) returns the
+// files/upload metadata, whose server_modified is Dropbox's own time for the
+// write. _installClockProbe swaps the global for a pass-through wrapper once
+// sync.js has loaded (DOMContentLoaded; index.html loads app.js THEN sync.js).
+// HIDDEN COUPLING: tests/clock-upload-coupling-guard.test.js fails if sync.js
+// stops calling dbxUpload by its global name or stops returning that metadata.
+// Never calls now() (two tests eval now() as a slice) -- Date.now() only.
+const CLOCK_AHEAD_WARN_KEY = 'questa.clockAheadWarnedAt'; // device-local, never synced
+const CLOCK_AHEAD_WARN_EVERY_MS = 24 * 3600 * 1000;
+var _clockAheadWarnedMem = 0; // throttle fallback when localStorage throws
+// A LOWER bound on how far the local clock is ahead: the server stamped the write
+// after local t0, and server_modified is truncated to the second (hence -1000),
+// so network or upload time can never produce a false warning.
+function _clockAheadMs(t0Local, serverModifiedIso){
+  if(typeof serverModifiedIso !== 'string' || !isFinite(t0Local)) return null;
+  var srv = Date.parse(serverModifiedIso);
+  if(!isFinite(srv)) return null;
+  return t0Local - srv - 1000;
+}
+// Idempotent: a conflict retry re-uploads, so a sample may arrive several times
+// per round. Only the 24 h throttle decides whether anything is shown.
+function _noteClockSample(t0Local, serverModifiedIso){
+  var ahead = _clockAheadMs(t0Local, serverModifiedIso);
+  if(ahead === null || !(ahead > HLC_RATCHET_TOLERANCE_MS)) return false;
+  var nowMs = Date.now(), last = _clockAheadWarnedMem;
+  try{ var v = Number(localStorage.getItem(CLOCK_AHEAD_WARN_KEY)); if(isFinite(v) && v > last) last = v; }catch(e){}
+  if(last && nowMs >= last && nowMs - last < CLOCK_AHEAD_WARN_EVERY_MS) return false;
+  _clockAheadWarnedMem = nowMs;
+  try{ localStorage.setItem(CLOCK_AHEAD_WARN_KEY, String(nowMs)); }catch(e){}
+  try{ if(typeof _qDiagPush === 'function') _qDiagPush('clockAhead', {aheadMs: ahead}); }catch(e){}
+  var mins = Math.max(1, Math.round(ahead / 60000));
+  try{
+    alertDialog('Clock ahead', "This device's clock is about " + mins + ' minute' + (mins === 1 ? '' : 's') +
+      " ahead of Dropbox's time. When you sync, changes made here may lose to older changes from your" +
+      " other devices. Turn on automatic date and time in this device's settings.");
+  }catch(e){}
+  return true;
+}
+// Pass-through: same arguments and `this`, resolves with the SAME object and
+// rejects with the SAME error object (_pushWithConflictRetry tests
+// `e instanceof ConflictError`). Nothing the probe does can throw into sync.
+function _installClockProbe(){
+  if(typeof dbxUpload !== 'function' || dbxUpload.__clockProbe) return false;
+  var orig = dbxUpload;
+  var wrapped = async function(){
+    var t0 = Date.now();
+    var r = await orig.apply(this, arguments);
+    try{ _noteClockSample(t0, r && r.server_modified); }catch(e){}
+    return r;
+  };
+  wrapped.__clockProbe = true;
+  dbxUpload = wrapped;
+  return true;
+}
+if(typeof document !== 'undefined' && document && typeof document.addEventListener === 'function') document.addEventListener("DOMContentLoaded", _installClockProbe);
 // Replaces the straight-line boot `startDay();` call. Named so tests/_extract.js can
 // reach it -- top-level script statements are not extractable.
 function bootStartDay(){
@@ -3016,6 +3275,20 @@ function toast(msg){
   const w=document.getElementById('toast'); const e=document.createElement('div');
   e.className='toastMsg'; e.textContent=msg; w.appendChild(e);
   setTimeout(()=>e.remove(),2400);
+}
+// S3 review M1: a long one-shot warning. It stays until tapped (or 20 s). onSeen runs
+// once, on the tap or after 10 s on a visible page, so the caller's once-limit is used
+// up only when the message could really be read.
+function toastLong(msg, onSeen){
+  const w=document.getElementById('toast'); if(!w) return;
+  const e=document.createElement('div');
+  e.className='toastMsg toastLong'; e.textContent=msg; e.setAttribute('role','status');
+  let seen=false;
+  const mark=()=>{ if(seen) return; seen=true; try{ if(typeof onSeen==='function') onSeen(); }catch(_){} };
+  e.addEventListener('click', ()=>{ mark(); e.remove(); });
+  w.appendChild(e);
+  setTimeout(()=>{ if(document.visibilityState!=='hidden') mark(); }, 10000);
+  setTimeout(()=>e.remove(), 20000);
 }
 let TAB=(S.prefs && S.prefs.lastTab) || 'habits', EDIT=null;
 // Pristine copy of the task as it was when the edit sheet opened, so saveTask()
@@ -6545,7 +6818,9 @@ function openSettings(){
                // 2026-09-18 (round 2): auto-backup failures have their own key now, so
                // a failed backup no longer reports itself as a sync error. Show it as
                // its own line rather than hiding it.
-               (scfg.lastBackupError?('<br><span style="color:#f7a24e">'+esc(scfg.lastBackupError)+'</span>'):'')+'</div>'+
+               (scfg.lastBackupError?('<br><span style="color:#f7a24e">'+esc(scfg.lastBackupError)+'</span>'):'')+
+               // D5 PWA-24: until the next successful round (constant text, no user data).
+               (typeof longOfflineSettingsLine==="function"?longOfflineSettingsLine(scfg):'')+'</div>'+
              '<label class="devNameLbl">Device name</label>'+
              '<div></div>'+
            '</div>'+
@@ -6587,6 +6862,11 @@ function openSettings(){
     '<button class="btn ghost" onclick="openRestorePicker()">Restore Snapshot</button></div>';
   h+='<input type="file" id="importFile" accept="application/json,.json,text/plain,.txt" style="display:none" onchange="importData(event)">';
   h+='<div class="backupMeta small"><span id="lastFullBackupDate"></span><span id="lastExportDate"></span></div>';
+  // D5 PWA-03/PWA-04: eviction protection, last off-device copy, saved-data size.
+  if(typeof durabilityRowsHtml==="function"){
+    h+=durabilityRowsHtml((typeof storagePersistState==="function")?storagePersistState():null,
+      (typeof storageUsage==="function")?storageUsage():null, lastOffDeviceCopy(), Date.now());
+  }
   // K2 (2026-09-11): until now a forward clock excursion demoted this device to
   // read-only in every sync conflict with NO signal at all -- which is why it went
   // unnoticed for so long. No "resync clock" button on purpose: now() heals itself in
@@ -6607,6 +6887,8 @@ function openSettings(){
   bindTips('.infoTip');
   setTimeout(() => updateLastFullBackupText(), 100);
   setTimeout(() => updateLastExportText(), 100);
+  if(typeof fillStorageEstimate==="function") fillStorageEstimate();
+  if(typeof updateSyncBadge==="function"){ try{ updateSyncBadge(); }catch(_){} }
   checkExportStaleness();
   document.getElementById('scrim').classList.add('show');
   // Measured AFTER the scrim gets display:flex (was display:none until here) --
@@ -6627,6 +6909,221 @@ function checkExportStaleness(){
     btn.classList.remove('stale');
   }
 }
+/* BEGIN_DURABILITY_UX */
+// D5 2026-09-26 (PWA-02, PWA-03, PWA-06, PWA-24 warning): app-side durability
+// warnings. Every one is a MITIGATION that makes a platform limit visible; none
+// calls a sync function or writes sync state (sync.js is unchanged on purpose).
+// Their own stamps live in device-only localStorage keys, never in S.
+const SYNC_STALE_MS = 3600000;               // 1 h: after this the badge shows "Last synced ..."
+// Must equal sync.js TOMBSTONE_MAX_AGE_MS ("const TOMBSTONE_MAX_AGE_MS = 180 * 86400000"
+// in sync.js's tombstone-expiry block). Copied, not imported: app.js loads first.
+// tests/durability-ux.test.js T12j reads both sources and goes red if they drift.
+const LONG_OFFLINE_MS = 180 * 86400000;
+const OFF_DEVICE_NAG_MS = 7 * 86400000;
+function _readSyncCfgRaw(){
+  var c = {}; try{ c = JSON.parse(localStorage.getItem("questa.sync.v1") || "{}") || {}; }catch(e){ c = {}; }
+  return c;
+}
+// Captured while app.js loads, i.e. BEFORE sync.js exists: its first round (about 2 s
+// after it loads) rewrites lastSyncAt, and then the evidence of a long gap is gone.
+const _bootSyncSnap = (function(){
+  var c = _readSyncCfgRaw();
+  return { enabled: !!c.enabled, lastSyncAt: (c.lastSyncAt ? Number(c.lastSyncAt) : null) };
+})();
+// Pure. Both sides of the unsynced rule are this device's Date.now() (see localEditAt
+// in the durable block). Known limit: an edit made while a round is uploading can
+// read as synced until the rerun that edit queued finishes (a few seconds).
+function syncStatusFrom(cfg, editAt, nowMs){
+  cfg = cfg || {};
+  var enabled = !!cfg.enabled;
+  var last = cfg.lastSyncAt ? Number(cfg.lastSyncAt) : null;
+  var edit = Number(editAt) || 0;
+  var ageMs = (last == null) ? null : (nowMs - last);
+  return {
+    enabled: enabled,
+    lastSyncAt: last,
+    ageMs: ageMs,
+    unsynced: enabled && edit > 0 && (last == null || edit > last),
+    stale: enabled && (last == null || ageMs > SYNC_STALE_MS),
+    longOffline: enabled && last != null && ageMs > LONG_OFFLINE_MS,
+    error: (enabled && cfg.lastError) ? String(cfg.lastError) : null
+  };
+}
+function _agoText(ts, nowMs){
+  var s = Math.max(0, Math.floor((nowMs - ts) / 1000));
+  if(s < 60) return 'just now';
+  var m = Math.floor(s / 60); if(m < 60) return m + (m === 1 ? ' minute' : ' minutes') + ' ago';
+  var h = Math.floor(m / 60); if(h < 24) return h + (h === 1 ? ' hour' : ' hours') + ' ago';
+  var d = Math.floor(h / 24); return d + (d === 1 ? ' day' : ' days') + ' ago';
+}
+// Pure. "" while fresh (1 h or less).
+function staleSyncLabel(lastSyncAt, nowMs){
+  if(!lastSyncAt) return 'Never synced';
+  if(nowMs - lastSyncAt <= SYNC_STALE_MS) return '';
+  return 'Last synced ' + _agoText(lastSyncAt, nowMs);
+}
+// Must never throw. syncCfg() once sync.js is loaded, the same inline read as
+// _syncConfiguredForBoot before that.
+function readSyncStatus(nowMs){
+  if(nowMs == null) nowMs = Date.now();
+  try{
+    var cfg = (typeof syncCfg === "function") ? syncCfg() : _readSyncCfgRaw();
+    var edit = (typeof localEditAt !== "undefined" && localEditAt) ? localEditAt : null;
+    if(!edit){ try{ edit = Number(localStorage.getItem("questa.localEditAt.v1")) || null; }catch(e){ edit = null; } }
+    return syncStatusFrom(cfg, edit, nowMs);
+  }catch(e){ return syncStatusFrom({}, null, nowMs); }
+}
+// Header badge (index.html #syncBadge). Nothing at all when sync is off. Only reports:
+// tapping opens Settings, where "Sync now" already is. There is no "round finished"
+// hook in sync.js, so a 5 s poll runs ONLY while the page is visible and the badge is
+// shown; it reads the small sync config key, never the state.
+let _syncBadgeTimer = null;
+function updateSyncBadge(st){
+  var el = (typeof document !== "undefined" && document.getElementById) ? document.getElementById('syncBadge') : null;
+  if(!el) return '';
+  var nowMs = Date.now();
+  st = st || readSyncStatus(nowMs);
+  var mode = '', tip = '', text = '';
+  if(st.enabled){
+    if(st.unsynced && st.error){ mode = 'err'; tip = 'Sync problem. Tap to see details.'; }
+    else if(st.unsynced){ mode = 'unsynced'; tip = 'Not synced yet. Your latest changes are only on this device.'; }
+    else if(st.stale){ mode = 'stale'; text = staleSyncLabel(st.lastSyncAt, nowMs); tip = text; }
+  }
+  el.className = mode;
+  el.hidden = !mode;
+  el.title = tip;
+  el.setAttribute('aria-label', tip || 'Sync status');
+  var lbl = document.getElementById('syncBadgeLbl');
+  if(lbl) lbl.textContent = text;
+  var visible = !(document.visibilityState && document.visibilityState !== 'visible');
+  if(mode && visible){
+    if(!_syncBadgeTimer) _syncBadgeTimer = setInterval(function(){ try{ updateSyncBadge(); }catch(e){} }, 5000);
+  } else if(_syncBadgeTimer){ clearInterval(_syncBadgeTimer); _syncBadgeTimer = null; }
+  return mode;
+}
+function isLongOffline(snap, nowMs){
+  return !!(snap && snap.enabled && snap.lastSyncAt != null && (nowMs - snap.lastSyncAt) > LONG_OFFLINE_MS);
+}
+// PWA-02: one toast per session when the last sync is more than a day old, so the
+// user knows before re-doing work. The long-offline dialog says more, so it wins.
+let _staleToastShown = false;
+function maybeStaleSyncToast(nowMs){
+  if(_staleToastShown) return false;
+  if(nowMs == null) nowMs = Date.now();
+  var st = readSyncStatus(nowMs);
+  if(!st.enabled || st.lastSyncAt == null || st.ageMs <= 86400000) return false;
+  if(isLongOffline(_bootSyncSnap, nowMs) && st.lastSyncAt === _bootSyncSnap.lastSyncAt) return false;
+  _staleToastShown = true;
+  if(typeof toast === "function") toast(staleSyncLabel(st.lastSyncAt, nowMs) + '. What you see here may be out of date.');
+  return true;
+}
+// S3 review M2: at boot (and on return to the page) a sync round starts a moment
+// later, so checking at once is a false alarm. Poll the small sync key: a new
+// lastSyncAt means the round succeeded (no toast at all); a new lastError means it
+// failed (check now); nothing after about 15 s (offline, no round) means check then.
+// Reads only; calls no sync function.
+const STALE_CHECK_POLL_MS = 1000, STALE_CHECK_MAX_POLLS = 15;
+let _staleCheckPending = false;
+function scheduleStaleSyncCheck(){
+  if(_staleToastShown || _staleCheckPending) return false;
+  var read = function(){ try{ return ((typeof syncCfg === "function") ? syncCfg() : _readSyncCfgRaw()) || {}; }catch(e){ return {}; } };
+  var base = read();
+  if(!base.enabled) return false;
+  var baseSync = base.lastSyncAt ? Number(base.lastSyncAt) : null;
+  var baseErr = base.lastError ? String(base.lastError) : '';
+  var polls = 0;
+  _staleCheckPending = true;
+  var tick = function(){
+    polls++;
+    var c = read();
+    var last = c.lastSyncAt ? Number(c.lastSyncAt) : null;
+    if(last != null && last !== baseSync){ _staleCheckPending = false; return; }
+    var failed = !!c.lastError && String(c.lastError) !== baseErr;
+    if(!failed && polls < STALE_CHECK_MAX_POLLS){ setTimeout(tick, STALE_CHECK_POLL_MS); return; }
+    _staleCheckPending = false;
+    if(document.visibilityState === 'hidden') return;   // the visible path schedules again
+    maybeStaleSyncToast(Date.now());
+  };
+  setTimeout(tick, STALE_CHECK_POLL_MS);
+  return true;
+}
+// PWA-24 (decision A): WARNING ONLY. It calls no sync function and does not delay,
+// gate or change the first merge; the text is true before and after that merge.
+const LONG_OFFLINE_TITLE = 'This device has not synced for more than 6 months.';
+const LONG_OFFLINE_TEXT = 'Items you deleted on your other devices during that time may come back here and on your other devices after this sync. If you see old items reappear, delete them again. If you would rather replace everything on this device with your Dropbox copy, open Settings and use Force pull.';
+let _longOfflineShown = false;
+// E2: at most one dialog per 24 h across page loads (device-only stamp). A successful
+// round makes the stamp irrelevant: the next boot no longer sees a long gap.
+const LONG_OFFLINE_WARN_KEY = 'questa.longOfflineWarnedAt.v1';
+function longOfflineWarning(nowMs){
+  if(_longOfflineShown) return false;
+  if(nowMs == null) nowMs = Date.now();
+  if(!isLongOffline(_bootSyncSnap, nowMs)) return false;
+  var last = 0; try{ last = Number(localStorage.getItem(LONG_OFFLINE_WARN_KEY)) || 0; }catch(e){ last = 0; }
+  if(last && nowMs >= last && nowMs - last < 86400000) return false;
+  try{ localStorage.setItem(LONG_OFFLINE_WARN_KEY, String(nowMs)); }catch(e){}
+  _longOfflineShown = true;
+  if(typeof alertDialog === "function") alertDialog(LONG_OFFLINE_TITLE, LONG_OFFLINE_TEXT);
+  return true;
+}
+// Settings sync section: shown until the next successful round changes lastSyncAt.
+function longOfflineSettingsLine(cfg){
+  if(!isLongOffline(_bootSyncSnap, Date.now())) return '';
+  if(cfg && cfg.lastSyncAt && Number(cfg.lastSyncAt) !== _bootSyncSnap.lastSyncAt) return '';
+  return '<br><span style="color:#f7a24e">' + LONG_OFFLINE_TITLE + ' Items deleted on your other devices may come back. Delete them again if they do.</span>';
+}
+// PWA-03: the newest copy that survives a browser wipe of this device -- a backup
+// file the user confirmed (lastExportTs) or, with sync on, the last Dropbox round.
+function lastOffDeviceCopy(){
+  var exp = (S && S.prefs && Number(S.prefs.lastExportTs)) || 0;
+  var cfg = {}; try{ cfg = (typeof syncCfg === "function") ? syncCfg() : _readSyncCfgRaw(); }catch(e){ cfg = {}; }
+  var sy = (cfg && cfg.enabled && Number(cfg.lastSyncAt)) || 0;
+  if(!exp && !sy) return { ts: null, via: '' };
+  return (sy > exp) ? { ts: sy, via: 'Dropbox sync' } : { ts: exp, via: 'backup file' };
+}
+function _offDeviceText(off, nowMs){
+  return (off && off.ts) ? (_agoText(off.ts, nowMs) + ' (' + off.via + ')') : 'never';
+}
+// Non-blocking, at most once per 7 days (stamp "questa.persistNagAt.v1", device-only).
+// Only for a definite "not protected" (false). Unknown (null: iOS, old browsers) never
+// nags; the gear's backup nag still covers that case.
+function maybeStorageNag(persisted, nowMs){
+  if(persisted !== false) return false;
+  if(nowMs == null) nowMs = Date.now();
+  var off = lastOffDeviceCopy();
+  if(off.ts && nowMs - off.ts <= OFF_DEVICE_NAG_MS) return false;
+  var last = 0; try{ last = Number(localStorage.getItem("questa.persistNagAt.v1")) || 0; }catch(e){ last = 0; }
+  if(last && nowMs >= last && nowMs - last < OFF_DEVICE_NAG_MS) return false;
+  // S3 review M1: long toast; the 7-day stamp is written only once it was seen.
+  var msg = 'Your data is not protected from browser cleanup. Last copy outside this device: ' + (off.ts ? _agoText(off.ts, nowMs) : 'never') + '. Export a backup or turn on Dropbox sync.';
+  if(typeof toastLong === "function") toastLong(msg, function(){ try{ localStorage.setItem("questa.persistNagAt.v1", String(nowMs)); }catch(e){} });
+  return true;
+}
+// Settings "Backup & transfer" rows. Pure: every input is passed in.
+function durabilityRowsHtml(persisted, usage, off, nowMs){
+  var p = (persisted === true) ? 'Yes' : (persisted === false) ? 'No' : 'Unknown (this browser does not say)';
+  var h = '<div class="small durabilityRows" style="margin-top:6px">';
+  h += '<div>Storage protected from browser cleanup: ' + p + '</div>';
+  h += '<div>Last copy outside this device: ' + _offDeviceText(off, nowMs) + '</div>';
+  if(usage && usage.chars){
+    h += '<div>Saved data: ' + (usage.chars / 1e6).toFixed(1) + ' MB of about ' + (usage.budget / 1e6) + ' MB (' + usage.pct + ' %)</div>';
+  }
+  h += '<div id="storageEstimateRow"></div></div>';
+  return h;
+}
+// Informational only (never drives a warning): the whole origin, events and snapshots included.
+function fillStorageEstimate(){
+  try{
+    if(!(navigator && navigator.storage && typeof navigator.storage.estimate === "function")) return;
+    navigator.storage.estimate().then(function(e){
+      var el = document.getElementById('storageEstimateRow');
+      if(!el || !e || typeof e.usage !== "number") return;
+      var mb = e.usage / 1e6;
+      el.textContent = 'Browser storage for this site: ' + (mb < 10 ? mb.toFixed(1) : Math.round(mb)) + ' MB used';
+    }).catch(function(){});
+  }catch(e){}
+}
+/* END_DURABILITY_UX */
 function resetEverything() {
   confirmDialog('Reset Everything', 'Erase ALL progress on this device? This cannot be undone.').then(async ok => {
     if(!ok) return;
@@ -6891,7 +7388,7 @@ function openOpt(key){
     const ne=S.prefs.notificationsEnabled;
     const perm=typeof Notification!=='undefined'?Notification.permission:'default';
     h+='<h4>Notifications</h4>';
-    h+='<p class="optHint">Local reminders for habits, dailies, and to-dos. These fire only while Questa is open — a web app cannot wake itself once you close it. Any reminder whose time passed while Questa was shut is shown, marked <b>Missed</b>, the next time you open it that same day.</p>';
+    h+='<p class="optHint">Local reminders for habits, dailies, and to-dos. They fire only while Questa is open (or through the Android app) — a web app cannot wake itself once closed. A reminder that passed today is shown marked <b>Missed</b> when you come back; ones from earlier days (up to 7) are listed at the top of the app.</p>';
     h+='<div class="optChoices">';
     h+='<button type="button" class="'+(ne?'on':'')+'" onclick="setNotificationsPref(true)">On</button>';
     h+='<button type="button" class="'+(ne?'':'on')+'" onclick="setNotificationsPref(false)">Off</button>';
@@ -7747,15 +8244,22 @@ function exportSaveDevice(blob, filename, eventCount, opts) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 
-  // See exportShare: only a real backup may clear the staleness nag.
-  if (isBackup) {
-    S.prefs.lastExportTs = Date.now();
-    save();
-    checkExportStaleness();
-  }
-  toast('Exported' + (eventCount ? (' (' + eventCount + ' events)') : ''));
+  // D5 EXTRA-1 (2026-09-26): <a download> reports nothing -- the browser gives no
+  // saved/blocked signal, and the TWA (Brave) can block a download silently. So say
+  // only that the download STARTED, and never clear the backup nag on our own.
+  toast('Download started' + (eventCount ? (' (' + eventCount + ' events)') : '') + '. Check your Downloads folder.');
   closeSheet();
   logEvent({kind: 'export', taskTitle: 'Export Data', notes: (opts.logNote || 'Created backup file via Download')});
+  // See exportShare: only a real backup may clear the staleness nag -- and here only
+  // after the user says the file is really there. Cancel leaves the nag on.
+  if (isBackup) {
+    confirmDialog('Did the backup file save?', 'Look in your Downloads folder for ' + filename + '. Tap Yes only if the file is there. Until then Questa keeps reminding you to back up.').then(function (ok) {
+      if (!ok) return;
+      S.prefs.lastExportTs = Date.now();
+      save();
+      checkExportStaleness();
+    });
+  }
 }
 
 // --- Section picker dialogs (export + import) --------------------------------
@@ -8172,8 +8676,18 @@ function showImportSectionPicker(data, detected){
   document.getElementById('scrim').classList.add('show');
 }
 
+// PWA-25: peak memory while importing is about 3-4x the file size. 8 MB is about
+// twice today's real backup, so a normal backup never asks. Size is known before
+// anything is read (an event count is not -- counting needs the very parse).
+const IMPORT_LARGE_WARN_BYTES = 8 * 1024 * 1024;
 function importData(ev){
   const f=ev.target.files[0]; if(!f)return;
+  if(f.size > IMPORT_LARGE_WARN_BYTES && !ev.__largeOk){
+    ev.target.value=''; // so the same file can be picked again
+    confirmDialog('Large backup', 'This backup is large (' + (f.size / (1024 * 1024)).toFixed(1) + ' MB). Import may be slow or fail on this phone. Continue?')
+      .then(function(ok){ if(ok) importData({target:{files:[f], value:''}, __largeOk:true}); });
+    return;
+  }
   const rd=new FileReader();
   rd.onload=()=>{ try{ const parsed=JSON.parse(rd.result);
       // Detect tokenized schema-2 export and expand it to the legacy shape
@@ -8257,12 +8771,12 @@ async function updateLastFullBackupText(){
     const last = snapshots.find(s => s.type === "full" && s.verified);
     if(last){
       const d = new Date(last.ts);
-      el.textContent = 'Last full backup: ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      el.textContent = 'Last local snapshot (on this device only): ' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
     } else {
-      el.textContent = 'Last full backup: None';
+      el.textContent = 'Last local snapshot (on this device only): None';
     }
   } catch(e) {
-    el.textContent = 'Last full backup: (unavailable)';
+    el.textContent = 'Last local snapshot (on this device only): (unavailable)';
   }
 }
 
@@ -8674,9 +9188,12 @@ function maybeCheckSwUpdate(nowMs){
   }catch(e){}
 }
 registerServiceWorker();
+// Show missed reminders kept from an earlier pass right away, before the
+// scheduler's first pass (which waits for the service worker registration).
+try{ renderMissedReminders(); }catch(e){}
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
-    checkReminders();
+    runReminderPass();
     maybeCheckSwUpdate(Date.now());
   }
 });
@@ -8738,7 +9255,60 @@ checkExportStaleness();
 // #11b: Request persistent storage to reduce browser-eviction risk (Safari ITP
 // 7-day wipe, Chrome eviction under pressure). PWAs get this automatically;
 // browser-tab usage does not (MDN: all-or-nothing per origin).
-try{ if(navigator&&navigator.storage&&typeof navigator.storage.persist==="function"){ navigator.storage.persist().then(function(granted){ if(typeof logEvent==="function") logEvent({kind:"storagePersist", granted:!!granted}); }).catch(function(){}); } }catch(_){}
+/* BEGIN_STORAGE_PERSIST */
+// D5 PWA-03 (2026-09-26): the answer is now KEPT, so Settings can show it and the
+// gentle nag can use it: null = unknown / API missing, true, false. The diagnostic
+// storagePersist log entry is unchanged. persisted() first (no prompt, cheap), then
+// persist() only when not yet persisted. Tests eval this block from the source
+// (tests/quota-persist.test.js P1-P5, tests/durability-ux.test.js T1/T2).
+let _storagePersisted = null;
+function storagePersistState(){ return _storagePersisted; }
+function requestStoragePersist(){
+  try{
+    var st = navigator && navigator.storage;
+    if(!st || typeof st.persist !== "function") return Promise.resolve(_storagePersisted);
+    var first = (typeof st.persisted === "function") ? Promise.resolve().then(function(){ return st.persisted(); }) : Promise.resolve(false);
+    return first.then(function(already){
+      return already ? true : st.persist();
+    }).then(function(granted){
+      _storagePersisted = !!granted;
+      if(typeof logEvent==="function") logEvent({kind:"storagePersist", granted:!!granted});
+      return _storagePersisted;
+    }).catch(function(){ return _storagePersisted; });
+  }catch(_){ return Promise.resolve(_storagePersisted); }
+}
+// Re-ask when the app gets installed (a browser may grant it to an installed app). A
+// TWA install fires no appinstalled; its launches run in display-mode standalone,
+// where the every-launch ask below covers it. "questa.persistAskedStandalone.v1"
+// records that the first standalone launch has asked; it is set only after the ask
+// resolved, so a launch killed mid-ask asks again next time.
+function _persistBootAsk(){
+  try{ window.addEventListener("appinstalled", function(){ requestStoragePersist(); }); }catch(_){}
+  var standalone = false;
+  try{ standalone = !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches); }catch(_){}
+  var askedStandalone = null;
+  try{ askedStandalone = localStorage.getItem("questa.persistAskedStandalone.v1"); }catch(_){}
+  var p = requestStoragePersist();
+  if(standalone && !askedStandalone){
+    p = p.then(function(v){ try{ localStorage.setItem("questa.persistAskedStandalone.v1", "1"); }catch(_){} return v; });
+  }
+  return p;
+}
+try{ _persistBootAsk().then(function(p){ if(typeof maybeStorageNag==="function") maybeStorageNag(p, Date.now()); }).catch(function(){}); }catch(_){}
+/* END_STORAGE_PERSIST */
+// D5 PWA-06/PWA-02/PWA-24 boot: badge, one stale toast, the long-offline warning.
+// Runs before sync.js loads (index.html loads app.js first), so the long-offline
+// check still sees the pre-sync lastSyncAt (_bootSyncSnap). None of these calls sync.
+try{
+  if(!longOfflineWarning(Date.now())) scheduleStaleSyncCheck();   // waits for the first round (M2)
+  updateSyncBadge();
+  document.addEventListener('visibilitychange', function(){
+    try{
+      if(document.visibilityState === 'visible'){ updateSyncBadge(); scheduleStaleSyncCheck(); }
+      else updateSyncBadge();   // stops the 5 s poll while hidden
+    }catch(_){}
+  });
+}catch(_){}
 
 setTimeout(()=>{
   if(_flushPromise) return;

@@ -21,9 +21,9 @@
 // enough that extraction starts failing loudly, P6 alone still catches a
 // reintroduced live navigator.locks.request(...) call.
 //
-// P1..P5 are unchanged by this rewrite: they test the navigator.storage.
-// persist() boot guard in isolation (a few lines of inline glue code, not
-// save()) and still load nothing from app.js.
+// P1..P5 test the navigator.storage.persist() boot ask. Since D5 (2026-09-26)
+// they eval the REAL BEGIN/END_STORAGE_PERSIST block from app.js instead of a
+// hand copy of the old one-line guard.
 //
 // Run: node tests/quota-persist.test.js   (also run by `node tests/run.js`)
 'use strict';
@@ -270,100 +270,72 @@ async function main() {
 // ═══════════════════════════════════════════════════════════════════════
 // #11b — navigator.storage.persist() at boot
 // ═══════════════════════════════════════════════════════════════════════
+// D5 (2026-09-26): P1-P5 used to run a hand copy of the one-line boot guard, so
+// they stayed green with that line deleted from app.js. They now eval the REAL
+// BEGIN/END_STORAGE_PERSIST block from app.js (one eval == one app launch); a
+// missing block is a counted FAIL.
+const persistBlockMatch = appSrc.match(/\/\* BEGIN_STORAGE_PERSIST \*\/([\s\S]*?)\/\* END_STORAGE_PERSIST \*\//);
+assert('P0: app.js has the BEGIN/END_STORAGE_PERSIST block', !!persistBlockMatch);
+function runPersistBlock(nav, logEvent) {
+  if (!persistBlockMatch) return null;
+  var win = { addEventListener: function () {}, matchMedia: function () { return { matches: false }; } };
+  var ls = { getItem: function () { return null; }, setItem: function () {} };
+  return new Function('navigator', 'window', 'localStorage', 'logEvent',
+    persistBlockMatch[1] + '\n; return { state: storagePersistState };')(nav, win, ls, logEvent);
+}
 
 // ── P1: persist() called → logEvent with granted=true ─────────────────
 {
   var persistCalled = false;
-  var grantedValue = null;
   var events = [];
-
-  var navigator = {
-    storage: {
-      persist: function() {
-        persistCalled = true;
-        return Promise.resolve(true);
-      }
-    }
-  };
-
-  var logEvent = function(ev) { events.push(ev); };
-
-  // Simulate the boot-time persist guard (exactly as shipped):
-  try{ if(navigator&&navigator.storage&&typeof navigator.storage.persist==='function'){ navigator.storage.persist().then(function(granted){ if(typeof logEvent==='function') logEvent({kind:'storagePersist', granted:!!granted}); }).catch(function(){}); } }catch(_){}
-
-  // persist is async, wait for it
+  var r = runPersistBlock({ storage: { persist: function() { persistCalled = true; return Promise.resolve(true); } } },
+    function(ev) { events.push(ev); });
   await new Promise(function(r) { setTimeout(r, 10); });
-
   assert('P1a: persist() was called', persistCalled);
-  assertEq('P1b: logEvent has storagePersist kind', events.length, 1);
+  assertEq('P1b: logEvent has storagePersist kind', events.length === 1 && at(events, 0).kind, 'storagePersist');
   assertEq('P1c: logEvent granted is true', at(events, 0).granted, true);
+  assertEq('P1d: storagePersistState() is true', r && r.state(), true);
 }
 
 // ── P2: persist() denied → logEvent with granted=false ────────────────
 {
   var persistCalled = false;
   var events = [];
-
-  var navigator = {
-    storage: {
-      persist: function() {
-        persistCalled = true;
-        return Promise.resolve(false);
-      }
-    }
-  };
-
-  var logEvent = function(ev) { events.push(ev); };
-
-  try{ if(navigator&&navigator.storage&&typeof navigator.storage.persist==='function'){ navigator.storage.persist().then(function(granted){ if(typeof logEvent==='function') logEvent({kind:'storagePersist', granted:!!granted}); }).catch(function(){}); } }catch(_){}
-
+  var r = runPersistBlock({ storage: { persist: function() { persistCalled = true; return Promise.resolve(false); } } },
+    function(ev) { events.push(ev); });
   await new Promise(function(r) { setTimeout(r, 10); });
-
   assert('P2a: persist() was called even when denied', persistCalled);
   assertEq('P2b: logEvent granted is false', at(events, 0).granted, false);
+  assertEq('P2c: storagePersistState() is false', r && r.state(), false);
 }
 
 // ── P3: navigator.storage missing → no throw, no crash ────────────────
 {
   var events = [];
-  var navigator = {};  // no storage
-  var logEvent = function(ev) { events.push(ev); };
-
-  // Should NOT throw
-  try{ if(navigator&&navigator.storage&&typeof navigator.storage.persist==='function'){ navigator.storage.persist().then(function(granted){ if(typeof logEvent==='function') logEvent({kind:'storagePersist', granted:!!granted}); }).catch(function(){}); } }catch(_){}
-
+  var r = runPersistBlock({}, function(ev) { events.push(ev); });   // no storage
   await new Promise(function(r) { setTimeout(r, 10); });
-  assertEq('P3a: no logEvent when storage unavailable', events.length, 0);
+  assert('P3a: block ran without throwing', !!r);
+  assertEq('P3b: no logEvent when storage unavailable', events.length, 0);
+  assertEq('P3c: state stays unknown (null)', r && r.state(), null);
 }
 
-// ── P4: navigator.storage.persist throws → no crash, catch swallows ──
+// ── P4: navigator.storage.persist rejects → no crash, catch swallows ──
 {
   var events = [];
-  var navigator = {
-    storage: {
-      persist: function() { return Promise.reject(new Error('not allowed')); }
-    }
-  };
-  var logEvent = function(ev) { events.push(ev); };
-
-  // Should NOT throw
-  try{ if(navigator&&navigator.storage&&typeof navigator.storage.persist==='function'){ navigator.storage.persist().then(function(granted){ if(typeof logEvent==='function') logEvent({kind:'storagePersist', granted:!!granted}); }).catch(function(){}); } }catch(_){}
-
+  var r = runPersistBlock({ storage: { persist: function() { return Promise.reject(new Error('not allowed')); } } },
+    function(ev) { events.push(ev); });
   await new Promise(function(r) { setTimeout(r, 10); });
-  assertEq('P4a: no logEvent when persist rejects', events.length, 0);
+  assert('P4a: block ran without throwing', !!r);
+  assertEq('P4b: no logEvent when persist rejects', events.length, 0);
 }
 
 // ── P5: navigator entirely missing (older env) → no throw ─────────────
 {
   var events = [];
-  // No navigator at all (simulated by undefined)
-  var navigator;  // undefined
-  var logEvent = function(ev) { events.push(ev); };
-
-  try{ if(navigator&&navigator.storage&&typeof navigator.storage.persist==='function'){ navigator.storage.persist().then(function(granted){ if(typeof logEvent==='function') logEvent({kind:'storagePersist', granted:!!granted}); }).catch(function(){}); } }catch(_){}
-
+  var r = runPersistBlock(undefined, function(ev) { events.push(ev); });
   await new Promise(function(r) { setTimeout(r, 10); });
-  assertEq('P5a: no logEvent when navigator undefined', events.length, 0);
+  assert('P5a: block ran without throwing', !!r);
+  assertEq('P5b: no logEvent when navigator undefined', events.length, 0);
 }
 
 // ── P6: the real app.js save() must stay synchronous ──────────────────

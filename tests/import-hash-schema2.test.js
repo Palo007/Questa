@@ -28,7 +28,7 @@
 //
 // Run: node tests/import-hash-schema2.test.js  (also run by node tests/run.js)
 const fs = require('fs'), path = require('path'), vm = require('vm');
-const { extractFunction } = require('./_extract');
+const { extractFunction, extractLine } = require('./_extract');
 
 const appSrc = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
 
@@ -48,6 +48,8 @@ const tokSlice = sliceBetween('const _EXPORT_FIELD_MAP', 'async function buildBa
 const hashSlice = sliceBetween('async function computeHash(', '// --- Backup snapshot read/list', 'hash');
 const buildBackupFileFn = extractFunction(appSrc, /^async function buildBackupFile\(eventsArr, sectionKeys\)\{/, 'buildBackupFile');
 const importDataFn = extractFunction(appSrc, /^function importData\(ev\)\{/, 'importData');
+// PWA-25: importData() reads this top-level const (large-backup confirm threshold).
+const importLargeLine = extractLine(appSrc, /^const IMPORT_LARGE_WARN_BYTES = /, 'IMPORT_LARGE_WARN_BYTES');
 
 const MISMATCH_TEXT = 'This file appears to be corrupted or tampered with (hash mismatch). Import cancelled.';
 
@@ -89,7 +91,7 @@ const sb = {
 };
 sb.self = sb; sb.window = sb; sb.globalThis = sb;
 vm.createContext(sb);
-vm.runInContext(tokSlice + '\n' + hashSlice + '\n' + buildBackupFileFn + '\n' + importDataFn, sb);
+vm.runInContext(tokSlice + '\n' + hashSlice + '\n' + buildBackupFileFn + '\n' + importLargeLine + '\n' + importDataFn, sb);
 
 // Counting spy around the real computeHashWith. importData resolves the global
 // at call time, so the wrapper takes effect there.

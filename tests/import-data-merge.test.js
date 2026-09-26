@@ -31,13 +31,15 @@
 //
 // Run: node tests/import-data-merge.test.js  (also run by node tests/run.js)
 const fs = require('fs'), path = require('path'), vm = require('vm');
-const { extractFunction } = require('./_extract');
+const { extractFunction, extractLine } = require('./_extract');
 
 const appSrc = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
 
 // Anchor-based extraction (see tests/_extract.js) -- survives line shifts
 // elsewhere in app.js. Do NOT reintroduce hardcoded line-number slicing.
 const importDataFn = extractFunction(appSrc, /^function importData\(ev\)\{/, 'importData');
+// PWA-25 (design_D7_warnings.md): the large-backup confirm threshold, a top-level const.
+const importLargeLine = extractLine(appSrc, /^const IMPORT_LARGE_WARN_BYTES = /, 'IMPORT_LARGE_WARN_BYTES');
 const eventMergeSigFn = extractFunction(appSrc, /^function eventMergeSig\(r\)\{/, 'eventMergeSig');
 const eventMergeFilterFn = extractFunction(appSrc, /^function eventMergeFilter\(incoming, existingUids, existingSigSet\)\{/, 'eventMergeFilter');
 // 2026-09-18: eventMergeFilter()'s uid-collision branch calls this.
@@ -123,8 +125,10 @@ function flush() {
 // file's `__content` string. importData() never inspects file.type/size, only
 // ev.target.files[0], so a plain {__content} stand-in is sufficient.
 function FakeFileReader() {}
+FakeFileReader.reads = 0;
 FakeFileReader.prototype.readAsText = function (f) {
   const self = this;
+  FakeFileReader.reads++;
   Promise.resolve().then(function () {
     self.result = f && f.__content;
     if (typeof self.onload === 'function') self.onload();
@@ -151,7 +155,7 @@ function makeCtx(opts) {
     TAB: 'habits',
     S: opts.initialS || { char: { name: 'Orig' }, tasks: [] },
     syncDeviceId: function () { return 'dev-me'; },
-    confirmDialog: function () { calls.confirmDialog++; return (opts.confirmDialog || function () { return Promise.resolve(true); })(); },
+    confirmDialog: function (title, text) { calls.confirmDialog++; (calls.confirmTexts = calls.confirmTexts || []).push(String(text || '')); return (opts.confirmDialog || function () { return Promise.resolve(true); })(title, text); },
     migrate: opts.migrate || function (x) { return x; },
     save: function () {},
     applyWidth: function () {},
@@ -183,7 +187,7 @@ function makeCtx(opts) {
   const src = [granularHelpers, ioRowsHTMLFn, ioBindRowsFn, ioSetAllFn, ioSelectedFn,
                eventMergeSigFn, eventUidDisambiguateFn, eventMergeFilterFn, eventUidOfFn,
                reparentEventsForImportFn, applyImportSectionsFn, showImportSectionPickerFn,
-               importDataFn].join('\n');
+               importLargeLine, importDataFn].join('\n');
   try { vm.runInContext(src, sandbox); }
   catch (e) { console.error('FAIL: extracted source threw during eval:', e); process.exit(1); }
 
@@ -318,6 +322,60 @@ async function main() {
     assert('I5g: bulkAddEvents never called on the rejected attempt', ctx.calls.bulkAddEvents.length === 0);
     assert('I5h: S.tasks.length is unchanged (migrate never ran)', ctx.sandbox.S.tasks.length === 3);
     assert('I5i: an error dialog was shown', ctx.calls.alertDialog.some(function (a) { return /does not look like a valid Questa backup/.test(a.text || ''); }));
+  }
+
+  // -----------------------------------------------------------------------
+  // L1-L3 (PWA-25): a backup over IMPORT_LARGE_WARN_BYTES (8 MB) asks first,
+  // BEFORE the file is read; the import is still allowed on "Continue".
+  // -----------------------------------------------------------------------
+  const MB = 1024 * 1024;
+  function makeSizedEv(dataObj, size) {
+    const ev = makeEv(dataObj);
+    ev.target.files[0].size = size;
+    ev.target.value = 'C:\\fakepath\\backup.json';
+    return ev;
+  }
+  {
+    const ctx = makeCtx({ confirmDialog: function () { return Promise.resolve(false); } });
+    assert('L0: IMPORT_LARGE_WARN_BYTES is 8 MB', vm.runInContext('IMPORT_LARGE_WARN_BYTES', ctx.sandbox) === 8 * MB);
+    FakeFileReader.reads = 0;
+    const ev = makeSizedEv(makeBackup([{ id: 1 }], []), 9 * MB);
+    ctx.sandbox.importData(ev);
+    assert('L1a: file input reset right away so the same file can be picked again', ev.target.value === '');
+    await clickImport(ctx);
+    assert('L1b: the FIRST confirmDialog is the large-backup one',
+      (ctx.calls.confirmTexts || [])[0] !== undefined && /This backup is large \(9\.0 MB\)/.test(ctx.calls.confirmTexts[0]));
+    assert('L1c: declined -> readAsText never called', FakeFileReader.reads === 0);
+    assert('L1d: declined -> the section picker never opened', !ctx.sandbox.document.nodes['ioImpGo']);
+    assert('L1e: declined -> exactly one confirmDialog', ctx.calls.confirmDialog === 1);
+  }
+  {
+    const ctx = makeCtx();
+    FakeFileReader.reads = 0;
+    ctx.sandbox.importData(makeSizedEv(makeBackup([{ id: 1 }], [{ uid: 'e1', ts: 1, kind: 'tap', taskId: 't1', dir: 1, reps: 0 }]), 9 * MB));
+    await clickImport(ctx);
+    assert('L2a: confirmed -> readAsText called exactly once', FakeFileReader.reads === 1);
+    assert('L2b: confirmed -> the import proceeds through the picker as today (events merged)',
+      ctx.calls.bulkAddEvents.length === 1 && ctx.calls.bulkAddEvents[0].length === 1);
+    assert('L2c: the large-backup dialog was asked only once (re-entry does not ask again)',
+      (ctx.calls.confirmTexts || []).filter(function (t) { return /This backup is large/.test(t); }).length === 1);
+  }
+  {
+    const ctx = makeCtx();
+    FakeFileReader.reads = 0;
+    ctx.sandbox.importData(makeSizedEv(makeBackup([{ id: 1 }], []), 4 * MB));
+    await clickImport(ctx);
+    assert('L3a: a 4 MB backup gets no large-backup dialog',
+      !(ctx.calls.confirmTexts || []).some(function (t) { return /This backup is large/.test(t); }));
+    assert('L3b: a 4 MB backup is read straight away', FakeFileReader.reads === 1);
+  }
+  {
+    const ctx = makeCtx();
+    FakeFileReader.reads = 0;
+    ctx.sandbox.importData(makeSizedEv(makeBackup([{ id: 1 }], []), 8 * MB));
+    await clickImport(ctx);
+    assert('L3c: exactly 8 MB is not "large" (strict >)',
+      !(ctx.calls.confirmTexts || []).some(function (t) { return /This backup is large/.test(t); }) && FakeFileReader.reads === 1);
   }
 
   if (failures) {

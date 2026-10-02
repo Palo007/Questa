@@ -3942,11 +3942,27 @@ function anMilestones(kw){
   const firstDate = series.length? series[0].d : (anActivitySeries(kw,mn,Date.now())[0]||null);
   return { total:r.total, taps:r.taps, biggestDay:biggest, activityDays, repDays, firstDate, matched:r.matched };
 }
+// Chart-only gap fill (CR-KT-006): every local day from the first event day
+// (or `from`, if later) to `to` gets a point, 0 where nothing happened. The
+// sparse anRepsSeries stays as is for totals, repDays and firstDate. Steps with
+// nextLocalDay, never +DAY (DST). No events -> [] (nothing to draw). Capped so
+// an all-time window cannot build a huge array.
+const AN_FILL_MAX_DAYS = 3700;
+function anFillDays(series,from,to){
+  if(!series.length) return [];
+  const have={}; series.forEach(s=>{ have[s.d]=s.v; });
+  const out=[]; const end=localDayKey(to);
+  let d=Math.max(localDayKey(from),series[0].d);
+  if(end-d>AN_FILL_MAX_DAYS*DAY) d=localDayKey(end-AN_FILL_MAX_DAYS*DAY);
+  for(; d<=end; d=nextLocalDay(d)) out.push({d:d,v:have[d]||0});
+  return out;
+}
 // group reps into weekly or monthly buckets within window -> [{label,v}]
+// Empty weeks/months between the first event and `to` are listed with v=0.
 function anBreakdown(kw,from,to,mode){
   const series=anRepsSeries(kw,from,to);
   const buckets={};
-  series.forEach(s=>{
+  anFillDays(series,from,to).forEach(s=>{
     const d=new Date(s.d); let key;
     if(mode==='month'){ key=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
     else { // ISO-ish week: year + week number (Mon start)
@@ -4801,7 +4817,7 @@ function anDetailDashboard(from,to){
     h+='<div class="anNote">'+(mile.activityDays-mile.repDays)+' active day(s) have no exact tap count in the Habitica export (exact-only policy: they count as activity but contribute 0 reps, so totals are a verified floor, never estimated).</div>';
   }
   // --- reps per day (non-cumulative): repetitions done on each day ---
-  const daily=anRepsSeries(M,from,to);            // {d, v=reps that day}
+  const daily=anFillDays(anRepsSeries(M,from,to),from,to);   // {d, v=reps that day}, 0-filled
   const dailyTips=daily.map(s=>'📅 '+fmtDate(s.d)+'\n🔁 '+s.v.toLocaleString()+' reps');
   h+='<div class="anSection">'+esc(mname)+' &mdash; reps per day</div>';
   h+='<div class="anCard full"><div class="k">Repetitions done each day</div>'+svgSpark(daily,false,'var(--mp)',60,dailyTips)+'</div>';

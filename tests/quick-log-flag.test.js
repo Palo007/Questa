@@ -47,7 +47,7 @@ assert('T4b saveTask stamps updatedAt', saveTaskSrc.includes('EDIT.updatedAt=now
 function render(EDIT) {
   const sheet = { innerHTML: '' };
   const factory = new Function(
-    'EDIT', 'document', 'S', 'esc', 'uid', 'drawReminderEditor', 'tagEditorBlock', 'quickLogMode',
+    'EDIT', 'document', 'S', 'esc', 'uid', 'drawReminderEditor', 'tagEditorBlock', 'quickLogMode', 'jsq',
     drawSheetSrc + '\nreturn drawSheet;'
   );
   const drawSheet = factory(
@@ -59,7 +59,10 @@ function render(EDIT) {
     () => 'uid1',
     () => '',
     () => '',
-    quickLogMode
+    quickLogMode,
+    // 2026-10-08 (Activity tab, CR-KT-012): drawSheet now builds a History button for
+    // existing tasks and escapes the task id with jsq(), so the sandbox must provide it.
+    s => String(s == null ? '' : s)
   );
   drawSheet();
   return sheet.innerHTML;

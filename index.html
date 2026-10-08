@@ -1066,6 +1066,27 @@
       order: 10;
     }
   }
+  /* CR-KT-015: task image attachments */
+  .attRow{display:inline-flex;align-items:center;gap:3px;cursor:pointer;margin-bottom:2px}
+  img.attThumb{width:32px;height:32px;object-fit:cover;border-radius:6px;background:var(--panel2);display:block;border:1px solid var(--line)}
+  .attMore{font-size:10px;font-weight:700;color:var(--muted)}
+  .attGrid{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 8px}
+  .attItem{position:relative;width:64px;height:64px}
+  .attItem img.attThumb{width:64px;height:64px;border-radius:8px;cursor:pointer}
+  .attItem .attDel{position:absolute;top:-6px;right:-6px;width:22px;height:22px;border-radius:50%;border:1px solid var(--line);
+    background:var(--panel);color:var(--ink);font-size:12px;line-height:1;padding:0;cursor:pointer}
+  #attViewer{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.94);display:none;overflow:hidden;
+    touch-action:none;user-select:none;-webkit-user-select:none}
+  #attViewer.show{display:block}
+  #attViewer img{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform-origin:0 0;will-change:transform;
+    -webkit-user-drag:none;user-select:none}
+  #attViewer .avMsg{position:absolute;left:0;right:0;top:50%;text-align:center;color:#ccc;font-size:14px;transform:translateY(-50%);pointer-events:none}
+  #attViewer .avBtn{position:absolute;width:44px;height:44px;border-radius:50%;border:none;background:rgba(255,255,255,.16);
+    color:#fff;font-size:22px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  #attViewer .avClose{top:calc(10px + env(safe-area-inset-top));right:10px}
+  #attViewer .avPrev{left:10px;top:50%;margin-top:-22px}
+  #attViewer .avNext{right:10px;top:50%;margin-top:-22px}
+  #attViewer .avCount{position:absolute;left:0;right:0;bottom:calc(12px + env(safe-area-inset-bottom));text-align:center;color:#ddd;font-size:12px;pointer-events:none}
 </style>
 </head>
 <body>

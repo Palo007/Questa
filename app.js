@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings. It must equal sw.js VERSION.
-const APP_VERSION = "v2026.10.08-2041";
+const APP_VERSION = "v2026.10.08-2129";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -5291,6 +5291,10 @@ function renderEventDetail(from,to){
                   _detail+='<div style="margin-top:3px;font-size:11px;line-height:1.5"><span style="opacity:.7">subtasks:</span>'+_rows+'</div>';
                 }
               }
+              else if(c.field==='attachments'){
+                const _ia=+c.added||0, _ir=+c.removed||0;
+                _summ.push('images'+(_ia?' +'+_ia:'')+(_ir?' −'+_ir:''));
+              }
               else { _summ.push(esc(c.field)); }
             });
           }
@@ -6394,6 +6398,16 @@ function attReconcileSave(baseArr, editArr, liveArr){
   });
   return out;
 }
+// Pure: how many images the user added / removed in the sheet (by id), for the
+// Activity log 'edit' event ({field:'attachments', added, removed}).
+function attUserDelta(baseArr, editArr){
+  const ids = function(a){ return new Set((Array.isArray(a) ? a : []).filter(function(x){ return x && x.id != null; }).map(function(x){ return x.id; })); };
+  const b = ids(baseArr), e = ids(editArr);
+  let added = 0, removed = 0;
+  e.forEach(function(id){ if(!b.has(id)) added++; });
+  b.forEach(function(id){ if(!e.has(id)) removed++; });
+  return {added: added, removed: removed};
+}
 function attList(t){ return (t && Array.isArray(t.attachments)) ? t.attachments.filter(function(a){ return a && typeof a.sha === 'string' && a.sha; }) : []; }
 function attDb(){
   if(_attDbP) return _attDbP;
@@ -6838,6 +6852,9 @@ function saveTask(){
     const _base = EDIT_BASE || orig;
     // CR-KT-015: apply only the user's image delta onto the live list (a peer's image
     // merged in while the sheet was open survives); the key is omitted when empty.
+    // Activity log: count the USER's image delta (sheet start -> sheet end) before the
+    // reconcile below folds in images a sync merged in meanwhile.
+    const _attDelta = attUserDelta(_base.attachments, EDIT.attachments);
     if(typeof attReconcileSave==='function'){
       const _ra = attReconcileSave(_base.attachments, EDIT.attachments, orig.attachments);
       if(_ra.length) EDIT.attachments = _ra; else delete EDIT.attachments;
@@ -6955,6 +6972,7 @@ function saveTask(){
       if(_items.length) _ch.push({field:'checklist',items:_items});
       if(JSON.stringify(orig.repeat||[])!==JSON.stringify(EDIT.repeat||[])) _ch.push({field:'schedule'});
       if(JSON.stringify(orig.reminders||[])!==JSON.stringify(EDIT.reminders||[])) _ch.push({field:'reminders'});
+      if(_attDelta.added||_attDelta.removed) _ch.push({field:'attachments',added:_attDelta.added,removed:_attDelta.removed});
       if(upDelta||downDelta) _ch.push({field:'counter'});
       if(_ch.length){
         const _ev={kind:'edit', taskType:t.type, taskId:t.id, taskTitle:t.title, changes:_ch};

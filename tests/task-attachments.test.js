@@ -287,6 +287,24 @@ const stateWith = function(shas){ return { tasks: [{ id: 't1', attachments: shas
   const mapSrc = appSrc.slice(a, appSrc.indexOf('};', a));
   assert('E3: no _EXPORT_FIELD_MAP code was added for attachments', !/attachments/.test(mapSrc));
 
+  // F: Activity log. Adding / removing an image in the editor writes an 'edit' event
+  // change {field:'attachments', added, removed} (user report 2026-10-08: nothing logged).
+  const fsb = vm.createContext({});
+  vm.runInContext(extractFunction(appSrc, /^function attUserDelta\(/, 'attUserDelta'), fsb);
+  const ud = function(b, e){ return J(vm.runInContext('attUserDelta(' + J(b) + ',' + J(e) + ')', fsb)); };
+  assert('F1: one image added', ud([{id:'A'}], [{id:'A'},{id:'B'}]) === J({added:1, removed:0}));
+  assert('F2: one image removed', ud([{id:'A'},{id:'B'}], [{id:'B'}]) === J({added:0, removed:1}));
+  assert('F3: missing key on both sides = no change', ud(undefined, undefined) === J({added:0, removed:0}));
+  assert('F4: removed the last image (key deleted) counts as removed', ud([{id:'A'}], undefined) === J({added:0, removed:1}));
+  // The delta is taken in saveTask and used in the change list: the declaration's block
+  // must still be open where it is used (a ReferenceError there is swallowed by try{}).
+  const st = extractFunction(appSrc, /^function saveTask\(/, 'saveTask');
+  const di = st.indexOf('const _attDelta'), ui = st.indexOf("field:'attachments'");
+  let depth = 0, minDepth = 0;
+  for(let i = di; i < ui && di >= 0; i++){ if(st[i] === '{') depth++; else if(st[i] === '}'){ depth--; if(depth < minDepth) minDepth = depth; } }
+  assert('F5: saveTask declares _attDelta before the edit-event change list, in an enclosing block', di >= 0 && ui > di && minDepth >= 0);
+  assert('F6: Activity feed renders the attachments change as "images"', /c\.field==='attachments'[\s\S]{0,200}'images'/.test(appSrc));
+
   if(failures){ console.error('\n' + failures + ' FAILED'); process.exit(1); }
   console.log('\nAll task-attachments tests passed.');
 })().catch(function(e){ console.error('[FAIL] test crashed: ' + (e && e.stack || e)); process.exit(1); });

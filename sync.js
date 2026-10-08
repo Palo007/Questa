@@ -1188,6 +1188,43 @@ function mergeChecklist(baseArr, localArr, remoteArr, preferLocal){
   return out;
 }
 
+// CR-KT-015: per-image merge for task.attachments. Items are immutable
+// ({id, sha, mime, w, h, bytes, addedAt}) so there is no field conflict: only
+// membership. Union of local + remote ids; an id that is in base and missing on
+// ONE side was removed there. base null/undefined = pure union (first sync, GUARD 1,
+// force push): no removal is ever inferred without base evidence. An id present on
+// both sides keeps the LOCAL item. Order: addedAt ascending, then id (string compare).
+// Idempotent, so the conflict-retry re-merge is safe. Returns [] when empty -- the
+// caller OMITS the key then (never writes []). No timestamp is clamped here.
+function mergeAttachments(baseArr, localArr, remoteArr){
+  const clean = function(a){ return (Array.isArray(a) ? a : []).filter(function(x){ return x && x.id != null; }); };
+  const hasBase = Array.isArray(baseArr);
+  const baseIds = new Set(clean(baseArr).map(function(x){ return x.id; }));
+  const lm = new Map(clean(localArr).map(function(x){ return [x.id, x]; }));
+  const rm = new Map(clean(remoteArr).map(function(x){ return [x.id, x]; }));
+  const out = [];
+  new Set([...lm.keys(), ...rm.keys()]).forEach(function(id){
+    const l = lm.get(id), r = rm.get(id);
+    if(l && r){ out.push(l); return; }
+    // present on one side only: dropped iff base had it (the other side removed it)
+    if(hasBase && baseIds.has(id)) return;
+    out.push(l || r);
+  });
+  out.sort(function(a, b){
+    const ta = Number(a.addedAt) || 0, tb = Number(b.addedAt) || 0;
+    if(ta !== tb) return ta < tb ? -1 : 1;
+    const ia = String(a.id), ib = String(b.id);
+    return ia < ib ? -1 : (ia > ib ? 1 : 0);
+  });
+  return out;
+}
+// Returns a COPY of task with attachments set to arr, or the key deleted when arr is empty.
+function _withAttachments(task, arr){
+  const t = Object.assign({}, task);
+  if(arr.length) t.attachments = arr; else delete t.attachments;
+  return t;
+}
+
 // recency helpers (2026-07-11 recency-guard). _ua = effective edit time,
 // _ca = creation time. Numeric-safe; missing fields -> 0. Clamped (D3): a
 // timestamp more than 2 min ahead of the trust ceiling is untrusted -> treated
@@ -1425,6 +1462,11 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
             // (newer edit wins) and no id can be inferred as a deletion.
             w = Object.assign({}, l, { checklist: mergeChecklist(null, (l&&l.checklist)||[], (r&&r.checklist)||[], true) });
           }
+          // CR-KT-015: GUARD 1 declared the base unreliable -> pure union (base = null),
+          // same as the checklist above. A removal may come back; no image is lost.
+          if(Array.isArray(l && l.attachments) || Array.isArray(r && r.attachments)){
+            w = _withAttachments(w, mergeAttachments(null, l && l.attachments, r && r.attachments));
+          }
           resultMap.set(id, w);
         } else {
           resultMap.set(id, r);
@@ -1501,6 +1543,12 @@ function mergeCollection(baseArr, localArr, remoteArr, remoteSavedAt, localSaved
           ? ((_echoKeep.checklist || []).map(c => Object.assign({}, c)))
           : mergeChecklist(b && b.checklist, (l && l.checklist) || [], (r && r.checklist) || [], _winIsLocal)
       });
+    }
+    // CR-KT-015: image attachments are membership, not a field of the winner, so the
+    // whole-object winner would drop the other side's added image. The cron-echo rule
+    // (_echoKeep) does NOT apply: normalizeDailyResets never touches attachments.
+    if(Array.isArray(l && l.attachments) || Array.isArray(r && r.attachments)){
+      winner = _withAttachments(winner, mergeAttachments(b && b.attachments, l && l.attachments, r && r.attachments));
     }
     // K3 (2026-09-11): same shape as the F4 splice above -- the whole-object winner also
     // discarded the OTHER side's habit taps. cUp/cDown are additive quantities, not
@@ -2458,6 +2506,10 @@ async function _syncNowAttempt(transientRetryCount){
       return;
     }
 
+    // CR-KT-015: blobs go up BEFORE the state that names them. A throw here aborts the
+    // round before syncApply and before any state upload (retried on the next sync).
+    await syncUploadPendingAttachments(merged);
+
     syncApply(merged);
 
     // FIX 2026-07-11: freeze ONE serialization of merged before any await.
@@ -2597,6 +2649,7 @@ async function _syncForcePushAttempt(attempt){
       const remote = await dbxDownload(STATE_PATH);
       rev = remote ? remote.rev : null;
     }catch(e){ /* proceed with rev=null; an add-mode upload 409s harmlessly into the retry below if something actually exists */ }
+    await syncUploadPendingAttachments(local); // CR-KT-015: blobs before the state that names them
     const up = await dbxUpload(STATE_PATH, wrap(local), rev);
     // 2026-09-18: syncBasePut returns false (never throws) when the IDB write fails.
     // Discarding it and writing lastError:null reported success while the PREVIOUS
@@ -2729,6 +2782,86 @@ async function dbxUploadText(path, text, _retriedAuth, _freshTok){
     throw new HttpError("Dropbox backup upload failed: " + res.status + (detail ? " " + detail : ""), res.status, _retryAfterMs(res));
   }
   return await res.json();
+}
+
+// ---- CR-KT-015: task image attachments (blobs live outside state.json) ----
+// Full image /attachments/<sha>.jpg, thumbnail /attachments/<sha>_t.jpg. Content
+// addressed, so a file never changes: upload with mode "add", and a path conflict
+// means the file is already there = success. Deleting blobs is out of scope (D9).
+const ATT_DIR = "/attachments";
+function attBlobPaths(sha){ return [ATT_DIR + "/" + sha + ".jpg", ATT_DIR + "/" + sha + "_t.jpg"]; }
+
+async function dbxUploadBlob(path, blob, _retriedAuth, _freshTok){
+  const tok = _freshTok || await syncToken();
+  const res = await fetch("https://content.dropboxapi.com/2/files/upload", {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer " + tok,
+      "Content-Type": "application/octet-stream",
+      "Dropbox-API-Arg": dbxArgHeader({ path: path, mode: { ".tag": "add" }, autorename: false, mute: true })
+    },
+    body: blob
+  });
+  if(res.status === 401 && !_retriedAuth){
+    return dbxUploadBlob(path, blob, true, await syncToken(true));
+  }
+  if(res.status === 409){
+    let summary = "";
+    try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
+    if(summary.indexOf("path/conflict") !== -1 || summary.indexOf("conflict") !== -1) return "exists";
+    throw new HttpError("attachment upload failed: 409 " + summary.slice(0, 200), 409);
+  }
+  if(!res.ok){
+    let detail = ""; try{ detail = (await res.text()).slice(0, 200); }catch(e){}
+    throw new HttpError("attachment upload failed: " + res.status + (detail ? " " + detail : ""), res.status, _retryAfterMs(res));
+  }
+  return "ok";
+}
+
+// Binary download for one blob. null when the file is absent (not_found).
+async function dbxDownloadBlob(path, _retriedAuth, _freshTok){
+  const tok = _freshTok || await syncToken();
+  const res = await fetch("https://content.dropboxapi.com/2/files/download", {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + tok, "Dropbox-API-Arg": dbxArgHeader({ path: path }) }
+  });
+  if(res.status === 401 && !_retriedAuth){ return dbxDownloadBlob(path, true, await syncToken(true)); }
+  if(res.status === 409){
+    let summary = "";
+    try{ summary = String((((await res.json()) || {}).error_summary) || ""); }catch(e){}
+    if(!summary || summary.indexOf("not_found") !== -1) return null;
+    throw new HttpError("attachment download failed: 409 " + summary.slice(0, 200), 409);
+  }
+  if(!res.ok){
+    throw new HttpError("attachment download failed: " + res.status, res.status, _retryAfterMs(res));
+  }
+  return await res.blob();
+}
+
+// Upload every not-yet-uploaded blob that `state` names, BEFORE the state.json push
+// (contract item 4: readers tolerate a missing blob, but the writer must not publish a
+// sha before its bytes). Full image first, then thumbnail, per sha. Any failure other
+// than "already there" throws, which aborts the round before the state upload.
+// The blob store lives in app.js: attPendingForShas(shas) -> [{sha, kind, blob}] and
+// attMarkUploaded(sha, kind).
+async function syncUploadPendingAttachments(state){
+  if(typeof attPendingForShas !== "function") return;
+  const shas = [];
+  ((state && state.tasks) || []).forEach(function(t){
+    (t && Array.isArray(t.attachments) ? t.attachments : []).forEach(function(a){
+      if(a && typeof a.sha === "string" && /^[0-9a-f]{64}$/.test(a.sha) && shas.indexOf(a.sha) === -1) shas.push(a.sha);
+    });
+  });
+  if(!shas.length) return;
+  const items = await attPendingForShas(shas);
+  for(const sha of shas){
+    for(const kind of ["full", "thumb"]){
+      const it = (items || []).find(function(x){ return x && x.sha === sha && x.kind === kind; });
+      if(!it) continue;
+      await dbxUploadBlob(attBlobPaths(sha)[kind === "thumb" ? 1 : 0], it.blob);
+      if(typeof attMarkUploaded === "function") await attMarkUploaded(sha, kind);
+    }
+  }
 }
 
 async function syncUploadBackupBlob(blob){
@@ -3990,6 +4123,11 @@ if(typeof window !== "undefined"){
     resolveDailyConflict: resolveDailyConflict, // F3 (2026-07-11): daily-aware both-changed tiebreak, exposed for unit tests
     normalizeDailyResets: normalizeDailyResets, // F3 (2026-07-11): reset overlay, exposed for unit tests
     mergeChecklist: mergeChecklist, // F4 (2026-07-11): per-subtask merge, exposed for unit tests
+    mergeAttachments: mergeAttachments, // CR-KT-015: image-list union merge, exposed for unit tests
+    dbxUploadBlob: dbxUploadBlob,
+    uploadPendingAttachments: syncUploadPendingAttachments, // CR-KT-015: blobs-before-state upload step
+    attBlobPaths: attBlobPaths,
+    downloadBlob: dbxDownloadBlob,
     dailyEventDay: dailyEventDay,
     mergeDevices: mergeDevices,
     cleanDevices: cleanDevices,

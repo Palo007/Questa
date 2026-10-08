@@ -15,7 +15,10 @@ Rules (mirror of the app state schema — keep in sync with AGENTS.md):
       only the winning row's map, so it is UNIONED per task id by (ua, cUp, cDown)
       across all inputs, for the same reason char.abs is: a dropped entry lets a
       later merge count that peer's taps a second time. NOT tokenized.
-  char                  : singleton,   ts=updatedAt  -> newest wins
+    task.attachments (CR-KT-015): [{id,sha,mime,w,h,bytes,addedAt}] image metadata
+      (bytes live in Dropbox, not the export). UNIONED by item id across all inputs
+      (no base = pure union), ordered addedAt asc then id, key omitted when empty.
+  char                 : singleton,   ts=updatedAt  -> newest wins
     char.abs (K3, 2026-09-11): {deviceId: {ua,xp,gold,mp}} -- the per-device
       "already absorbed" record sync.js writes when it accumulates earnings
       (sync.js _charAccumulate). It is UNIONED across all inputs by
@@ -581,6 +584,40 @@ def merge_exports(inputs):
                     per = _cabs.get(row.get("id"))
                     if per:
                         row["cAbs"] = {dev: e for dev, (_r, e) in per.items()}
+            # CR-KT-015: union task.attachments by id across every input (no base, so
+            # a pure union: nothing is treated as removed). First file listed wins for a
+            # duplicate id (items are immutable). Order: addedAt ascending, then id --
+            # the same rule as sync.js mergeAttachments. The key is OMITTED when the
+            # union is empty, never written as []. NOT tokenized (no field-map code).
+            _att = {}    # task id -> {item id: item}
+            for (fn, d) in inputs:
+                if not _has_section(d, "tasks"):
+                    continue
+                rows = d.get("tasks")
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict) or "id" not in row:
+                        continue
+                    a = row.get("attachments")
+                    if not isinstance(a, list):
+                        continue
+                    per = _att.setdefault(row["id"], {})
+                    for it in a:
+                        if isinstance(it, dict) and it.get("id") is not None and it["id"] not in per:
+                            per[it["id"]] = it
+            for row in rows_out:
+                per = _att.get(row.get("id"))
+                if per:
+                    def _akey(it):
+                        try:
+                            ts = float(it.get("addedAt") or 0)
+                        except (TypeError, ValueError):
+                            ts = 0.0
+                        return (ts, str(it["id"]))
+                    row["attachments"] = sorted(per.values(), key=_akey)
+                else:
+                    row.pop("attachments", None)
         # After whole-row merge, apply the daily reset overlay keyed to the
         # joined lastCron (mirrors sync.js mergedLastCron -> normalizeDailyResets).
         # This corrects the case where an older, not-yet-cronned export's

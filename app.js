@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings. It must equal sw.js VERSION.
-const APP_VERSION = "v2026.10.08-1923";
+const APP_VERSION = "v2026.10.08-2041";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -3426,6 +3426,7 @@ function metaRow(t){
 // the right-side rail: counter/streak + subtask toggle, pinned to top of card
 function rail(t){
   let items = [];
+  if(typeof attRailItem==='function') items.push(attRailItem(t)); // CR-KT-015: image thumbnail (+N)
   items.push('<span class="railItem diff-'+esc(t.difficulty)+'">'+esc(t.difficulty)+'</span>');
   const hasRem = t.reminders && t.reminders[0] && t.reminders[0].enabled;
   if(hasRem){
@@ -6357,6 +6358,309 @@ function drawReminderEditor(t) {
 }
 
 
+/* BEGIN_ATTACH_HELPERS */
+// CR-KT-015: image attachments on tasks. Metadata (task.attachments = [{id, sha, mime,
+// w, h, bytes, addedAt}], max 5, immutable items, key OMITTED when empty) syncs inside
+// state.json; the JPEG bytes live in a local IndexedDB store (db "questa-att", NOT the
+// main db, so no IDB_VERSION bump) and in Dropbox /attachments/<sha>.jpg + <sha>_t.jpg.
+// Deleting a task or an image never deletes a blob (orphan sweep is deferred).
+const ATT_MAX = 5;
+const ATT_FULL_EDGE = 1600, ATT_THUMB_EDGE = 256;
+const ATT_URLS = {};      // blob key -> object URL (memory only)
+const ATT_INFLIGHT = {};  // blob key -> Promise (de-duplicates downloads)
+const ATT_MISS = {};      // blob key -> last failed attempt (ms), 60 s cool-down
+let _attDbP = null;
+// Pure: scale (w,h) so the long edge is at most maxEdge. Never upscales.
+function attFitSize(w, h, maxEdge){
+  w = Number(w); h = Number(h);
+  if(!(w > 0 && h > 0) || !(maxEdge > 0)) return {w:0, h:0};
+  const m = Math.max(w, h);
+  if(m <= maxEdge) return {w:Math.round(w), h:Math.round(h)};
+  const s = maxEdge / m;
+  return {w:Math.max(1, Math.round(w * s)), h:Math.max(1, Math.round(h * s))};
+}
+// Pure: what saveTask() should write for task.attachments. Applies the USER's delta
+// (ids added / removed relative to the sheet's open-time baseline) onto the LIVE list,
+// so an image a background sync merged in while the sheet was open is not lost.
+function attReconcileSave(baseArr, editArr, liveArr){
+  const ids = function(a){ return new Set((Array.isArray(a) ? a : []).filter(function(x){ return x && x.id != null; }).map(function(x){ return x.id; })); };
+  const baseIds = ids(baseArr), editIds = ids(editArr);
+  const live = (Array.isArray(liveArr) ? liveArr : []).filter(function(x){ return x && x.id != null; });
+  const removed = new Set(); baseIds.forEach(function(id){ if(!editIds.has(id)) removed.add(id); });
+  const out = live.filter(function(x){ return !removed.has(x.id); });
+  const have = new Set(out.map(function(x){ return x.id; }));
+  (Array.isArray(editArr) ? editArr : []).forEach(function(x){
+    if(x && x.id != null && !baseIds.has(x.id) && !have.has(x.id)){ out.push(x); have.add(x.id); }
+  });
+  return out;
+}
+function attList(t){ return (t && Array.isArray(t.attachments)) ? t.attachments.filter(function(a){ return a && typeof a.sha === 'string' && a.sha; }) : []; }
+function attDb(){
+  if(_attDbP) return _attDbP;
+  _attDbP = new Promise(function(resolve, reject){
+    let req; try{ req = indexedDB.open('questa-att', 1); }catch(e){ reject(e); return; }
+    req.onupgradeneeded = function(){ req.result.createObjectStore('blobs', {keyPath:'key'}); };
+    req.onsuccess = function(){ resolve(req.result); };
+    req.onerror = function(){ reject(req.error); };
+  });
+  _attDbP.catch(function(){ _attDbP = null; });
+  return _attDbP;
+}
+function attTx(mode, fn){
+  return attDb().then(function(db){ return new Promise(function(resolve, reject){
+    const tx = db.transaction('blobs', mode); let out;
+    tx.oncomplete = function(){ resolve(out); }; tx.onerror = tx.onabort = function(){ reject(tx.error); };
+    out = fn(tx.objectStore('blobs'));
+  }); });
+}
+function attGet(key){
+  return attDb().then(function(db){ return new Promise(function(resolve, reject){
+    const rq = db.transaction('blobs', 'readonly').objectStore('blobs').get(key);
+    rq.onsuccess = function(){ resolve(rq.result || null); }; rq.onerror = function(){ reject(rq.error); };
+  }); });
+}
+function attPut(key, blob, pending){ return attTx('readwrite', function(st){ st.put({key:key, blob:blob, pending:!!pending}); }); }
+// Called by sync.js before the state upload: [{sha, kind:'full'|'thumb', blob}] for blobs not yet uploaded.
+async function attPendingForShas(shas){
+  const out = [];
+  for(const sha of shas){
+    for(const kind of ['full', 'thumb']){
+      let rec = null; try{ rec = await attGet(kind === 'thumb' ? sha + '_t' : sha); }catch(e){}
+      if(rec && rec.pending && rec.blob) out.push({sha:sha, kind:kind, blob:rec.blob});
+    }
+  }
+  return out;
+}
+async function attMarkUploaded(sha, kind){
+  const key = kind === 'thumb' ? sha + '_t' : sha;
+  const rec = await attGet(key);
+  if(rec){ rec.pending = false; await attPut(key, rec.blob, false); }
+}
+async function attSha256Hex(blob){
+  const d = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+  return Array.from(new Uint8Array(d)).map(function(b){ return b.toString(16).padStart(2, '0'); }).join('');
+}
+function attEncode(bmp, size, quality){
+  const c = document.createElement('canvas'); c.width = size.w; c.height = size.h;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size.w, size.h); // JPEG has no alpha
+  ctx.drawImage(bmp, 0, 0, size.w, size.h);
+  return new Promise(function(resolve, reject){
+    c.toBlob(function(b){ b ? resolve(b) : reject(new Error('encode failed')); }, 'image/jpeg', quality);
+  });
+}
+// The canvas re-encode drops EXIF (and with it GPS). Orientation is baked in first.
+async function attProcessFile(file){
+  const bmp = await createImageBitmap(file, {imageOrientation:'from-image'});
+  try{
+    const full = attFitSize(bmp.width, bmp.height, ATT_FULL_EDGE);
+    const th = attFitSize(bmp.width, bmp.height, ATT_THUMB_EDGE);
+    const fullBlob = await attEncode(bmp, full, 0.8);
+    const thumbBlob = await attEncode(bmp, th, 0.7);
+    return {sha: await attSha256Hex(fullBlob), w:full.w, h:full.h, bytes:fullBlob.size, fullBlob:fullBlob, thumbBlob:thumbBlob};
+  } finally { if(bmp && bmp.close) bmp.close(); }
+}
+function attPaint(key, url){
+  document.querySelectorAll('img[data-attkey="' + key + '"]').forEach(function(el){ el.src = url; });
+}
+// Resolve a blob key to an object URL: local store first, then Dropbox (only when sync is
+// connected), de-duplicated. Never throws; null = not available yet (placeholder shown).
+function attEnsure(key){
+  if(ATT_URLS[key]) return Promise.resolve(ATT_URLS[key]);
+  if(ATT_INFLIGHT[key]) return ATT_INFLIGHT[key];
+  if(ATT_MISS[key] && Date.now() - ATT_MISS[key] < 60000) return Promise.resolve(null);
+  const p = (async function(){
+    let rec = null; try{ rec = await attGet(key); }catch(e){}
+    let blob = rec && rec.blob;
+    if(!blob){
+      const qs = window.QuestaSync;
+      let on = false; try{ const cfg = qs && qs.cfg && qs.cfg(); on = !!(cfg && cfg.enabled); }catch(e){}
+      if(on && qs.downloadBlob && qs.attBlobPaths){
+        const thumb = key.length > 64;
+        blob = await qs.downloadBlob(qs.attBlobPaths(key.slice(0, 64))[thumb ? 1 : 0]);
+        if(blob){ try{ await attPut(key, blob, false); }catch(e){} }
+      }
+    }
+    if(!blob){ ATT_MISS[key] = Date.now(); return null; }
+    const url = URL.createObjectURL(blob);
+    ATT_URLS[key] = url; attPaint(key, url);
+    return url;
+  })().catch(function(){ ATT_MISS[key] = Date.now(); return null; }).then(function(u){ delete ATT_INFLIGHT[key]; return u; });
+  ATT_INFLIGHT[key] = p;
+  return p;
+}
+function attThumbImg(sha, cls){
+  const key = sha + '_t', url = ATT_URLS[key];
+  if(!url) attEnsure(key);
+  return '<img class="' + cls + '" data-attkey="' + esc(key) + '" alt="" draggable="false"' + (url ? ' src="' + url + '"' : '') + '>';
+}
+// Task row: first thumbnail + "+N". Tap opens the viewer and must not toggle/edit/drag.
+function attRailItem(t){
+  const a = attList(t);
+  if(!a.length) return '';
+  return '<span class="attRow" title="Images" onclick="event.stopPropagation();attOpenViewer(\'' + jsq(String(t.id)) + '\',0)">' +
+    attThumbImg(a[0].sha, 'attThumb') + (a.length > 1 ? '<b class="attMore">+' + (a.length - 1) + '</b>' : '') + '</span>';
+}
+// Editor sheet section (reads EDIT).
+function attEditorBlock(t){
+  const a = attList(t);
+  let h = '<label>Images</label><div class="attGrid" id="eAtt">';
+  a.forEach(function(x, i){
+    h += '<div class="attItem" onclick="attOpenViewerEdit(' + i + ')">' + attThumbImg(x.sha, 'attThumb') +
+      '<button type="button" class="attDel" title="Remove image" onclick="event.stopPropagation();attRemove(' + i + ')">✕</button></div>';
+  });
+  h += '</div>';
+  const full = a.length >= ATT_MAX;
+  h += '<input type="file" id="eAttFile" accept="image/*" multiple style="display:none" onchange="attPickFiles(this)">';
+  h += '<button type="button" class="btn ghost" style="padding:8px" ' + (full ? 'disabled' : '') + ' onclick="document.getElementById(\'eAttFile\').click()">+ Add image</button>';
+  if(full) h += '<div class="small" style="margin-top:6px">Up to ' + ATT_MAX + ' images per task.</div>';
+  return h;
+}
+async function attPickFiles(input){
+  const files = Array.from((input && input.files) || []);
+  if(input) input.value = '';
+  if(!EDIT || !files.length) return;
+  let failed = 0;
+  for(const f of files){
+    if(!EDIT) return; // sheet closed mid-processing
+    if(attList(EDIT).length >= ATT_MAX){ toast('Up to ' + ATT_MAX + ' images per task'); break; }
+    try{
+      const r = await attProcessFile(f);
+      await attPut(r.sha, r.fullBlob, true);
+      await attPut(r.sha + '_t', r.thumbBlob, true);
+      if(!EDIT) return;
+      if(!Array.isArray(EDIT.attachments)) EDIT.attachments = [];
+      if(!EDIT.attachments.some(function(x){ return x && x.sha === r.sha; })){
+        EDIT.attachments.push({id:uid(), sha:r.sha, mime:'image/jpeg', w:r.w, h:r.h, bytes:r.bytes, addedAt:Date.now()});
+      }
+    }catch(e){ failed++; }
+  }
+  if(failed) toast(failed + ' image' + (failed > 1 ? 's' : '') + ' could not be added');
+  if(EDIT) drawSheet();
+}
+function attRemove(i){
+  if(!EDIT || !Array.isArray(EDIT.attachments)) return;
+  EDIT.attachments.splice(i, 1);
+  if(!EDIT.attachments.length) delete EDIT.attachments;
+  drawSheet();
+}
+// ---- full-screen viewer: pinch zoom + pan (pointer events), double-tap 1x/2.5x ----
+const ATTV = {items:[], i:0, s:1, tx:0, ty:0, ptrs:new Map(), lastTap:0, pinch:null, el:null, popped:false};
+function attOpenViewer(taskId, idx){
+  const t = (S.tasks || []).find(function(x){ return String(x.id) === String(taskId); });
+  attShowViewer(attList(t), idx);
+}
+function attOpenViewerEdit(idx){ attShowViewer(attList(EDIT), idx); }
+function attViewerEl(){
+  if(ATTV.el) return ATTV.el;
+  const el = document.createElement('div'); el.id = 'attViewer';
+  el.innerHTML = '<img alt="" draggable="false"><div class="avMsg"></div>' +
+    '<button type="button" class="avBtn avClose" aria-label="Close">✕</button>' +
+    '<button type="button" class="avBtn avPrev" aria-label="Previous">‹</button>' +
+    '<button type="button" class="avBtn avNext" aria-label="Next">›</button><div class="avCount"></div>';
+  document.body.appendChild(el);
+  el.querySelector('.avClose').onclick = function(e){ e.stopPropagation(); attCloseViewer(); };
+  el.querySelector('.avPrev').onclick = function(e){ e.stopPropagation(); attViewerGo(-1); };
+  el.querySelector('.avNext').onclick = function(e){ e.stopPropagation(); attViewerGo(1); };
+  ['avClose', 'avPrev', 'avNext'].forEach(function(c){ el.querySelector('.' + c).addEventListener('pointerdown', function(e){ e.stopPropagation(); }); });
+  el.addEventListener('pointerdown', attPtrDown);
+  el.addEventListener('pointermove', attPtrMove);
+  el.addEventListener('pointerup', attPtrUp);
+  el.addEventListener('pointercancel', attPtrUp);
+  document.addEventListener('keydown', function(e){
+    if(ATTV.el && ATTV.el.classList.contains('show')){
+      if(e.key === 'Escape'){ e.preventDefault(); attCloseViewer(); }
+      else if(e.key === 'ArrowLeft') attViewerGo(-1);
+      else if(e.key === 'ArrowRight') attViewerGo(1);
+    }
+  });
+  window.addEventListener('popstate', function(){ if(ATTV.el && ATTV.el.classList.contains('show')){ ATTV.popped = false; attCloseViewer(true); } });
+  ATTV.el = el;
+  return el;
+}
+function attShowViewer(items, idx){
+  if(!items || !items.length) return;
+  ATTV.items = items; ATTV.i = Math.max(0, Math.min(idx || 0, items.length - 1));
+  const el = attViewerEl(); el.classList.add('show');
+  try{ history.pushState({attv:1}, ''); ATTV.popped = true; }catch(e){ ATTV.popped = false; }
+  attViewerLoad();
+}
+function attCloseViewer(fromPop){
+  if(!ATTV.el) return;
+  ATTV.el.classList.remove('show');
+  ATTV.ptrs.clear(); ATTV.pinch = null;
+  if(!fromPop && ATTV.popped){ ATTV.popped = false; try{ history.back(); }catch(e){} }
+}
+function attViewerGo(d){
+  const n = ATTV.items.length; if(n < 2) return;
+  ATTV.i = (ATTV.i + d + n) % n; attViewerLoad();
+}
+function attViewerApply(){
+  const img = ATTV.el.querySelector('img');
+  img.style.transform = 'translate(' + ATTV.tx + 'px,' + ATTV.ty + 'px) scale(' + ATTV.s + ')';
+}
+function attViewerLoad(){
+  const el = ATTV.el, img = el.querySelector('img'), msg = el.querySelector('.avMsg');
+  const it = ATTV.items[ATTV.i], sha = it.sha, mine = ATTV.i;
+  ATTV.s = 1; ATTV.tx = 0; ATTV.ty = 0; attViewerApply();
+  el.querySelector('.avCount').textContent = ATTV.items.length > 1 ? (ATTV.i + 1) + ' / ' + ATTV.items.length : '';
+  el.querySelector('.avPrev').style.display = el.querySelector('.avNext').style.display = ATTV.items.length > 1 ? '' : 'none';
+  img.removeAttribute('src'); msg.textContent = 'Loading…';
+  attEnsure(sha).then(function(url){
+    if(ATTV.i !== mine || !el.classList.contains('show')) return;
+    if(url){ img.src = url; msg.textContent = ''; return; }
+    attEnsure(sha + '_t').then(function(turl){
+      if(ATTV.i !== mine || !el.classList.contains('show')) return;
+      if(turl) img.src = turl;
+    });
+    msg.textContent = 'Image not available yet (it will load after the next sync)';
+  });
+}
+function attPtrDown(e){
+  ATTV.ptrs.set(e.pointerId, {x:e.clientX, y:e.clientY, px:e.clientX, py:e.clientY});
+  try{ ATTV.el.setPointerCapture(e.pointerId); }catch(_){}
+  if(ATTV.ptrs.size === 2){
+    const p = Array.from(ATTV.ptrs.values());
+    ATTV.pinch = {d:Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y) || 1, s:ATTV.s, cx:(p[0].x + p[1].x) / 2, cy:(p[0].y + p[1].y) / 2, tx:ATTV.tx, ty:ATTV.ty};
+  }
+  if(ATTV.ptrs.size === 1){
+    const t = Date.now();
+    if(t - ATTV.lastTap < 300){
+      ATTV.lastTap = 0;
+      if(ATTV.s > 1){ ATTV.s = 1; ATTV.tx = 0; ATTV.ty = 0; }
+      else {
+        const k = 2.5; // zoom about the tap point
+        ATTV.tx = e.clientX - k * e.clientX; ATTV.ty = e.clientY - k * e.clientY; ATTV.s = k;
+      }
+      attViewerApply();
+    } else ATTV.lastTap = t;
+  }
+}
+function attPtrMove(e){
+  const p = ATTV.ptrs.get(e.pointerId); if(!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+  if(ATTV.ptrs.size >= 2 && ATTV.pinch){
+    const q = Array.from(ATTV.ptrs.values());
+    const d = Math.hypot(q[0].x - q[1].x, q[0].y - q[1].y) || 1;
+    const s = Math.max(1, Math.min(8, ATTV.pinch.s * d / ATTV.pinch.d));
+    const cx = (q[0].x + q[1].x) / 2, cy = (q[0].y + q[1].y) / 2;
+    // keep the content point under the original pinch centre under the current centre
+    const k = s / ATTV.pinch.s;
+    ATTV.tx = cx - (ATTV.pinch.cx - ATTV.pinch.tx) * k;
+    ATTV.ty = cy - (ATTV.pinch.cy - ATTV.pinch.ty) * k;
+    ATTV.s = s;
+    if(s === 1){ ATTV.tx = 0; ATTV.ty = 0; }
+    attViewerApply();
+  } else if(ATTV.ptrs.size === 1 && ATTV.s > 1){
+    ATTV.tx += dx; ATTV.ty += dy; attViewerApply();
+  }
+}
+function attPtrUp(e){
+  ATTV.ptrs.delete(e.pointerId);
+  if(ATTV.ptrs.size < 2) ATTV.pinch = null;
+}
+/* END_ATTACH_HELPERS */
 // 2026-09-23 (edit-sheet-keyboard): "+ Add subtask" routes through here so
 // focus lands on the row just added. drawSheet() rebuilds #sheet with
 // innerHTML, which destroys focus -- previously the new input needed a tap
@@ -6463,6 +6767,7 @@ function drawSheet(){
       '<button class="btn ghost" style="padding:8px" onclick="addSubtask()">+ Add subtask</button></div>';
   }
   h+=drawReminderEditor(t);
+  if(typeof attEditorBlock==='function') h+=attEditorBlock(t); // CR-KT-015
   h+='<label>Notes / comments</label><textarea id="eNotes" oninput="EDIT.notes=this.value" placeholder="Notes, thoughts, log...">'+esc(t.notes)+'</textarea>';
   h+=tagEditorBlock(t);
   h+='<div class="rowBtns">'+(t.id?'<button class="btn danger" onclick="deleteTask()">Delete</button>':'')+
@@ -6515,6 +6820,7 @@ function saveTask(){
   delete EDIT._tempReminderTime;
   delete EDIT._tempReminderDate;
   delete EDIT._tempReminderDays;
+  if(Array.isArray(EDIT.attachments) && !EDIT.attachments.length) delete EDIT.attachments; // never write []
   if(EDIT.id){
     const idx=S.tasks.findIndex(x=>x.id===EDIT.id);
     // 2026-09-18: bail before touching `orig`. When a concurrent sync merge tombstoned
@@ -6530,6 +6836,12 @@ function saveTask(){
     // change this?" test below measures against it, never against the live record —
     // a background sync merge may have moved the live record since the sheet opened.
     const _base = EDIT_BASE || orig;
+    // CR-KT-015: apply only the user's image delta onto the live list (a peer's image
+    // merged in while the sheet was open survives); the key is omitted when empty.
+    if(typeof attReconcileSave==='function'){
+      const _ra = attReconcileSave(_base.attachments, EDIT.attachments, orig.attachments);
+      if(_ra.length) EDIT.attachments = _ra; else delete EDIT.attachments;
+    }
     (function(){
       const _baseById = new Map((_base.checklist||[]).filter(c=>c&&c.id!=null).map(c=>[c.id,c]));
       (EDIT.checklist||[]).forEach(c=>{

@@ -1,0 +1,54 @@
+{
+  "_note": "CR-KT-015 golden fixture. Hand-written. sha = sha256 hex of the FULL jpeg bytes (here: of the strings 'fixture-a', 'fixture-b', 'fixture-c'). Never edit after ACCEPTED (P4).",
+  "blobPaths": {
+    "full": "/attachments/06ada57c26aa5cf429e9f2c0a99e3e4a42daecd45fc4c955d7c1399ab4227ae8.jpg",
+    "thumb": "/attachments/06ada57c26aa5cf429e9f2c0a99e3e4a42daecd45fc4c955d7c1399ab4227ae8_t.jpg"
+  },
+  "taskWithAttachments": {
+    "id": "mgk1a2b3cxyz1",
+    "type": "todo",
+    "title": "Fix the bike",
+    "notes": "",
+    "tags": [],
+    "createdAt": 1791460000000,
+    "updatedAt": 1791460500000,
+    "attachments": [
+      { "id": "mgk1a9z0aaaa1", "sha": "06ada57c26aa5cf429e9f2c0a99e3e4a42daecd45fc4c955d7c1399ab4227ae8", "mime": "image/jpeg", "w": 1600, "h": 1200, "bytes": 284113, "addedAt": 1791460100000 },
+      { "id": "mgk1a9z0bbbb2", "sha": "e0ef56d6eb603d9ffe87e74c28b8210b0ea93839e2ea4fb64f1fc2c66e95e391", "mime": "image/jpeg", "w": 1200, "h": 1600, "bytes": 301772, "addedAt": 1791460400000 }
+    ]
+  },
+  "taskWithoutAttachments_note": "No 'attachments' key and 'attachments': [] both mean no images. Writers omit the key when the list is empty.",
+  "merge_cases": [
+    {
+      "name": "both sides add a different image -> union, order by addedAt then id",
+      "base":   [],
+      "local":  [{ "id": "A", "sha": "06ada57c26aa5cf429e9f2c0a99e3e4a42daecd45fc4c955d7c1399ab4227ae8", "mime": "image/jpeg", "w": 1600, "h": 1200, "bytes": 284113, "addedAt": 1791460100000 }],
+      "remote": [{ "id": "B", "sha": "e0ef56d6eb603d9ffe87e74c28b8210b0ea93839e2ea4fb64f1fc2c66e95e391", "mime": "image/jpeg", "w": 1200, "h": 1600, "bytes": 301772, "addedAt": 1791460050000 }],
+      "expected_ids": ["B", "A"]
+    },
+    {
+      "name": "local removes A (A in base, unchanged on remote), remote adds C -> A gone, C kept",
+      "base":   [{ "id": "A", "sha": "06ada57c26aa5cf429e9f2c0a99e3e4a42daecd45fc4c955d7c1399ab4227ae8", "mime": "image/jpeg", "w": 1600, "h": 1200, "bytes": 284113, "addedAt": 1791460100000 }],
+      "local":  [],
+      "remote": [
+        { "id": "A", "sha": "06ada57c26aa5cf429e9f2c0a99e3e4a42daecd45fc4c955d7c1399ab4227ae8", "mime": "image/jpeg", "w": 1600, "h": 1200, "bytes": 284113, "addedAt": 1791460100000 },
+        { "id": "C", "sha": "39610bca9443fdb6ae772d781954447c0bb23c05bcb2f08e72d6cc5f70209726", "mime": "image/jpeg", "w": 800, "h": 600, "bytes": 90211, "addedAt": 1791460200000 }
+      ],
+      "expected_ids": ["C"]
+    },
+    {
+      "name": "no base (first sync / force push) -> pure union, nothing is treated as removed",
+      "base":   null,
+      "local":  [],
+      "remote": [{ "id": "A", "sha": "06ada57c26aa5cf429e9f2c0a99e3e4a42daecd45fc4c955d7c1399ab4227ae8", "mime": "image/jpeg", "w": 1600, "h": 1200, "bytes": 284113, "addedAt": 1791460100000 }],
+      "expected_ids": ["A"]
+    },
+    {
+      "name": "both sides remove A -> stays removed",
+      "base":   [{ "id": "A", "sha": "06ada57c26aa5cf429e9f2c0a99e3e4a42daecd45fc4c955d7c1399ab4227ae8", "mime": "image/jpeg", "w": 1600, "h": 1200, "bytes": 284113, "addedAt": 1791460100000 }],
+      "local":  [],
+      "remote": [],
+      "expected_ids": []
+    }
+  ]
+}

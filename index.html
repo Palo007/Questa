@@ -830,6 +830,13 @@
     padding: 8px 10px;
     transition: background-color 0.1s ease;
   }
+  /* Activity tab (CR-KT-012) */
+  .evDayHdr{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:8px 2px 0}
+  .evScopeRow{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+  .evScopeChip{background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:11px}
+  .evScopeChip b{cursor:pointer;margin-left:4px;padding:0 3px}
+  .evLink{color:var(--accent);cursor:pointer;text-decoration:underline}
+  .evRow{cursor:pointer}
   .evRow:hover {
     background: rgba(255,255,255,0.02);
   }
@@ -1091,6 +1098,7 @@
   <button data-tab="todos"><span class="ic">&#9989;</span>To-Dos</button>
   <button data-tab="analytics"><span class="ic">&#128202;</span>Analytics</button>
   <button data-tab="rewards"><span class="ic">&#127978;</span>Rewards</button>
+  <button data-tab="activity"><span class="ic">&#128203;</span>Activity</button>
 </nav>
 </div>
 

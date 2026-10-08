@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings. It must equal sw.js VERSION.
-const APP_VERSION = "v2026.09.26-0209";
+const APP_VERSION = "v2026.10.08-1923";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -2027,7 +2027,7 @@ function importEventsBackfill(ev){
         } else {
           toast('Loaded '+added+' events');
         }
-        if(TAB==='analytics') render();
+        if(TAB==='analytics'||TAB==='activity') render();
       });
     });
   };
@@ -4755,21 +4755,17 @@ function refreshAnalytics(){
   const body=document.getElementById('anBody'); if(!body)return;
   const oldDetails = document.querySelector('.anDetails');
   const wasOpen = oldDetails ? oldDetails.hasAttribute('open') : false;
-  const oldEventDetails = document.querySelector('.anEventDetails');
-  const eventWasOpen = oldEventDetails ? oldEventDetails.hasAttribute('open') : false;
   let h='';
   h+=anViewsUI(from,to);
   h+='<details class="anDetails"'+(wasOpen?' open':'')+'><summary>🔎 Full activity detail (reps, adherence, streaks, event log)</summary><div class="anDetailWrap">'+anDetailDashboard(from,to)+'</div></details>';
-  h+='<details class="anDetails anEventDetails"'+(eventWasOpen?' open':'')+'><summary>&#128203; Event log detail (live)</summary>'+
-     '<div id="anEventDetail" class="anCard full"><div class="k">From IndexedDB event log</div>'+
-     '<div class="anNote">Loading events&hellip;</div></div></details>';
+  // The event feed moved to the Activity tab (CR-KT-012); link to it for this period.
+  h+='<div class="anNote"><span class="evLink" onclick="evOpenActivityRange('+Math.round(wf[0])+','+Math.round(wf[1])+')">See activity for this period &rarr;</span></div>';
   body.innerHTML=h;
   bindHeatTooltips();
   bindTips('.spkPt'); bindTips('.spkHit'); bindTips('.barHit');
   if(VDRAFT){ if(MBUILD) drawMetricEditor(); else drawViewBuilder(); }
   bindMetricChips();
   if(MEDIT && !MBUILD) drawMetricEditor();
-  renderEventDetail(wf[0], wf[1]);
 }
 function anDetailDashboard(from,to){
   const p=anPrefs();
@@ -4887,6 +4883,130 @@ let _evPage=0;          // current page
 let _evWin=null;        // [from,to] of the last render (to detect window change)
 const EV_PAGE_SIZE=25;  // events per page
 
+// ---- Activity tab (CR-KT-012 / RE-PWA-010) ---------------------------------
+// The feed lives on its own bottom-nav tab. Everything renderEventDetail uses
+// is declared HERE, inside the `let _evWin` .. renderEventDetail slice that the
+// tests extract, so the slice stays self-contained.
+let _evRange='all';      // range chip: 7d|30d|90d|180d|1y|all
+let _evCustom=null;      // [from,to] handed over by Analytics "See activity", or null
+let _evTaskId=null;      // task filter (from the task editor "History" button)
+let _evTaskTitle='';     // title shown on the task chip
+let _evPageEvents=[];    // events on the rendered page; row onclick passes only an index
+const EV_RANGES=[['7d','7d',7],['30d','30d',30],['90d','90d',90],['180d','180d',180],['1y','1y',365],['all','All',0]];
+const EV_MAX_TS=8.64e15; // largest valid Date, so "to" never cuts off new events
+
+// Label for the day header above a group of rows. Compares LOCAL calendar
+// y/m/d (never subtracts 86400000: a DST day is 23 or 25 hours long).
+function evDayLabel(ts,nowTs){
+  const d=new Date(ts), n=new Date(nowTs);
+  const same=(a,b)=>a.getFullYear()===b.getFullYear()&&a.getMonth()===b.getMonth()&&a.getDate()===b.getDate();
+  if(same(d,n)) return 'Today';
+  if(same(d,new Date(n.getFullYear(),n.getMonth(),n.getDate()-1))) return 'Yesterday';
+  const o={weekday:'short',day:'numeric',month:'short'};
+  if(d.getFullYear()!==n.getFullYear()) o.year='numeric';
+  return d.toLocaleDateString(undefined,o);
+}
+function _evDayKey(ts){ const d=new Date(ts); return d.getFullYear()+'-'+d.getMonth()+'-'+d.getDate(); }
+function _evHms(ts){
+  const d=new Date(ts), p=n=>String(n).padStart(2,'0');
+  return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+}
+function evRangeFor(key,nowTs){
+  const r=EV_RANGES.find(x=>x[0]===key);
+  if(!r||!r[2]) return [0,EV_MAX_TS];
+  return [nowTs-r[2]*86400000,EV_MAX_TS];
+}
+function evRangeBounds(nowTs){
+  if(_evCustom) return [_evCustom[0],_evCustom[1]];
+  return evRangeFor(_evRange,nowTs==null?Date.now():nowTs);
+}
+function evSetRange(key){
+  _evRange=key||'all'; _evCustom=null; _evPage=0;
+  render();
+}
+function evClearCustom(){ _evCustom=null; _evPage=0; render(); }
+function evClearTask(){ _evTaskId=null; _evTaskTitle=''; _evPage=0; render(); }
+// Analytics -> Activity for the same period.
+function evOpenActivityRange(from,to){
+  _evCustom=[from,to]; _evPage=0;
+  if(TAB==='activity') render(); else switchTab('activity',0);
+}
+// Task editor "History" button: feed filtered to one task.
+function evOpenTaskHistory(id){
+  const t=(S.tasks||[]).find(x=>x.id===id);
+  const title=(EDIT&&EDIT.id===id&&EDIT.title)||(t&&t.title)||'';
+  closeSheet();
+  _evTaskId=id; _evTaskTitle=title; _evPage=0; _evFilterType='all'; _evSearchQuery='';
+  if(TAB==='activity') render(); else switchTab('activity',0);
+}
+function viewActivity(){
+  let h='<div class="anWrap"><div class="anHeaderRow"><h2>&#128203; Activity</h2></div>';
+  h+='<div class="evFilterRow" id="evRangeRow">'+EV_RANGES.map(r=>
+    '<span class="evFilterChip'+(!_evCustom&&_evRange===r[0]?' active':'')+'" onclick="evSetRange(\''+r[0]+'\')">'+r[1]+'</span>').join('')+'</div>';
+  if(_evCustom||_evTaskId){
+    h+='<div class="evScopeRow">';
+    if(_evCustom) h+='<span class="evScopeChip">Analytics period <b onclick="evClearCustom()" title="Remove">&times;</b></span>';
+    if(_evTaskId) h+='<span class="evScopeChip">Task: '+esc(_evTaskTitle||'(untitled)')+' <b onclick="evClearTask()" title="Remove">&times;</b></span>';
+    h+='</div>';
+  }
+  h+='<div id="anEventDetail" class="anCard full"><div class="k">From IndexedDB event log</div><div class="anNote">Loading events&hellip;</div></div></div>';
+  return h;
+}
+// Called by render() after viewActivity() is in the DOM.
+function evRenderActivity(){
+  const w=evRangeBounds();
+  renderEventDetail(w[0],w[1]);
+}
+// Footer under the list: how many diagnostic rows the hideSyncDiag pref hid,
+// or a reminder that they are shown. Empty when there is nothing to say.
+function evDiagFooterHtml(hidden,shown,hideOn){
+  if(hideOn&&hidden>0) return '<div class="anNote evDiagFoot">'+hidden+' hidden (diagnostics) &middot; <span class="evLink" onclick="evToggleDiag(false)">Show</span></div>';
+  if(!hideOn&&shown>0) return '<div class="anNote evDiagFoot">Diagnostics shown &middot; <span class="evLink" onclick="evToggleDiag(true)">Hide</span></div>';
+  return '';
+}
+// Same pref as the Settings toggle (setHideSyncDiag) -- single source of truth.
+function evToggleDiag(hide){
+  S.prefs.hideSyncDiag=!!hide; save();
+  if(_evWin) renderEventDetail(_evWin[0],_evWin[1]);
+}
+function _evFallbackCopy(t){
+  try{
+    const ta=document.createElement('textarea');
+    ta.value=t; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); toast('Copied');
+    document.body.removeChild(ta);
+  }catch(_){ toast('Copy failed'); }
+}
+function evCopyDetail(i){
+  const e=_evPageEvents[i]; if(!e) return;
+  const t=JSON.stringify(e,null,2);
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(()=>toast('Copied')).catch(()=>_evFallbackCopy(t));
+  } else _evFallbackCopy(t);
+}
+// Read-only detail for one event. Every synced string goes through esc().
+function evRowDetailHtml(e,i){
+  const line=(k,v)=>'<div style="display:flex;gap:8px;margin:2px 0;"><span style="opacity:.65;min-width:84px;">'+esc(k)+'</span><span style="word-break:break-all;">'+v+'</span></div>';
+  const d=new Date(e.ts);
+  let h='<div style="text-align:left;font-size:13px;">';
+  h+=line('Kind',esc(String(e.kind==null?'':e.kind)));
+  h+=line('Task',e.taskTitle?esc(String(e.taskTitle))+(e.taskType?' <span style="opacity:.65">('+esc(String(e.taskType))+')</span>':''):'&mdash;');
+  h+=line('Time',esc(d.toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short',year:'numeric'})+' '+_evHms(e.ts)));
+  h+='<div style="opacity:.65;margin:8px 0 2px;">Fields</div>';
+  Object.keys(e).forEach(k=>{
+    const v=e[k]; if(v==null) return;
+    h+=line(k,esc(typeof v==='object'?JSON.stringify(v):String(v)));
+  });
+  h+='<pre style="max-height:34vh;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:11px;margin:10px 0;padding:8px;background:rgba(0,0,0,.25);border-radius:8px;">'+esc(JSON.stringify(e,null,2))+'</pre>';
+  h+='<button class="btn ghost" onclick="evCopyDetail('+i+')">Copy</button></div>';
+  return h;
+}
+function evOpenDetail(i){
+  const e=_evPageEvents[i]; if(!e) return;
+  alertDialog('Event detail','',evRowDetailHtml(e,i));
+}
+
 function evSetFilter(type){
   _evFilterType=type||'all';
   _evPage=0;
@@ -4974,7 +5094,10 @@ function deviceDisplayName(devices, devId){
 function renderEventDetail(from,to){
   const box=document.getElementById('anEventDetail'); if(!box) return;
   _evWin=[from,to];
-  getEvents({from:from, to:to}).then(all=>{
+  // includeDiag:true: getEvents drops DIAGNOSTIC_KINDS by default, which made
+  // the hideSyncDiag pref a no-op here. Filter by the pref below and report the
+  // count in a footer instead (Activity tab, CR-KT-012).
+  getEvents({from:from, to:to, includeDiag:true}).then(all=>{
     const cur=document.getElementById('anEventDetail'); if(!cur) return; // tab changed
     if(!all.length){
       cur.innerHTML='<div class="k">From IndexedDB event log</div>'+
@@ -5015,14 +5138,18 @@ function renderEventDetail(from,to){
     }
 
     // Filter events
+    const hideDiag = !!(S.prefs && S.prefs.hideSyncDiag);
+    let diagHidden = 0, diagShown = 0; // counted over the whole window, before chip/search/task filters
     const filtered = sorted.filter(e=>{
       const cat = getEventCategory(e);
       // T7: conflictResolved has its own toggle, separate from hideSyncDiag
       if(cat === CONFLICT_CATEGORY){
         if(S.prefs && S.prefs.hideConflictDecisions) return false;
-      } else if(S.prefs && S.prefs.hideSyncDiag && isFeedNoise(e)){
-        return false;
+      } else if(isFeedNoise(e)){
+        if(hideDiag){ diagHidden++; return false; }
+        diagShown++;
       }
+      if(_evTaskId && e.taskId !== _evTaskId) return false;
       if(_evFilterType!=='all' && cat!==_evFilterType) return false;
       if(_evSearchQuery.trim()){
         const q=_evSearchQuery.toLowerCase().trim();
@@ -5097,8 +5224,10 @@ function renderEventDetail(from,to){
       if(eo) eo.textContent = filtered.length + ' events shown in feed';
     }
 
+    const diagFoot = evDiagFooterHtml(diagHidden, diagShown, hideDiag);
     if(!filtered.length){
-      feedContent.innerHTML='<div class="anNote" style="text-align:center;padding:16px 0;">No matching events found.</div>';
+      _evPageEvents = [];
+      feedContent.innerHTML='<div class="anNote" style="text-align:center;padding:16px 0;">No matching events found.</div>'+diagFoot;
       return;
     }
 
@@ -5107,8 +5236,11 @@ function renderEventDetail(from,to){
     const startI=_evPage*EV_PAGE_SIZE;
     const pageEvents=filtered.slice(startI,startI+EV_PAGE_SIZE);
 
+    _evPageEvents = pageEvents;
+    const nowTs = Date.now();
+    let lastDay = null;
     let listHtml='<div class="evFeed">';
-    pageEvents.forEach(e=>{
+    pageEvents.forEach((e,evIdx)=>{
       let icon = '📝';
       let badgeClass = 'evBadge-default';
       let badgeName = 'Event';
@@ -5116,7 +5248,7 @@ function renderEventDetail(from,to){
       let rightSide = '';
 
       const cat = getEventCategory(e);
-      const titleHtml = e.taskTitle ? '<strong class="evTaskClick" onclick="evSetSearch(\'' + jsq(e.taskTitle) + '\')">' + esc(e.taskTitle) + '</strong>' : '';
+      const titleHtml = e.taskTitle ? '<strong class="evTaskClick" onclick="event.stopPropagation();evSetSearch(\'' + jsq(e.taskTitle) + '\')">' + esc(e.taskTitle) + '</strong>' : '';
 
       const _NEWK={create:1,edit:1,delete:1,uncomplete:1,rewardCreate:1,rewardEdit:1,rewardDelete:1,purchase:1,restore:1};
       if (e.kind === 'subtask') {
@@ -5295,16 +5427,19 @@ function renderEventDetail(from,to){
         rightSide = '<div class="evRewardRow"><span class="evLossHp">' + hpLossStr + '</span></div>';
       }
 
-      const date = new Date(e.ts);
-      const dateStr = date.toLocaleDateString(undefined, {month: 'short', day: 'numeric'});
-      const timeStr = String(date.getHours()).padStart(2,'0') + ':' + String(date.getMinutes()).padStart(2,'0');
-      const fullTime = dateStr + ' @ ' + timeStr;
+      // Date now lives in the day header above the first row of each local day.
+      const fullTime = _evHms(e.ts);
+      const dayKey = _evDayKey(e.ts);
+      if(dayKey !== lastDay){
+        lastDay = dayKey;
+        listHtml += '<div class="evDayHdr">' + esc(evDayLabel(e.ts, nowTs)) + '</div>';
+      }
 
       const mark = e.synthetic ? ' <span class="anEvSyn" title="Backfilled from Habitica">~ backfill</span>' : '';
       const _devLabelName = getCachedDeviceName(e.dev);
       const devLabel = e.dev ? ' <span class="evDevice" style="opacity:.65" title="Device ID: '+esc(e.dev)+'">&middot; '+esc(_devLabelName)+'</span>' : '';
 
-      listHtml+='<div class="evRow">'+
+      listHtml+='<div class="evRow" onclick="evOpenDetail('+evIdx+')">'+
          '  <div class="evColIcon">'+icon+'</div>'+
          '  <div class="evColMain">'+
          '    <div class="evDesc">'+desc+'</div>'+
@@ -5331,6 +5466,7 @@ function renderEventDetail(from,to){
       listHtml+='<div class="anNote"><b>'+synCount+'</b> event(s) in window backfilled from Habitica history.</div>';
     }
 
+    listHtml+=diagFoot;
     feedContent.innerHTML=listHtml;
   }).catch((e)=>{
     // 2026-09-19 (round 3): this was a bare `catch(()=>{})`. It threw the cause
@@ -5390,12 +5526,13 @@ function render(){
   renderStats();
   updateHeaderHeightVar();
   const v=document.getElementById('view');
-  v.innerHTML = _bootGateBanner() + (TAB==='habits'?viewHabits() : TAB==='dailies'?viewDailies() : TAB==='todos'?viewTodos() : TAB==='analytics'?viewAnalytics() : viewRewards());
+  v.innerHTML = _bootGateBanner() + (TAB==='habits'?viewHabits() : TAB==='dailies'?viewDailies() : TAB==='todos'?viewTodos() : TAB==='analytics'?viewAnalytics() : TAB==='activity'?viewActivity() : viewRewards());
   if(TAB==='analytics') initAnalytics();
+  if(TAB==='activity') evRenderActivity();
   document.body.classList.toggle('tab-analytics', TAB==='analytics');
   document.body.classList.toggle('bootSyncing', _bootRolloverPending); // D3 todo 11 layer 2
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===TAB));
-  if(TAB!=='analytics') enableDragReorder();
+  if(TAB!=='analytics' && TAB!=='activity') enableDragReorder();
   restoreScroll();
   restoreFocus();
 }
@@ -6329,6 +6466,7 @@ function drawSheet(){
   h+='<label>Notes / comments</label><textarea id="eNotes" oninput="EDIT.notes=this.value" placeholder="Notes, thoughts, log...">'+esc(t.notes)+'</textarea>';
   h+=tagEditorBlock(t);
   h+='<div class="rowBtns">'+(t.id?'<button class="btn danger" onclick="deleteTask()">Delete</button>':'')+
+    (t.id?'<button class="btn ghost" onclick="evOpenTaskHistory(\''+jsq(String(t.id))+'\')">History</button>':'')+
     '<button class="btn ghost" onclick="closeSheet()">Cancel</button>'+
     (S.prefs.saveBtnTop?'':'<button class="btn primary" onclick="saveTask()">Save</button>')+'</div>';
   sheet.innerHTML=h;
@@ -8587,7 +8725,7 @@ async function applyImportSections(data, keys, mode){
         added + ' events restored to this device.',
         eventImportSummaryHTML(impSum));
     }
-    if(TAB==='analytics') render();
+    if(TAB==='analytics'||TAB==='activity') render();
     // F-import: run the same startup day-rollover the app runs on normal load
     // (app.js startDay) so imported dailies get reset / the missed-yesterday
     // prompt fires if the device calendar has advanced. Without this, importing
@@ -8599,7 +8737,7 @@ async function applyImportSections(data, keys, mode){
                       : ('Imported sections: ' + keys.join('+') + ' (' + (replacing ? 'replace' : 'merge') + ')');
     logEvent({kind: 'import', taskTitle: 'Import Data', notes: what});
     toast('Imported');
-    if(TAB==='analytics') render();
+    if(TAB==='analytics'||TAB==='activity') render();
     if(!full){
       alertDialog('Import complete',
         'Restored: ' + keys.map(function(k){ const s=ioSectionByKey(k); return s?s.label:k; }).join(', ') +
@@ -8976,7 +9114,7 @@ function cssColor(c,fallback){
   return (/^#[0-9a-f]{3,8}$/i.test(s)||/^var\(--[a-z0-9-]+\)$/.test(s)||/^[a-z]{3,20}$/i.test(s)) ? s : (fallback||'var(--muted)');
 }
 // Ordered list of screens; used by both the nav bar and swipe navigation.
-const TABS=['habits','dailies','todos','analytics','rewards'];
+const TABS=['habits','dailies','todos','analytics','rewards','activity'];
 // Switch to a tab by name. dir (-1 left / +1 right) drives an optional slide anim.
 function switchTab(tab,dir){
   if(!tab||tab===TAB) return;

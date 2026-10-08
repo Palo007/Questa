@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings. It must equal sw.js VERSION.
-const APP_VERSION = "v2026.10.08-2129";
+const APP_VERSION = "v2026.10.08-2214";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -6873,6 +6873,12 @@ function saveTask(){
     // had made them.
     const upDelta = (EDIT.cUp||0) - (_base.cUp||0);
     const downDelta = (EDIT.cDown||0) - (_base.cDown||0);
+    // CR-KT-016: snapshot the sheet copy for the Activity change list. The write-back
+    // below copies the sheet INTO `orig` and then `EDIT = orig`, so diffing orig vs EDIT
+    // afterwards compared one object with itself and logged no field edit at all. The
+    // checklist is copied because the write-back may push sync-arrived subtasks into
+    // the shared array; those are not the user's edit.
+    const _sheet = Object.assign({}, EDIT, Array.isArray(EDIT.checklist) ? {checklist: EDIT.checklist.slice()} : {});
     // Write back ONLY what the sheet changed. `S.tasks[idx]=EDIT` replaced the live
     // record with the open-time clone, silently discarding everything a concurrent
     // sync merge had written into it (see openEdit's EDIT_BASE comment).
@@ -6955,6 +6961,8 @@ function saveTask(){
     else if(downDelta>0) buzz(100);
     else if(upDelta<0||downDelta<0) buzz(50);
     try{
+      // Block-scoped on purpose: the user's edit is open-time baseline -> sheet copy.
+      const orig = _base, EDIT = _sheet;
       const _ch=[];
       if((orig.title||'')!==(EDIT.title||'')) _ch.push({field:'title',from:orig.title||'',to:EDIT.title||''});
       if((orig.notes||'')!==(EDIT.notes||'')) _ch.push({field:'notes',from:orig.notes||'',to:EDIT.notes||''});

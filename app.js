@@ -1,6 +1,6 @@
 // Questa app logic — extracted from index.html on 2026-06-24 18:48
 // APP_VERSION is stamped on every edit; it is shown at the bottom of Settings. It must equal sw.js VERSION.
-const APP_VERSION = "v2026.10.08-2214";
+const APP_VERSION = "v2026.10.16-1658";
 // Global diagnostic error ring buffer (2026-07-12): mobile has no console, so
 // capture uncaught errors + promise rejections into a bounded buffer that the
 // full diagnostic export (questaFullDiagnostic) includes. Last 50 only.
@@ -2532,24 +2532,28 @@ function reverseGrant(t){
   t.value = clamp(t.value - g.delta, -47.27, 99);
   t._gr = null;
 }
-// undo a same-day logged completion point (used when un-checking)
+// undo the completion point a reverted check-in wrote (used when un-checking).
+// CR-PWA-004 (RE-PWA-021 quirk b): this used to be gated to a point dated the
+// current UTC day (floor(ms/86400000)), so an un-tick after 00:00 UTC -- while
+// still the SAME local day on a UTC+2 device (complete ~00:30 local = 22:30 UTC,
+// un-tick ~02:30 local = 00:30 UTC) -- left the point completed:true although
+// reverseGrant/streak/doneAt had already run; reachable cross-day un-ticks (todos
+// never reset) did the same. Retraction is now unconditional; which of pop-vs-keep
+// applies is still decided by _histCreated + the scored flags below.
 function unlogToday(t){
   if(!t.history || !t.history.length) return;
-  const dayOf = ms => Math.floor(ms/86400000);
   const last = t.history[t.history.length-1];
-  if(dayOf(last.date)===dayOf(Date.now())){
-    if(last.completed){ last.completed=false; }
-    // 2026-09-18 (round 2): only drop a point THIS completion created. logHistory is
-    // a merge -- "same-day events merge... so the series stays one-point-per-day" --
-    // so `last` is frequently a point somebody else wrote: runCron's miss record
-    // (isDue/repeat/value), or an imported history row dated today. The old guard
-    // tested only scoredUp/scoredDown/completed, none of which those carry, so
-    // un-ticking a daily deleted the whole day's record. `_new` is stamped by
-    // logHistory on the push branch and cleared here.
-    if(t._histCreated && !last.scoredUp && !last.scoredDown && !last.completed) t.history.pop();
-    else { last.value = t.value; delete last.reward; }
-    delete t._histCreated;
-  }
+  if(last.completed){ last.completed=false; }
+  // 2026-09-18 (round 2): only drop a point THIS completion created. logHistory is
+  // a merge -- "same-day events merge... so the series stays one-point-per-day" --
+  // so `last` is frequently a point somebody else wrote: runCron's miss record
+  // (isDue/repeat/value), or an imported history row dated today. The old guard
+  // tested only scoredUp/scoredDown/completed, none of which those carry, so
+  // un-ticking a daily deleted the whole day's record. `_new` is stamped by
+  // logHistory on the push branch and cleared here.
+  if(t._histCreated && !last.scoredUp && !last.scoredDown && !last.completed) t.history.pop();
+  else { last.value = t.value; delete last.reward; }
+  delete t._histCreated;
 }
 function uncompleteDaily(t){
   const _gr=t._gr?Object.assign({},t._gr):null;
@@ -2573,6 +2577,7 @@ function uncompleteTodo(t){
   t.done = false;
   delete t.doneAt; // F3 (2026-07-11): see uncompleteDaily
   delete t.doneDay; // 2026-09-18: see uncompleteDaily
+  delete t.completedAt; // CR-PWA-004 (RE-PWA-021 quirk a): retract the completion stamp too -- the analytics todo fallback counts it
   t.updatedAt = now(); // F1 (2026-07-11): see uncompleteDaily
   toast('Reverted');
   try{ logEvent(Object.assign({kind:'uncomplete', taskType:t.type, taskId:t.id, taskTitle:t.title}, _gr?{clawback:{xp:_gr.xp,gold:_gr.gold,mp:_gr.mp}}:{})); }catch(e){}
